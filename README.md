@@ -1,14 +1,30 @@
-# SWORD2
-
-SWift and Optimized Recognition of protein Domains
+# SWORD2: SWift and Optimized Recognition of protein Domains
 
 The SWORD2 partitioning algorithm produces multiple alternative domain assignments for a given protein structure. This unique approach handles ambiguous protein structure partitioning, admitting several solutions. The decomposition of the protein structure into domains is achieved through the hierarchical clustering of Protein Units, evolutionarily preserved structural descriptors at the interface between secondary structures and domains.
 
-This is the repository of the standalone version of SWORD2 proposed as a webserver: https://www.dsimb.inserm.fr/SWORD2/index.html
+<p align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://user-images.githubusercontent.com/25644865/181113256-4c2e9740-014f-4d57-91d0-f5beaf7d51d3.png" width="300">
+  <img alt="" src="https://user-images.githubusercontent.com/25644865/181106191-e97f1ace-fb93-41d1-a4f0-6a84b7fcc2a1.png" width="300">
+</picture>
+</p>
 
-## Abstract
+This is the repository of the standalone version of the corresponding webserver:  
+https://www.dsimb.inserm.fr/SWORD2/index.html
 
-Understanding the functions and origins of proteins requires splitting these macromolecules into fragments that could be independent in terms of folding, activity, or evolution. For that purpose, structural domains are the typical level of analysis, but shorter segments, such as subdomains and supersecondary structures, are insightful as well. Here, we propose SWORD2, a web server for exploring how an input protein structure may be decomposed into ‘Protein Units’ that can be hierarchically assembled to delimit structural domains. For each partitioning solution, the relevance of the identified substructures is estimated through different measures. This multilevel analysis is achieved by integrating our previous work on domain delineation, ‘protein peeling’ and model quality assessment. We hope that SWORD2 will be useful to biologists searching for key regions in their proteins of interest and to bioinformaticians building datasets of protein structures.
+
+
+## Publications
+
+[Cretin, G., Galochkina, T., Vander Meersche, Y., de Brevern, A. G., Postic, G., & Gelly, J. C. (2022).
+SWORD2: hierarchical analysis of protein 3D structures. Nucleic acids research, gkac370.
+50(W1), W732–W738 10.1093/nar/gkac370](https://doi.org/10.1093/nar/gkac370)
+
+[Postic, G., Ghouzam, Y., Chebrek, R., & Gelly, J. C. (2017).
+An ambiguity principle for assigning protein structural domains.
+Science advances, 3(1), e1600552.10.1126/sciadv.1600552](https://doi.org/10.1126/sciadv.1600552)
+
+
 
 ## Install
 
@@ -28,17 +44,17 @@ conda activate sword2
 
 Then, launch SWORD2:
 
-### On a PDB id:
+#### On a PDB id:
 ```
 ./SWORD2.py -p 1jx4 -o results
 ```
 
-### On an AlphaFold predicted structure using its Uniprot Accession Id:
+#### On an AlphaFold predicted structure using its Uniprot Accession Id:
 ```
 ./SWORD2.py -u Q76EI6 -o results
 ```
 
-### On your own PDB structure:
+#### On your own PDB structure:
 ```
 ./SWORD2.py -f ./structure.pdb -o results
 ```
