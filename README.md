@@ -26,14 +26,23 @@ Science advances, 3(1), e1600552.10.1126/sciadv.1600552](https://doi.org/10.1126
 
 
 
-## Install
+## Install (Linux)
 
+(Easy & recommanded)  
 Install the conda environment using the `environment.yml` file:
 ```
 conda env create -f environment.yml
 or
 mamba env create -f environment.yml
 ```
+
+If necessary, a docker is also available:
+```
+docker pull dsimb/sword2
+# or build your own locally
+docker build -t sword2 .
+```
+
 
 ## How to use SWORD2
 
