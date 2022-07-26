@@ -1,0 +1,16 @@
+name: sword2
+channels:
+  - defaults
+dependencies:
+  - python==3.10
+  - perl==5.32
+  - pip
+  - pip:
+    - requests
+    - plotly
+    - numpy
+    - pandas
+    - matplotlib
+    - prody
+    - kaleido
+    - urllib3

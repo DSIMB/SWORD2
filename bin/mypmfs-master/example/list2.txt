@@ -1,0 +1,25 @@
+example/dataset/1A3C.pdb
+example/dataset/1A4I.pdb B
+example/dataset/1A62.pdb
+example/dataset/1A8D.pdb
+example/dataset/1AH7.pdb
+example/dataset/1AHO.pdb
+example/dataset/1AMT.pdb C
+example/dataset/1ATG.pdb
+example/dataset/1BGF.pdb
+example/dataset/1BKR.pdb
+example/dataset/1BX7.pdb
+example/dataset/1BYI.pdb
+example/dataset/1C0P.pdb
+example/dataset/1C1D.pdb
+example/dataset/1C1K.pdb
+example/dataset/1C4Q.pdb
+example/dataset/1C5E.pdb
+example/dataset/1C7K.pdb
+example/dataset/1CC8.pdb
+example/dataset/1CCW.pdb
+example/dataset/1CXQ.pdb
+example/dataset/1CY5.pdb
+example/dataset/1D5T.pdb
+example/dataset/1D8W.pdb
+example/dataset/1DCS.pdb
