@@ -44,9 +44,13 @@ def check_parsing_pdb(uniprot_code, pdb_code, pdb_chain, pdb_file):
     """
     # Custom user file
     if pdb_file:
-        logging.info("Try to parse user input PDB file")
+        logging.info("Try to parse user input structure file")
+        file_ext = os.path.splitext(pdb_file)[1]
         try:
-            prot = parsePDB(pdb_file, chain=pdb_chain)
+            if file_ext in [".cif", ".mmcif"]:
+                prot = parseMMCIF(pdb_file, chain=pdb_chain)
+            else:
+                prot = parsePDB(pdb_file, chain=pdb_chain)
         except Exception as e:
             sys.exit(str(e))
         if prot is None:
@@ -54,7 +58,10 @@ def check_parsing_pdb(uniprot_code, pdb_code, pdb_chain, pdb_file):
             # if the protein has no chain, we set it to "A" by default.
             # It is necessary because the scoring program
             # accepts only PDB files which contain a chain
-            prot = parsePDB(pdb_file)
+            if file_ext in [".cif", ".mmcif"]:
+                prot = parseMMCIF(pdb_file)
+            else:
+                prot = parsePDB(pdb_file)
             if prot is not None and prot.getChids()[0] == ' ':
                 prot.setChids([pdb_chain for i in range(prot.numAtoms())])
             else:
