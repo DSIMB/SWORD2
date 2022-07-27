@@ -96,7 +96,7 @@ def check_parsing_pdb(uniprot_code, pdb_code, pdb_chain, pdb_file):
             sys.exit(str(e))
         # A parsed PDB by ProDy returns an AtomGroup, else it could be an EMD file, which we don't want...
         if type(prot) is not AtomGroup:
-            sys.exit(f"Error: No PDB file could be parsed. Please check that the PDB code {pdb_code} exists in the PDB RCSB database (https://www.rcsb.org) with a legacy PDB format file available, and contains the chain {pdb_chain} exist. Careful, 'A' is different than 'a'. Please note that mmCIF files are not yet supported.")
+            sys.exit(f"Error: No PDB file could be parsed. Please check that the PDB code {pdb_code} exists in the PDB RCSB database (https://www.rcsb.org) with a legacy PDB format file available, and contains the chain {pdb_chain}. Careful, 'A' is different than 'a'. Please note that mmCIF files are not yet supported.")
         if prot is None:
             sys.exit(f"Error: Atomic data could not be parsed. Please check the PDB file corresponding to the code {pdb_code}. Also check that it actually contains the chain {pdb_chain}.")
         # Clean non-standard aa
