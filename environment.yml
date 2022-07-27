@@ -4,6 +4,7 @@ channels:
   - conda-forge
   - salilab
 dependencies:
+  - nomkl
   - python==3.10
   - perl==5.32
   - dssp
@@ -16,4 +17,3 @@ dependencies:
     - matplotlib
     - prody
     - kaleido
-    - urllib3
