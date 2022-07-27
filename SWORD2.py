@@ -198,22 +198,9 @@ def parse_sword(output):
 
 def get_quality_as_nb_bars(quality):
     """
-
+    Transform "*****" or "+++" into number.
     """
-    nb_bars = 0
-    if quality == "*****" or quality == "+++++":
-        nb_bars = 5
-    if quality == "****" or quality == "++++":
-        nb_bars = 4
-    elif quality == "***" or quality == "+++":
-        nb_bars = 3
-    elif quality == "**" or quality == "++":
-        nb_bars = 2
-    elif quality == "*" or quality == "+":
-        nb_bars = 1
-    elif quality == "n/a":
-        nb_bars = 0
-    return nb_bars
+    return len(quality) if quality != "n/a" else 0
 
 def write_partitionings(sword_results, energies):
     """
