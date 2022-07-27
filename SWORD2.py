@@ -329,7 +329,6 @@ def write_domains_histogram(sword_results, domains_colors):
                 columns =['SWORD Domains', 'Count'])
     fig = px.bar(df, x="SWORD Domains", y="Count", color=colors, title="Consistency of domains determined by SWORD")
     fig.update_layout(showlegend=False)
-    fig.show()
     fig.write_image(histogram, scale=4)
 
 
