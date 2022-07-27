@@ -1,7 +1,7 @@
 ### BUILD-STAGE: conda environment
 ##################################
 
-FROM continuumio/miniconda3 AS conda_build
+FROM condaforge/mambaforge:4.12.0-2 AS mamba_build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc g++ libc-dev\
@@ -9,11 +9,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install required python dependencies
 COPY environment.yml .
-RUN conda update -n base -c defaults conda && \
-    conda env create -f environment.yml
+RUN mamba env create -f environment.yml && \
+    conda clean -afy
 
 # Install conda-pack:
-RUN conda install -c conda-forge conda-pack -y
+RUN mamba install -c conda-forge conda-pack -y && \
+    conda clean -afy
 
 # Use conda-pack to create a standalone sword2 environment in /venv:
 RUN conda-pack -j -1 -n sword2 -o /tmp/sword2_env.tar && \
@@ -26,24 +27,10 @@ RUN conda-pack -j -1 -n sword2 -o /tmp/sword2_env.tar && \
 # Cleans up absolute prefixes in any remaining files
 RUN /venv/bin/conda-unpack
 
+### Install and run 
+###################
 
-### COMPILE-STAGE: Install and compile programs 
-###############################################
-FROM ubuntu:20.04 AS compile
-
-COPY --from=conda_build /venv /venv
-
-WORKDIR /sword2
-
-# Copy sources to build the program
-COPY bin/ bin/
-COPY data/ data/
-COPY SWORD2.py SWORD2.py
-
-### RUNTIME-STAGE: Use the slimest image possible
-#################################################
-
-FROM ubuntu:20.04 as runtime
+FROM ubuntu:20.04
 
 LABEL program="SWORD2"
 LABEL description="SWift and Optimized Recognition of protein Domains"
@@ -52,9 +39,13 @@ LABEL maintainer="gabriel.cretin@u-paris.fr"
 
 WORKDIR /sword2
 
-# Keep only necessary files from previous stages: conda env & sword2
-COPY --from=conda_build /venv /venv
-COPY --from=compile /sword2 /sword2
+# Keep only necessary files from previous stage: conda env
+COPY --from=mamba_build /venv /venv
+
+# Copy sources to build the program
+COPY bin/ bin/
+COPY data/ data/
+COPY SWORD2.py SWORD2.py
 
 # Use `bash --login`:
 SHELL ["/bin/bash", "--login", "-c"]
