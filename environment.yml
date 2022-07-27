@@ -1,6 +1,7 @@
 name: sword2
 channels:
   - defaults
+  - conda-forge
 dependencies:
   - python==3.10
   - perl==5.32
