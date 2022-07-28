@@ -502,7 +502,6 @@ if __name__ == '__main__':
     BIN_DIR = os.path.join(BASE_DIR, "bin")
     SWORD_DIR = os.path.join(BIN_DIR, "SWORD/bin/SWORD")
     SWORD = os.path.join(SWORD_DIR, "SWORD")
-    DSSP2PDB = os.path.join(BIN_DIR, "dssp2pdb.pl")
     DISPLAY_SWORD2 = os.path.join(BIN_DIR, "display_SWORD2_output.pl")
 
     # CHECK ENTRIES
@@ -616,20 +615,6 @@ if __name__ == '__main__':
     ######################################################
 
     write_domains_histogram(sword_results, dom_colors)
-
-    #######################
-    # Launch and parse DSSP
-    #######################
-
-    os.rename(os.path.splitext(pdb_chain_file)[0], pdb_chain_file)
-    logging.info(f"Perform DSSP on {os.path.basename(pdb_chain_file)}")
-    execDSSP(pdb_chain_file, outputname=f"{pdb_code_chain}", outputdir=RESULTS_DIR)
-    prot = parseDSSP(os.path.join(RESULTS_DIR, pdb_code_chain + ".dssp"), parsePDB(pdb_chain_file, model=1))
-    logging.info("dssp2pdb: translate DSSP output into a PDB HEADER") 
-    # https://github.com/ivanamihalek/perlscr/blob/master/translation/dssp2pdb.pl
-    dssp_output = os.path.join(RESULTS_DIR, f"{pdb_code_chain}.dssp")
-    cmd_args = f"{DSSP2PDB} {dssp_output} {pdb_chain_file} > {pdb_chain_file}_dssp.pdb"
-    cmd_args = os.system(cmd_args)
 
     #############
     # Contact map
