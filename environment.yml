@@ -7,7 +7,6 @@ dependencies:
   - nomkl
   - python==3.10
   - perl==5.32
-  - dssp
   - pip
   - pip:
     - requests
