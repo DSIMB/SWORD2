@@ -1,5 +1,9 @@
 # SWORD2: SWift and Optimized Recognition of protein Domains
 
+[![DOI](https://zenodo.org/badge/518046197.svg)](https://zenodo.org/badge/latestdoi/518046197)
+[![Docker Pulls](https://img.shields.io/docker/pulls/dsimb/sword2.svg)](https://hub.docker.com/r/dsimb/sword2)
+
+
 The SWORD2 partitioning algorithm produces multiple alternative domain assignments for a given protein structure. This unique approach handles ambiguous protein structure partitioning, admitting several solutions. The decomposition of the protein structure into domains is achieved through the hierarchical clustering of Protein Units, evolutionarily preserved structural descriptors at the interface between secondary structures and domains.
 
 <p align="center">
