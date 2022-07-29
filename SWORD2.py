@@ -140,22 +140,12 @@ def download_af_model(id):
         False if wrong id
         "DOWNLOAD ERROR" if could not download
     """
-    content = []
-    with open(f"{BASE_DIR}/data/accession_ids.txt", "r") as f:
-        for line in f:
-            content.append(line.strip().split(","))
-    uniprot_to_infos_dict = {uniprot_acc: [first_res, last_res, af_db_id, latest_version] for uniprot_acc, first_res, last_res, af_db_id, latest_version in content}
-    try:
-        af_id = uniprot_to_infos_dict[id][2]
-        version = uniprot_to_infos_dict[id][3]
-    except KeyError:
-        sys.exit(f"{id} was not found in AlphaFold DB")
-    name = f"{af_id}-model_v{version}"
+    name = f"AF-{id}-F1-model_v3"
     url = f"https://alphafold.ebi.ac.uk/files/{name}.pdb"
     try:
         response = requests_retry_session().get(url)
     except Exception as x:
-        sys.exit(x)
+        return (False, x)
     with open(f"{RESULTS_DIR}/{name}.pdb", "w") as f:
         f.write(response.text)
     return (True, f"{RESULTS_DIR}/{name}.pdb")
