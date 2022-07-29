@@ -39,8 +39,6 @@ mamba env create -f environment.yml
 If necessary, a docker is also available:
 ```
 docker pull dsimb/sword2
-# or build your own locally
-docker build -t sword2 .
 ```
 
 
@@ -63,7 +61,7 @@ Then, launch SWORD2:
 ./SWORD2.py -u Q76EI6 -o results
 ```
 
-#### On your own PDB structure:
+#### On your own PDB/mmCIF structure:
 ```
 ./SWORD2.py -f ./structure.pdb -o results
 ```
@@ -73,20 +71,20 @@ Then, launch SWORD2:
 To get the full help:
 ```
 $ ./SWORD2.py --help
-usage: SWORD2.py [-h] (-u UNIPROT_CODE | -p PDB_CODE | -f PDB_FILE) [-c PDB_CHAIN] -o OUTPUT
+usage: SWORD2.py [-h] (-u UNIPROT_CODE | -p PDB_CODE | -i INPUT_FILE) [-c PDB_CHAIN] -o OUTPUT
 
 options:
   -h, --help            show this help message and exit
   -u UNIPROT_CODE, --uniprot-code UNIPROT_CODE
-                        AlphaFold Uniprot Accession Id
+                        AlphaFold Uniprot Accession Id.
   -p PDB_CODE, --pdb-code PDB_CODE
-                        PDB code
-  -f PDB_FILE, --pdb-file PDB_FILE
-                        PDB file path
+                        PDB code. The corresponding structure will be downloaded from the PDB database.
+  -i INPUT_FILE, --input-file INPUT_FILE
+                        Path to an input PDB or mmCIF file.
   -c PDB_CHAIN, --pdb-chain PDB_CHAIN
                         PDB chain. Default is A.
   -o OUTPUT, --output OUTPUT
-                        Output directory
+                        Output directory. Results will be generated inside.
 ```
 
 
