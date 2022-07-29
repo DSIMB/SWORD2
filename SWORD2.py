@@ -443,7 +443,7 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("-u", "--uniprot-code", help="AlphaFold Uniprot Accession Id.", type=str)
+    group.add_argument("-u", "--uniprot-code", help="AlphaFold Uniprot Accession Id. The corresponding structure will be downloaded from the AlphaFold database.", type=str)
     group.add_argument("-p", "--pdb-code", help="PDB code. The corresponding structure will be downloaded from the PDB database.", type=str)
     group.add_argument("-i", "--input-file", help="Path to an input PDB or mmCIF file.", type=str)
     parser.add_argument("-c", "--pdb-chain", help="PDB chain. Default is A.", type=str, required=False, default="A")
