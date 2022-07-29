@@ -63,7 +63,7 @@ Then, launch SWORD2:
 
 #### On your own PDB/mmCIF structure:
 ```
-./SWORD2.py -f ./structure.pdb -o results
+./SWORD2.py -i ./structure.pdb -o results
 ```
 
 ## Help
@@ -76,7 +76,7 @@ usage: SWORD2.py [-h] (-u UNIPROT_CODE | -p PDB_CODE | -i INPUT_FILE) [-c PDB_CH
 options:
   -h, --help            show this help message and exit
   -u UNIPROT_CODE, --uniprot-code UNIPROT_CODE
-                        AlphaFold Uniprot Accession Id.
+                        AlphaFold Uniprot Accession Id. The corresponding structure will be downloaded from the AlphaFold database.
   -p PDB_CODE, --pdb-code PDB_CODE
                         PDB code. The corresponding structure will be downloaded from the PDB database.
   -i INPUT_FILE, --input-file INPUT_FILE
