@@ -27,7 +27,7 @@ from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 
 
-def check_parsing_pdb(uniprot_code, pdb_code, pdb_chain, pdb_file):
+def check_parsing_pdb(uniprot_code, pdb_code, pdb_chain, input_file):
     """
     This function tries to fetch and parse the input PDB submitted,
     either PDB code and chain or a whole PDB file downloaded by the user.
@@ -36,21 +36,21 @@ def check_parsing_pdb(uniprot_code, pdb_code, pdb_chain, pdb_file):
         - uniprot_code (str): AlphaFold Uniprot Accession Id
         - pdb_code (str): PDB code to fetch and parse
         - pdb_chain (str): PDB chain to fetch and parse
-        - pdb_file (str): The path to the file downloaded by the user
+        - input_file (str): The path to the file downloaded by the user
 
 
     Returns:
         - prot (ProDy Protein object): if fetched and parsed correctly, else False
     """
     # Custom user file
-    if pdb_file:
+    if input_file:
         logging.info("Try to parse user input structure file")
-        file_ext = os.path.splitext(pdb_file)[1]
+        file_ext = os.path.splitext(input_file)[1]
         try:
             if file_ext in [".cif", ".mmcif"]:
-                prot = parseMMCIF(pdb_file, chain=pdb_chain)
+                prot = parseMMCIF(input_file, chain=pdb_chain)
             else:
-                prot = parsePDB(pdb_file, chain=pdb_chain)
+                prot = parsePDB(input_file, chain=pdb_chain)
         except Exception as e:
             sys.exit(str(e))
         if prot is None:
@@ -59,9 +59,9 @@ def check_parsing_pdb(uniprot_code, pdb_code, pdb_chain, pdb_file):
             # It is necessary because the scoring program
             # accepts only PDB files which contain a chain
             if file_ext in [".cif", ".mmcif"]:
-                prot = parseMMCIF(pdb_file)
+                prot = parseMMCIF(input_file)
             else:
-                prot = parsePDB(pdb_file)
+                prot = parsePDB(input_file)
             if prot is not None and prot.getChids()[0] == ' ':
                 prot.setChids([pdb_chain for i in range(prot.numAtoms())])
             else:
@@ -77,10 +77,10 @@ def check_parsing_pdb(uniprot_code, pdb_code, pdb_chain, pdb_file):
         if not ok:
             sys.exit(f"Error: {response}. Please try again.")
         else:
-            pdb_file = response
+            input_file = response
         # Redirect useful error of ProDy
         try:  # Try to parse PDB file
-            prot = parsePDB(pdb_file, chain=pdb_chain)
+            prot = parsePDB(input_file, chain=pdb_chain)
         except Exception as e:
             sys.exit(str(e))
         # A parsed PDB by ProDy returns an AtomGroup, else it could be an EMD file, which we don't want...
@@ -92,7 +92,7 @@ def check_parsing_pdb(uniprot_code, pdb_code, pdb_chain, pdb_file):
         prot = prot.select('protein and not nonstdaa')
         if prot is None:
             sys.exit(f"Error: No atomic data is left after trying to keep the 20 classical residues. Please check your PDB file.")
-        pdb_file = os.path.basename(pdb_file)
+        input_file = os.path.basename(input_file)
     # Fetch and parse a PDB from a given PDB code and chain
     else:
         logging.info(f"Fetch PDB ID: {pdb_code}")
@@ -443,25 +443,25 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("-u", "--uniprot-code", help="AlphaFold Uniprot Accession Id", type=str)
-    group.add_argument("-p", "--pdb-code", help="PDB code", type=str)
-    group.add_argument("-f", "--pdb-file", help="PDB file path", type=str)
+    group.add_argument("-u", "--uniprot-code", help="AlphaFold Uniprot Accession Id.", type=str)
+    group.add_argument("-p", "--pdb-code", help="PDB code. The corresponding structure will be downloaded from the PDB database.", type=str)
+    group.add_argument("-i", "--input-file", help="Path to an input PDB or mmCIF file.", type=str)
     parser.add_argument("-c", "--pdb-chain", help="PDB chain. Default is A.", type=str, required=False, default="A")
-    parser.add_argument("-o", "--output", help="Output directory", type=str, required=True)
+    parser.add_argument("-o", "--output", help="Output directory. Results will be generated inside.", type=str, required=True)
     args = parser.parse_args()
 
     uniprot_code = args.uniprot_code
     pdb_code = args.pdb_code
-    pdb_file = args.pdb_file
+    input_file = args.input_file
     pdb_chain = args.pdb_chain
     output_dir = args.output
     nb_cpu = multiprocessing.cpu_count()
 
-    if pdb_file:
-        if os.path.exists(pdb_file):
-            pdb_code_chain = os.path.basename(os.path.splitext(pdb_file)[0]) + "_" + pdb_chain
+    if input_file:
+        if os.path.exists(input_file):
+            pdb_code_chain = os.path.basename(os.path.splitext(input_file)[0]) + "_" + pdb_chain
         else:
-            sys.exit("Unable to open file: " + pdb_file)
+            sys.exit("Unable to open file: " + input_file)
     elif uniprot_code:
         pdb_code_chain = uniprot_code + "_" + pdb_chain
     else:
@@ -505,7 +505,7 @@ if __name__ == '__main__':
     DISPLAY_SWORD2 = os.path.join(BIN_DIR, "display_SWORD2_output.pl")
 
     # CHECK ENTRIES
-    prot = check_parsing_pdb(uniprot_code, pdb_code, pdb_chain, pdb_file)
+    prot = check_parsing_pdb(uniprot_code, pdb_code, pdb_chain, input_file)
 
     # ESTIMATE THE RUNTIME
     est_time_in_minutes = int(predict_time(prot))
