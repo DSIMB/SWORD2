@@ -20,14 +20,13 @@ my $osName = $^O;
 
 # check if arch is arm64 or x86_64 and compile accordingly
 if ( !-e $dirname.'/bin/Dssp/dsspcmbi' ) {
-    print STDERR $dirname.'/bin/Dssp/dsspcmbi';
     my $curdir = `pwd`;
     chdir($dirname."/bin/Dssp/");
     if ( $osName eq "darwin" ) {
-        print STDERR "First run: compile for macOS Darwin system.\n";
+        print STDOUT "First run: compile for macOS Darwin system.\n";
         system "./DsspCompileGCCmacos";
     } else {
-        print STDERR "First run: compile for Linux system.\n";
+        print STDOUT "First run: compile for Linux system.\n";
         system "./DsspCompileGCC";
     }
     chdir($curdir);

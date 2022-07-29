@@ -563,6 +563,9 @@ if __name__ == '__main__':
     ##############
 
     logging.info("Launch SWORD")
+    # First run compiles necessary dependency for current arch
+    if not os.path.exists(SWORD_DIR+"/bin/Dssp/dsspcmbi"):
+        subprocess.run(SWORD, capture_output=True)
     cmd_args = f"{DISPLAY_SWORD2} '{SWORD} -i {pdb_code_chain} --dir {RESULTS_DIR} -max 9'"
     cmd_args = shlex.split(cmd_args)
     output = subprocess.run(cmd_args, capture_output=True, check=True)
