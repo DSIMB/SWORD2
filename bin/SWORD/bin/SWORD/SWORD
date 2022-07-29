@@ -14,8 +14,25 @@ use ParseMeasure;
 use ParsePDB;
 use File::Basename;
 my $dirname = dirname(__FILE__);
-
 my $verbose = undef;
+# get the OS name
+my $osName = $^O;
+
+# check if arch is arm64 or x86_64 and compile accordingly
+if ( !-e $dirname.'/bin/Dssp/dsspcmbi' ) {
+    print STDERR $dirname.'/bin/Dssp/dsspcmbi';
+    my $curdir = `pwd`;
+    chdir($dirname."/bin/Dssp/");
+    if ( $osName eq "darwin" ) {
+        print STDERR "First run: compile for macOS Darwin system.\n";
+        system "./DsspCompileGCCmacos";
+    } else {
+        print STDERR "First run: compile for Linux system.\n";
+        system "./DsspCompileGCC";
+    }
+    chdir($curdir);
+}
+
 
 # number of alternative assignments in terms of decomposition levels and domain boundaries
 my ( $alt_l, $alt_b );
@@ -419,6 +436,9 @@ sub peeling {
     my $PDB  = shift;
     $path .= '/PDBs_Clean/';
     my $prog_peeling = "$dirname/bin/Peeling1141";
+    if ( $osName eq "darwin" ) {
+        $prog_peeling = "$dirname/SWORD_bin/Peeling1141_macos_intel_arm64";
+    }
 
     my $temp = `mkdir -p $path$PDB/Peeling/`;
     my $opt_peeling = '-R2 98 -ss2 8 -lspu 30 -mspu 0 -d0 6.0 -delta 1.5 -oss 0 -p 0 -cp 0 -npu 30';
@@ -448,7 +468,12 @@ sub peeling {
     my @temp_fasta = format_array(@FENTfasta);
     my @temp_s2d   = format_array(@FENTs2d);
 
+    # because Peeling binary is not givin the same output
+    # on linux and MacOS
     my $nbCommentLines = 15;
+    if ( $osName eq "darwin" ) {
+        $nbCommentLines = 0;
+    }
 
     foreach ( @lines[ $nbCommentLines .. $#lines + 1 ] ) {
         @start = ();
