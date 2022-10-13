@@ -44,7 +44,6 @@ COPY --from=mamba_build /venv /venv
 
 # Copy sources to build the program
 COPY bin/ bin/
-COPY data/ data/
 COPY SWORD2.py SWORD2.py
 
 # Use `bash --login`:
