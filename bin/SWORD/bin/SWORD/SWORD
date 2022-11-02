@@ -436,7 +436,7 @@ sub peeling {
     $path .= '/PDBs_Clean/';
     my $prog_peeling = "$dirname/bin/Peeling1141";
     if ( $osName eq "darwin" ) {
-        $prog_peeling = "$dirname/SWORD_bin/Peeling1141_macos_intel_arm64";
+        $prog_peeling = "$dirname/SWORD_bin/Peeling1141_macos13_intel_arm64";
     }
 
     my $temp = `mkdir -p $path$PDB/Peeling/`;
