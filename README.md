@@ -69,6 +69,11 @@ Then, launch SWORD2:
 ./SWORD2.py -u Q76EI6 -o results
 ```
 
+#### On an ESMFold predicted structure using its MGnify Id from the ESM Metagenomic Atlas:
+```
+./SWORD2.py -m MGYP000936678158 -o results
+```
+
 #### On your own PDB/mmCIF structure:
 ```
 ./SWORD2.py -i ./structure.pdb -o results
@@ -79,7 +84,7 @@ Then, launch SWORD2:
 To get the full help:
 ```
 $ ./SWORD2.py --help                                                                                                                                                        ─╯
-usage: SWORD2.py [-h] (-u UNIPROT_CODE | -p PDB_CODE | -i INPUT_FILE) [-c PDB_CHAIN] [-x CPU] -o OUTPUT
+usage: SWORD2.py [-h] (-u UNIPROT_ID | -m MGNIFY_ID | -p PDB_ID | -i INPUT_FILE) [-c PDB_CHAIN] [-x CPU] -o OUTPUT
 
 SWORD2: SWift and Optimized Recognition of protein Domains.
 The SWORD2 partitioning algorithm produces multiple alternative
@@ -92,10 +97,13 @@ secondary structures and domains.
 
 options:
   -h, --help            show this help message and exit
-  -u UNIPROT_CODE, --uniprot-code UNIPROT_CODE
+  -u UNIPROT_ID, --uniprot-id UNIPROT_ID
                         AlphaFold Uniprot Accession Id.
-                        The corresponding structure will be downloaded from the AlphaFold database.
-  -p PDB_CODE, --pdb-code PDB_CODE
+                        The corresponding predicted structure will be downloaded from the AlphaFold database.
+  -m MGNIFY_ID, --mgnify-id MGNIFY_ID
+                        MGnify Id.
+                        The corresponding predicted structure will be downloaded from the ESM Metagenomic Atlas database.
+  -p PDB_ID, --pdb-id PDB_ID
                         PDB code.
                         The corresponding structure will be downloaded from the PDB database.
   -i INPUT_FILE, --input-file INPUT_FILE
@@ -106,13 +114,13 @@ optional arguments:
                         PDB chain. Default is A.
   -x CPU, --cpu CPU     How many CPUs to use.
                         Default all (0).
-                        Max on this computer is: 8
+                        Max on this computer is: 32
 
 required arguments:
   -o OUTPUT, --output OUTPUT
                         Output directory.
                         Results will be generated inside in a dedicated directory
-                        named after OUTPUT/PDBCODE_CHAIN/
+                        named after OUTPUT/PDBID_CHAIN/
 ```
 
 
