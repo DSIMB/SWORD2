@@ -323,7 +323,7 @@ def predict_time(prot):
     return str(int(133*math.exp(2.06*10**-3*len(set(prot.getResnums())))/60))
 
 
-def get_energy_and_z_score(pdb, res_list=None):
+def get_energy_and_z_score(BIN_DIR, pdb, res_list=None):
     """
     Calculate pseudo-energy and z-score of a protein or specified residue list
     of the input pdb.
@@ -349,7 +349,7 @@ def get_energy_and_z_score(pdb, res_list=None):
     return energy, z_score
 
 
-def multiprocess_get_energy(i, energies, dom_bounds):
+def multiprocess_get_energy(i, pdb_chain, pdb_code_chain, RESULTS_DIR, BIN_DIR, energies, dom_bounds):
     """
     Calculate the energy and Z-score of PUs and Domains.
 
@@ -368,7 +368,7 @@ def multiprocess_get_energy(i, energies, dom_bounds):
         pu_residues = ""
         dom_residues += ",".join([f"{str(x) + pdb_chain}" for x in range(start_pu, end_pu+1)]) + ","
         pu_residues += ",".join([f"{str(x) + pdb_chain}" for x in range(start_pu, end_pu+1)])
-        pu_energy, pu_z_score = get_energy_and_z_score(f"{RESULTS_DIR}/{pdb_code_chain}", pu_residues)
+        pu_energy, pu_z_score = get_energy_and_z_score(BIN_DIR, f"{RESULTS_DIR}/{pdb_code_chain}", pu_residues)
         energies[(i, j, start_pu, end_pu)] = []
         tmp_list = energies[(i, j, start_pu, end_pu)]
         tmp_list.extend([pu_energy, pu_z_score])

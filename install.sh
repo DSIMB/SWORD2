@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Run SWORD once to compile its dependency: DSSP
-./bin/SWORD &>/dev/null
+./bin/SWORD/bin/SWORD/SWORD &>/dev/null
 if [ -f ./bin/SWORD/bin/SWORD/bin/Dssp/dsspcmbi ]
 then
     echo "Successfully installed SWORD dependency"
