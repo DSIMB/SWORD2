@@ -30,7 +30,7 @@ Science advances, 3(1), e1600552.10.1126/sciadv.1600552](https://doi.org/10.1126
 
 
 
-## Install (Linux, macOS intel/arm64, Windows)
+## Install (Linux, macOS <= 13 Intel, M1/M2, Windows)
 
 (Easy & recommanded)  
 Install the conda environment using the `environment.yml` file:
