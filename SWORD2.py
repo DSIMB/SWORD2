@@ -29,15 +29,15 @@ from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 
 
-def check_parsing_pdb(uniprot_code, mgnify_code, pdb_code, pdb_chain, input_file):
+def check_parsing_pdb(uniprot_id, mgnify_id, pdb_id, pdb_chain, input_file):
     """
     This function tries to fetch and parse the input PDB submitted,
     either PDB code and chain or a whole PDB file downloaded by the user.
 
     Args:
-        - uniprot_code (str): AlphaFold Uniprot Accession Id
-        - mgnify_code (str): MGnifyID for the ESM Metagenomic Atlas
-        - pdb_code (str): PDB code to fetch and parse
+        - uniprot_id (str): AlphaFold Uniprot Accession Id
+        - mgnify_id (str): MGnifyID for the ESM Metagenomic Atlas
+        - pdb_id (str): PDB code to fetch and parse
         - pdb_chain (str): PDB chain to fetch and parse
         - input_file (str): The path to the file downloaded by the user
 
@@ -74,9 +74,9 @@ def check_parsing_pdb(uniprot_code, mgnify_code, pdb_code, pdb_chain, input_file
         if prot is None:
             sys.exit(f"Error: No atomic data is left after trying to keep the 20 classical residues. Please check your PDB file.")
     # Download the AlphaFold model
-    elif uniprot_code:
-        logging.info(f"Download AlphaFold Uniprot Accession ID: {uniprot_code}")
-        ok, response = download_af_model(uniprot_code)
+    elif uniprot_id:
+        logging.info(f"Download AlphaFold Uniprot Accession ID: {uniprot_id}")
+        ok, response = download_af_model(uniprot_id)
         if not ok:
             sys.exit(f"Error: {response}. Please try again.")
         else:
@@ -88,18 +88,18 @@ def check_parsing_pdb(uniprot_code, mgnify_code, pdb_code, pdb_chain, input_file
             sys.exit(str(e))
         # A parsed PDB by ProDy returns an AtomGroup, else it could be an EMD file, which we don't want...
         if type(prot) is not AtomGroup:
-            sys.exit(f"Error: Something went wrong with the AlphaFold Uniprot Accession Id {uniprot_code}. Please make sure chain {pdb_chain} is valid and that it is a valid ID referenced in the AlphaFold database (https://alphafold.ebi.ac.uk/)")
+            sys.exit(f"Error: Something went wrong with the AlphaFold Uniprot Accession Id {uniprot_id}. Please make sure chain {pdb_chain} is valid and that it is a valid ID referenced in the AlphaFold database (https://alphafold.ebi.ac.uk/)")
         if prot is None:
-            sys.exit(f"Error: Atomic data could not be parsed. Please check the PDB file corresponding to the code {pdb_code}. Also check that it actually contains the chain {pdb_chain}.")
+            sys.exit(f"Error: Atomic data could not be parsed. Please check the PDB file corresponding to the code {pdb_id}. Also check that it actually contains the chain {pdb_chain}.")
         # Clean non-standard aa
         prot = prot.select('protein and not nonstdaa')
         if prot is None:
             sys.exit(f"Error: No atomic data is left after trying to keep the 20 classical residues. Please check your PDB file.")
         input_file = os.path.basename(input_file)
     # Download the ESMFold model
-    elif mgnify_code:
-        logging.info(f"Download the ESM Metagenomic Atlas ID: {mgnify_code}")
-        ok, response = download_esm_model(mgnify_code)
+    elif mgnify_id:
+        logging.info(f"Download the ESM Metagenomic Atlas ID: {mgnify_id}")
+        ok, response = download_esm_model(mgnify_id)
         if not ok:
             sys.exit(f"Error: {response}. Please try again.")
         else:
@@ -111,9 +111,9 @@ def check_parsing_pdb(uniprot_code, mgnify_code, pdb_code, pdb_chain, input_file
             sys.exit(str(e))
         # A parsed PDB by ProDy returns an AtomGroup, else it could be an EMD file, which we don't want...
         if type(prot) is not AtomGroup:
-            sys.exit(f"Error: Something went wrong with the ESM Metagenomic Atlas ID (MGnifyID) {mgnify_code}. Please make sure chain {pdb_chain} is valid and that it is a valid ID referenced in the ESM Metagenomic Atlas database (https://esmatlas.com/)")
+            sys.exit(f"Error: Something went wrong with the ESM Metagenomic Atlas ID (MGnifyID) {mgnify_id}. Please make sure chain {pdb_chain} is valid and that it is a valid ID referenced in the ESM Metagenomic Atlas database (https://esmatlas.com/)")
         if prot is None:
-            sys.exit(f"Error: Atomic data could not be parsed. Please check the PDB file corresponding to the code {pdb_code}. Also check that it actually contains the chain {pdb_chain}.")
+            sys.exit(f"Error: Atomic data could not be parsed. Please check the PDB file corresponding to the code {pdb_id}. Also check that it actually contains the chain {pdb_chain}.")
         # Clean non-standard aa
         prot = prot.select('protein and not nonstdaa')
         if prot is None:
@@ -121,17 +121,17 @@ def check_parsing_pdb(uniprot_code, mgnify_code, pdb_code, pdb_chain, input_file
         input_file = os.path.basename(input_file)
     # Fetch and parse a PDB from a given PDB code and chain
     else:
-        logging.info(f"Fetch PDB ID: {pdb_code}")
+        logging.info(f"Fetch PDB ID: {pdb_id}")
         # Redirect useful error of ProDy
         try:  # Try to parse fetched PDB file
-            prot = parsePDB(pdb_code, chain=pdb_chain, folder=RESULTS_DIR, compressed=False)
+            prot = parsePDB(pdb_id, chain=pdb_chain, folder=RESULTS_DIR, compressed=False)
         except Exception as e:
             sys.exit(str(e))
         # A parsed PDB by ProDy returns an AtomGroup, else it could be an EMD file, which we don't want...
         if type(prot) is not AtomGroup:
-            sys.exit(f"Error: No PDB file could be parsed. Please check that the PDB code {pdb_code} exists in the PDB RCSB database (https://www.rcsb.org) with a legacy PDB format file available, and contains the chain {pdb_chain}. Careful, 'A' is different than 'a'. Please note that mmCIF files are not yet supported.")
+            sys.exit(f"Error: No PDB file could be parsed. Please check that the PDB code {pdb_id} exists in the PDB RCSB database (https://www.rcsb.org) with a legacy PDB format file available, and contains the chain {pdb_chain}. Careful, 'A' is different than 'a'. Please note that mmCIF files are not yet supported.")
         if prot is None:
-            sys.exit(f"Error: Atomic data could not be parsed. Please check the PDB file corresponding to the code {pdb_code}. Also check that it actually contains the chain {pdb_chain}.")
+            sys.exit(f"Error: Atomic data could not be parsed. Please check the PDB file corresponding to the code {pdb_id}. Also check that it actually contains the chain {pdb_chain}.")
         # Clean non-standard aa
         prot = prot.select('protein and not nonstdaa')
         if prot is None:
@@ -392,7 +392,7 @@ def get_energy_and_z_score(BIN_DIR, pdb, res_list=None):
     return energy, z_score
 
 
-def multiprocess_get_energy(i, pdb_chain, pdb_code_chain, RESULTS_DIR, BIN_DIR, energies, dom_bounds):
+def multiprocess_get_energy(i, pdb_chain, pdb_id_chain, RESULTS_DIR, BIN_DIR, energies, dom_bounds):
     """
     Calculate the energy and Z-score of PUs and Domains.
 
@@ -411,12 +411,12 @@ def multiprocess_get_energy(i, pdb_chain, pdb_code_chain, RESULTS_DIR, BIN_DIR, 
         pu_residues = ""
         dom_residues += ",".join([f"{str(x) + pdb_chain}" for x in range(start_pu, end_pu+1)]) + ","
         pu_residues += ",".join([f"{str(x) + pdb_chain}" for x in range(start_pu, end_pu+1)])
-        pu_energy, pu_z_score = get_energy_and_z_score(BIN_DIR, f"{RESULTS_DIR}/{pdb_code_chain}", pu_residues)
+        pu_energy, pu_z_score = get_energy_and_z_score(BIN_DIR, f"{RESULTS_DIR}/{pdb_id_chain}", pu_residues)
         energies[(i, j, start_pu, end_pu)] = []
         tmp_list = energies[(i, j, start_pu, end_pu)]
         tmp_list.extend([pu_energy, pu_z_score])
         energies[(i, j, start_pu, end_pu)] = tmp_list
-    dom_energy, dom_z_score = get_energy_and_z_score(BIN_DIR, f"{RESULTS_DIR}/{pdb_code_chain}", dom_residues)
+    dom_energy, dom_z_score = get_energy_and_z_score(BIN_DIR, f"{RESULTS_DIR}/{pdb_id_chain}", dom_residues)
     energies[(i, j)] = []
     tmp_list = energies[(i, j)]
     tmp_list.extend([dom_energy, dom_z_score])
@@ -432,12 +432,12 @@ def write_peeling_results():
         - energies (dict): 
     """
     # Get old resnums
-    peeling_num = os.path.join(RESULTS_DIR, "PDBs_Clean", pdb_code_chain, f"{pdb_code_chain}.num")
+    peeling_num = os.path.join(RESULTS_DIR, "PDBs_Clean", pdb_id_chain, f"{pdb_id_chain}.num")
     with open(peeling_num, "r") as f:
         ori_resnums = [int(resnum) for resnum in f.readline().split()]
     # Parse Peeling.log
     peeling_results = {}
-    peeling_log = os.path.join(RESULTS_DIR, "PDBs_Clean", pdb_code_chain, "Peeling", "Peeling.log")
+    peeling_log = os.path.join(RESULTS_DIR, "PDBs_Clean", pdb_id_chain, "Peeling", "Peeling.log")
     with open(peeling_log, "r") as f:
         # Index of the alternative partitionings
         nb_lvl = 1
@@ -466,7 +466,7 @@ def write_peeling_results():
             f.write(f"""Peeling level {lvl}\n    Number of Protein Units: {data["N"]}\n    Compaction Index: {round(data["CI"], 2)}\n""")
             for start_pu, end_pu in data["PUs"]:
                 pu_residues = ",".join([f"{str(x) + pdb_chain}" for x in range(start_pu, end_pu+1)])
-                pu_energy, pu_z_score = get_energy_and_z_score(BIN_DIR, f"{RESULTS_DIR}/{pdb_code_chain}", pu_residues)
+                pu_energy, pu_z_score = get_energy_and_z_score(BIN_DIR, f"{RESULTS_DIR}/{pdb_id_chain}", pu_residues)
                 f.write(f"""    {str(start_pu)+"-"+str(end_pu):>7}: AUL={int((1-(1/(pu_z_score)**2))*100) if abs(pu_z_score) >= 1 else 0:3}% Z-score={round(pu_z_score, 1)}\n""")
     logging.info("Write the Peeling results")
 
@@ -506,17 +506,17 @@ if __name__ == '__main__':
     group = parser.add_mutually_exclusive_group(required=True)
     optional = parser.add_argument_group('optional arguments')
     required = parser.add_argument_group('required arguments')
-    group.add_argument("-u", "--uniprot-code",
+    group.add_argument("-u", "--uniprot-id",
                         help=textwrap.dedent('''\
                                                 AlphaFold Uniprot Accession Id.
                                                 The corresponding predicted structure will be downloaded from the AlphaFold database.'''), type=str)
-    group.add_argument("-m", "--mgnify-code",
+    group.add_argument("-m", "--mgnify-id",
                         help=textwrap.dedent('''\
                                                 MGnify Id.
                                                 The corresponding predicted structure will be downloaded from the ESM Metagenomic Atlas database.'''), type=str)
-    group.add_argument("-p", "--pdb-code",
+    group.add_argument("-p", "--pdb-id",
                         help=textwrap.dedent('''\
-                                                PDB code.
+                                                PDB id.
                                                 The corresponding structure will be downloaded from the PDB database.'''), type=str)
     group.add_argument("-i", "--input-file", help="Path to an input PDB or mmCIF file.", type=str)
     optional.add_argument("-c", "--pdb-chain", help="PDB chain. Default is A.", type=str, required=False, default="A")
@@ -528,14 +528,14 @@ if __name__ == '__main__':
     required.add_argument("-o", "--output", help=textwrap.dedent('''\
                                                                     Output directory.
                                                                     Results will be generated inside in a dedicated directory 
-                                                                    named after OUTPUT/PDBCODE_CHAIN/'''), 
+                                                                    named after OUTPUT/PDBID_CHAIN/'''), 
                         type=str, required=True)
 
     args = parser.parse_args()
 
-    uniprot_code = args.uniprot_code
-    mgnify_code = args.mgnify_code
-    pdb_code = args.pdb_code
+    uniprot_id = args.uniprot_id
+    mgnify_id = args.mgnify_id
+    pdb_id = args.pdb_id
     input_file = args.input_file
     pdb_chain = args.pdb_chain
     output_dir = args.output
@@ -545,15 +545,15 @@ if __name__ == '__main__':
 
     if input_file:
         if os.path.exists(input_file):
-            pdb_code_chain = os.path.basename(os.path.splitext(input_file)[0]) + "_" + pdb_chain
+            pdb_id_chain = os.path.basename(os.path.splitext(input_file)[0]) + "_" + pdb_chain
         else:
             sys.exit("Unable to open file: " + input_file)
-    elif uniprot_code:
-        pdb_code_chain = uniprot_code + "_" + pdb_chain
-    elif mgnify_code:
-        pdb_code_chain = mgnify_code + "_" + pdb_chain
+    elif uniprot_id:
+        pdb_id_chain = uniprot_id + "_" + pdb_chain
+    elif mgnify_id:
+        pdb_id_chain = mgnify_id + "_" + pdb_chain
     else:
-        pdb_code_chain = pdb_code + "_" + pdb_chain
+        pdb_id_chain = pdb_id + "_" + pdb_chain
 
     confProDy(verbosity="none")
 
@@ -566,7 +566,7 @@ if __name__ == '__main__':
                         datefmt="%Y/%m/%d %H:%M:%S")
 
     # Be conservative, if results directory already exists, create another one with suffix
-    RESULTS_DIR = os.path.join(output_dir, pdb_code_chain)
+    RESULTS_DIR = os.path.join(output_dir, pdb_id_chain)
     if not os.path.exists(RESULTS_DIR):
         os.makedirs(RESULTS_DIR)
     else:
@@ -579,7 +579,7 @@ if __name__ == '__main__':
         formatter = logging.Formatter("%(asctime)s %(levelname)s %(filename)s %(funcName)s() %(lineno)s - %(message)s")
         fh.setFormatter(formatter)
         logging.getLogger('').addHandler(fh)
-        logging.warning(f"Results dir '{os.path.join(output_dir, pdb_code_chain)}' already exists. We created '{RESULTS_DIR}' instead.")
+        logging.warning(f"Results dir '{os.path.join(output_dir, pdb_id_chain)}' already exists. We created '{RESULTS_DIR}' instead.")
 
 
     ######################################
@@ -593,7 +593,7 @@ if __name__ == '__main__':
     DISPLAY_SWORD2 = os.path.join(BIN_DIR, "display_SWORD2_output.pl")
 
     # CHECK ENTRIES
-    prot = check_parsing_pdb(uniprot_code, mgnify_code, pdb_code, pdb_chain, input_file)
+    prot = check_parsing_pdb(uniprot_id, mgnify_id, pdb_id, pdb_chain, input_file)
 
     # ESTIMATE THE RUNTIME
     est_time_in_minutes = int(predict_time(prot))
@@ -608,7 +608,7 @@ if __name__ == '__main__':
     # Write the specific chain as a new PDB file for SWORD
     ######################################################
 
-    pdb_chain_file = os.path.join(RESULTS_DIR, pdb_code_chain + ".pdb")
+    pdb_chain_file = os.path.join(RESULTS_DIR, pdb_id_chain + ".pdb")
     logging.info("Write a clean version of the PDB: remove non standard residues")
     # Remove residues which have insertion codes
     res_to_remove = " "
@@ -656,7 +656,7 @@ if __name__ == '__main__':
     # First run compiles necessary dependency for current arch
     if not os.path.exists(SWORD_DIR+"/bin/Dssp/dsspcmbi"):
         subprocess.run(SWORD, capture_output=True)
-    cmd_args = f"{DISPLAY_SWORD2} '{SWORD} -i {pdb_code_chain} --dir {RESULTS_DIR} -max 9'"
+    cmd_args = f"{DISPLAY_SWORD2} '{SWORD} -i {pdb_id_chain} --dir {RESULTS_DIR} -max 9'"
     cmd_args = shlex.split(cmd_args)
     output = subprocess.run(cmd_args, capture_output=True, check=True)
     output = output.stdout.decode("utf-8")
@@ -680,7 +680,7 @@ if __name__ == '__main__':
     energies = manager.dict()
     for i, part in sword_results["DOMAINS"].items():
         with multiprocessing.Pool(processes=nb_cpu) as p:
-            FUNC = partial(multiprocess_get_energy, i, pdb_chain, pdb_code_chain, RESULTS_DIR, BIN_DIR, energies)
+            FUNC = partial(multiprocess_get_energy, i, pdb_chain, pdb_id_chain, RESULTS_DIR, BIN_DIR, energies)
             p.imap_unordered(FUNC, list(part["BOUNDARIES"].items()))
             p.close()
             p.join()
@@ -723,7 +723,7 @@ if __name__ == '__main__':
 
     os.makedirs(os.path.join(RESULTS_DIR, "Contact_Probability_Matrix"), exist_ok=True)
     # Load the contact map calculated by Peeling
-    mat = np.loadtxt(os.path.join(RESULTS_DIR, "PDBs_Clean", pdb_code_chain, "file_proba_contact.mat"))
+    mat = np.loadtxt(os.path.join(RESULTS_DIR, "PDBs_Clean", pdb_id_chain, "file_proba_contact.mat"))
     for i, part in sword_results["DOMAINS"].items():
         # Draw the PUs of the alternative partition: 1 image per alternative
         adapt_height_image = 6.5 + (sum([len(domain) for j, domain in part["BOUNDARIES"].items()]) % 8) * 0.01
