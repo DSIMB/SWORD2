@@ -1,5 +1,9 @@
+OS:=$(shell uname)
+CFLAGS  = -std=c++0x -Wall -Wextra -O3 -march=native
+ifeq ($(OS),Darwin)
+    CFLAGS  = -std=c++0x -Wall -Wextra -O3
+endif
 CC      = g++
-CFLAGS  = -std=c++0x -Wall -Wextra -O3
 SRC1    = src/training.cpp
 SRC2    = src/scoring.cpp
 EXE1    = training
