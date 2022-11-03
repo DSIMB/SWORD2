@@ -45,6 +45,10 @@ If necessary, a docker is also available:
 docker pull dsimb/sword2
 ```
 
+Compile necessary dependencies:
+```
+bash install.sh
+```
 
 ## How to use SWORD2
 
