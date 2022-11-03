@@ -13,6 +13,7 @@ import shutil
 import plotly.express as px
 import subprocess
 import sys
+import textwrap
 import time
 from copy import copy
 from functools import partial
@@ -23,6 +24,7 @@ import pandas as pd
 import requests
 from matplotlib import patches
 from prody import *
+from multiprocessing import cpu_count
 from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 
@@ -431,13 +433,57 @@ if __name__ == '__main__':
     # Parse arguments
     #################
 
-    parser = argparse.ArgumentParser()
+    def check_cpu(nb_cpu):
+        """
+        Check if the user input CPU nb is valid
+        """
+        try:
+            nb_cpu = int(nb_cpu)
+        except ValueError as e:
+            print("Unable to cast ", type(nb_cpu), " into integer (int)")
+            raise argparse.ArgumentTypeError(
+                "Error option -c/--cpu: please input an integer or string integer"
+            ) from e
+        if 0 <= nb_cpu <= cpu_count():
+            return nb_cpu
+        raise argparse.ArgumentTypeError(
+            f"Error option -c/--cpu: nb_cpu should be 0 <= nb_cpu <= {cpu_count()}")
+
+    parser = argparse.ArgumentParser(
+                description=textwrap.dedent('''\
+                    SWORD2: SWift and Optimized Recognition of protein Domains.
+                    The SWORD2 partitioning algorithm produces multiple alternative 
+                    domain assignments for a given protein structure. 
+                    This unique approach handles ambiguous protein structure partitioning, 
+                    admitting several solutions. The decomposition of the protein structure
+                    into domains is achieved through the hierarchical clustering of Protein Units, 
+                    evolutionarily preserved structural descriptors at the interface between 
+                    secondary structures and domains.'''),
+                formatter_class=argparse.RawTextHelpFormatter)
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("-u", "--uniprot-code", help="AlphaFold Uniprot Accession Id. The corresponding structure will be downloaded from the AlphaFold database.", type=str)
-    group.add_argument("-p", "--pdb-code", help="PDB code. The corresponding structure will be downloaded from the PDB database.", type=str)
+    optional = parser.add_argument_group('optional arguments')
+    required = parser.add_argument_group('required arguments')
+    group.add_argument("-u", "--uniprot-code",
+                        help=textwrap.dedent('''\
+                                                AlphaFold Uniprot Accession Id.
+                                                The corresponding structure will be downloaded from the AlphaFold database.'''), type=str)
+    group.add_argument("-p", "--pdb-code",
+                        help=textwrap.dedent('''\
+                                                PDB code.
+                                                The corresponding structure will be downloaded from the PDB database.'''), type=str)
     group.add_argument("-i", "--input-file", help="Path to an input PDB or mmCIF file.", type=str)
-    parser.add_argument("-c", "--pdb-chain", help="PDB chain. Default is A.", type=str, required=False, default="A")
-    parser.add_argument("-o", "--output", help="Output directory. Results will be generated inside.", type=str, required=True)
+    optional.add_argument("-c", "--pdb-chain", help="PDB chain. Default is A.", type=str, required=False, default="A")
+    optional.add_argument("-x", "--cpu", help=textwrap.dedent(f'''\
+                                                                How many CPUs to use.
+                                                                Default all (0). 
+                                                                Max on this computer is: {cpu_count()}'''),
+                        default=0, type=check_cpu, required=False)
+    required.add_argument("-o", "--output", help=textwrap.dedent('''\
+                                                                    Output directory.
+                                                                    Results will be generated inside in a dedicated directory 
+                                                                    named after OUTPUT/PDBCODE_CHAIN/'''), 
+                        type=str, required=True)
+
     args = parser.parse_args()
 
     uniprot_code = args.uniprot_code
@@ -445,7 +491,9 @@ if __name__ == '__main__':
     input_file = args.input_file
     pdb_chain = args.pdb_chain
     output_dir = args.output
-    nb_cpu = multiprocessing.cpu_count()
+    nb_cpu = args.cpu
+    if nb_cpu == 0:
+        nb_cpu = cpu_count()
 
     if input_file:
         if os.path.exists(input_file):
@@ -501,8 +549,10 @@ if __name__ == '__main__':
     est_time_in_minutes = int(predict_time(prot))
     if est_time_in_minutes < 1:
         est_time_in_minutes = 1
-
-    logging.info(f"Estimated runtime: {est_time_in_minutes} minutes")
+    logging.info(f"")
+    logging.info(f">>>   Estimated runtime: {est_time_in_minutes} minutes")
+    logging.info(f">>>   Using {nb_cpu} cpus")
+    logging.info(f"")
 
     ######################################################
     # Write the specific chain as a new PDB file for SWORD
@@ -728,7 +778,7 @@ if __name__ == '__main__':
 
     # Mapping of authors PDB residues numbers with the new one presented on the server 
     with open(f"{RESULTS_DIR}/mapping_auth_resnums.txt", "w") as f1:
-        f1.write("#Mapping of authors PDB residues numbers with the new one presented on the server\nORIGINAL RENUM\n")
+        f1.write("# Mapping of authors PDB residues numbers \n# with the new one presented on the server\nORIGINAL RENUM\n")
         for i, j in enumerate(SEQ_RESNUMS, start=1):
             f1.write(f"{j} {i}\n")
 
@@ -739,3 +789,4 @@ if __name__ == '__main__':
     os.makedirs(os.path.join(RESULTS_DIR, "Junctions"), exist_ok=True)
     shutil.move(os.path.join(RESULTS_DIR, "junctions_consistencies.txt"), os.path.join(RESULTS_DIR, "Junctions"))
     os.system(f"mv {RESULTS_DIR}/SWORD/*/Peeling {RESULTS_DIR}/Protein_Units")
+    logging.info(f"Results can be found here: {RESULTS_DIR}")
