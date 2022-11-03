@@ -2,7 +2,7 @@
 
 # Run SWORD once to compile its dependency: DSSP
 ./bin/SWORD &>/dev/null
-if [ -f ./bin/SWORD_bin/Dssp/dsspcmbi ]
+if [ -f ./bin/SWORD/bin/SWORD/bin/Dssp/dsspcmbi ]
 then
     echo "Successfully installed SWORD dependency"
 else
@@ -11,7 +11,7 @@ else
 fi
 
 # Compile MyPMFs
-make -C bin/mypmfs-master
+make -C bin/mypmfs-master scoring >/dev/null
 if [ -f bin/mypmfs-master/scoring ]
 then
     echo "Successfully compiled MyPMFs"
