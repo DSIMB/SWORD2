@@ -116,6 +116,30 @@ required arguments:
 ```
 
 
+## Output
 
-
+Example:
+```
+$ ./SWORD2.py -p 1jx4 -o results                                                                                                                                            ─╯
+2022/11/03 02:00:04 INFO     Fetch PDB ID: 1jx4
+2022/11/03 02:00:04 DEBUG    Connecting wwPDB FTP server RCSB PDB (USA).
+2022/11/03 02:00:08 DEBUG    1jx4 downloaded (results/1jx4_A/1jx4.pdb)
+2022/11/03 02:00:08 DEBUG    PDB download via FTP completed (1 downloaded, 0 failed).
+2022/11/03 02:00:08 DEBUG    3162 atoms and 1 coordinate set(s) were parsed in 0.03s.
+2022/11/03 02:00:08 INFO
+2022/11/03 02:00:08 INFO     >>>   Estimated runtime: 4 minutes
+2022/11/03 02:00:08 INFO     >>>   Using 8 cpus
+2022/11/03 02:00:08 INFO
+2022/11/03 02:00:08 INFO     Write a clean version of the PDB: remove non standard residues
+2022/11/03 02:00:08 INFO     Launch SWORD
+2022/11/03 02:00:23 INFO     Parse SWORD output
+2022/11/03 02:00:23 INFO     Calculate pseudo-energies of Domains
+2022/11/03 02:01:57 INFO     Write the SWORD results
+2022/11/03 02:01:57 INFO     Calculate pseudo-energies of PUs
+2022/11/03 02:02:37 INFO     Write the Peeling results
+2022/11/03 02:02:37 INFO     Generate histogram of SWORD2 domains consistency
+2022/11/03 02:03:09 INFO     Calculate junctions consistencies
+2022/11/03 02:03:09 INFO     Clean and prepare results
+2022/11/03 02:03:09 INFO     Results can be found here: results/1jx4_A
+```
 
