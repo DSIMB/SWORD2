@@ -1,5 +1,5 @@
 CC      = g++
-CFLAGS  = -std=c++0x -Wall -Wextra -O3 -march=native
+CFLAGS  = -std=c++0x -Wall -Wextra -O3
 SRC1    = src/training.cpp
 SRC2    = src/scoring.cpp
 EXE1    = training

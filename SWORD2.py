@@ -371,7 +371,7 @@ def multiprocess_get_energy(i, energies, dom_bounds):
         tmp_list = energies[(i, j, start_pu, end_pu)]
         tmp_list.extend([pu_energy, pu_z_score])
         energies[(i, j, start_pu, end_pu)] = tmp_list
-    dom_energy, dom_z_score = get_energy_and_z_score(f"{RESULTS_DIR}/{pdb_code_chain}", dom_residues)
+    dom_energy, dom_z_score = get_energy_and_z_score(BIN_DIR, f"{RESULTS_DIR}/{pdb_code_chain}", dom_residues)
     energies[(i, j)] = []
     tmp_list = energies[(i, j)]
     tmp_list.extend([dom_energy, dom_z_score])
@@ -421,7 +421,7 @@ def write_peeling_results():
             f.write(f"""Peeling level {lvl}\n    Number of Protein Units: {data["N"]}\n    Compaction Index: {round(data["CI"], 2)}\n""")
             for start_pu, end_pu in data["PUs"]:
                 pu_residues = ",".join([f"{str(x) + pdb_chain}" for x in range(start_pu, end_pu+1)])
-                pu_energy, pu_z_score = get_energy_and_z_score(f"{RESULTS_DIR}/{pdb_code_chain}", pu_residues)
+                pu_energy, pu_z_score = get_energy_and_z_score(BIN_DIR, f"{RESULTS_DIR}/{pdb_code_chain}", pu_residues)
                 f.write(f"""    {str(start_pu)+"-"+str(end_pu):>7}: AUL={int((1-(1/(pu_z_score)**2))*100) if abs(pu_z_score) >= 1 else 0:3}% Z-score={round(pu_z_score, 1)}\n""")
     logging.info("Write the Peeling results")
 
@@ -580,7 +580,7 @@ if __name__ == '__main__':
     energies = manager.dict()
     for i, part in sword_results["DOMAINS"].items():
         with multiprocessing.Pool(processes=nb_cpu) as p:
-            FUNC = partial(multiprocess_get_energy, i, energies)
+            FUNC = partial(multiprocess_get_energy, i, pdb_chain, pdb_code_chain, RESULTS_DIR, BIN_DIR, energies)
             p.imap_unordered(FUNC, list(part["BOUNDARIES"].items()))
             p.close()
             p.join()
