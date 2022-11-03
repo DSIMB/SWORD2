@@ -29,13 +29,14 @@ from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 
 
-def check_parsing_pdb(uniprot_code, pdb_code, pdb_chain, input_file):
+def check_parsing_pdb(uniprot_code, mgnify_code, pdb_code, pdb_chain, input_file):
     """
     This function tries to fetch and parse the input PDB submitted,
     either PDB code and chain or a whole PDB file downloaded by the user.
 
     Args:
         - uniprot_code (str): AlphaFold Uniprot Accession Id
+        - mgnify_code (str): MGnifyID for the ESM Metagenomic Atlas
         - pdb_code (str): PDB code to fetch and parse
         - pdb_chain (str): PDB chain to fetch and parse
         - input_file (str): The path to the file downloaded by the user
@@ -88,6 +89,29 @@ def check_parsing_pdb(uniprot_code, pdb_code, pdb_chain, input_file):
         # A parsed PDB by ProDy returns an AtomGroup, else it could be an EMD file, which we don't want...
         if type(prot) is not AtomGroup:
             sys.exit(f"Error: Something went wrong with the AlphaFold Uniprot Accession Id {uniprot_code}. Please make sure chain {pdb_chain} is valid and that it is a valid ID referenced in the AlphaFold database (https://alphafold.ebi.ac.uk/)")
+        if prot is None:
+            sys.exit(f"Error: Atomic data could not be parsed. Please check the PDB file corresponding to the code {pdb_code}. Also check that it actually contains the chain {pdb_chain}.")
+        # Clean non-standard aa
+        prot = prot.select('protein and not nonstdaa')
+        if prot is None:
+            sys.exit(f"Error: No atomic data is left after trying to keep the 20 classical residues. Please check your PDB file.")
+        input_file = os.path.basename(input_file)
+    # Download the ESMFold model
+    elif mgnify_code:
+        logging.info(f"Download the ESM Metagenomic Atlas ID: {mgnify_code}")
+        ok, response = download_esm_model(mgnify_code)
+        if not ok:
+            sys.exit(f"Error: {response}. Please try again.")
+        else:
+            input_file = response
+        # Redirect useful error of ProDy
+        try:  # Try to parse PDB file
+            prot = parsePDB(input_file, chain=pdb_chain)
+        except Exception as e:
+            sys.exit(str(e))
+        # A parsed PDB by ProDy returns an AtomGroup, else it could be an EMD file, which we don't want...
+        if type(prot) is not AtomGroup:
+            sys.exit(f"Error: Something went wrong with the ESM Metagenomic Atlas ID (MGnifyID) {mgnify_code}. Please make sure chain {pdb_chain} is valid and that it is a valid ID referenced in the ESM Metagenomic Atlas database (https://esmatlas.com/)")
         if prot is None:
             sys.exit(f"Error: Atomic data could not be parsed. Please check the PDB file corresponding to the code {pdb_code}. Also check that it actually contains the chain {pdb_chain}.")
         # Clean non-standard aa
@@ -152,6 +176,25 @@ def download_af_model(id):
         f.write(response.text)
     return (True, f"{RESULTS_DIR}/{name}.pdb")
 
+def download_esm_model(id):
+    """
+    Download the ESM-2 model corresponding to the MGnify Id given by user
+    https://esmatlas.com
+
+    Returns:
+        - File path (string): Path of the downloaded PDB file
+        or
+        False if wrong id
+        "DOWNLOAD ERROR" if could not download
+    """
+    url = "https://api.esmatlas.com/fetchPredictedStructure/"+id
+    try:
+        response = requests_retry_session().get(url)
+    except Exception as x:
+        return (False, x)
+    with open(f"{RESULTS_DIR}/{id}.pdb", "w") as f:
+        f.write(response.text)
+    return (True, f"{RESULTS_DIR}/{id}.pdb")
 
 def parse_sword(output):
     """
@@ -466,7 +509,11 @@ if __name__ == '__main__':
     group.add_argument("-u", "--uniprot-code",
                         help=textwrap.dedent('''\
                                                 AlphaFold Uniprot Accession Id.
-                                                The corresponding structure will be downloaded from the AlphaFold database.'''), type=str)
+                                                The corresponding predicted structure will be downloaded from the AlphaFold database.'''), type=str)
+    group.add_argument("-m", "--mgnify-code",
+                        help=textwrap.dedent('''\
+                                                MGnify Id.
+                                                The corresponding predicted structure will be downloaded from the ESM Metagenomic Atlas database.'''), type=str)
     group.add_argument("-p", "--pdb-code",
                         help=textwrap.dedent('''\
                                                 PDB code.
@@ -487,6 +534,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     uniprot_code = args.uniprot_code
+    mgnify_code = args.mgnify_code
     pdb_code = args.pdb_code
     input_file = args.input_file
     pdb_chain = args.pdb_chain
@@ -502,6 +550,8 @@ if __name__ == '__main__':
             sys.exit("Unable to open file: " + input_file)
     elif uniprot_code:
         pdb_code_chain = uniprot_code + "_" + pdb_chain
+    elif mgnify_code:
+        pdb_code_chain = mgnify_code + "_" + pdb_chain
     else:
         pdb_code_chain = pdb_code + "_" + pdb_chain
 
@@ -543,7 +593,7 @@ if __name__ == '__main__':
     DISPLAY_SWORD2 = os.path.join(BIN_DIR, "display_SWORD2_output.pl")
 
     # CHECK ENTRIES
-    prot = check_parsing_pdb(uniprot_code, pdb_code, pdb_chain, input_file)
+    prot = check_parsing_pdb(uniprot_code, mgnify_code, pdb_code, pdb_chain, input_file)
 
     # ESTIMATE THE RUNTIME
     est_time_in_minutes = int(predict_time(prot))
