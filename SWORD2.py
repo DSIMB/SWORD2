@@ -166,7 +166,7 @@ def download_af_model(id):
         False if wrong id
         "DOWNLOAD ERROR" if could not download
     """
-    name = f"AF-{id}-F1-model_v3"
+    name = f"AF-{id}-F1-model_v4"
     url = f"https://alphafold.ebi.ac.uk/files/{name}.pdb"
     try:
         response = requests_retry_session().get(url)
