@@ -79,12 +79,17 @@ Then, launch SWORD2:
 ./SWORD2.py -i ./structure.pdb -o results
 ```
 
+#### On your own PDB/mmCIF of an NMR structure, model 2:
+```
+./SWORD2.py -i ./structure.pdb -d 2 -o results
+```
+
 ## Help
 
 To get the full help:
 ```
 $ ./SWORD2.py --help                                                                                                                                                        ─╯
-usage: SWORD2.py [-h] (-u UNIPROT_ID | -m MGNIFY_ID | -p PDB_ID | -i INPUT_FILE) [-c PDB_CHAIN] [-x CPU] -o OUTPUT
+usage: SWORD2.py [-h] (-u UNIPROT_ID | -m MGNIFY_ID | -p PDB_ID | -i INPUT_FILE) [-c PDB_CHAIN] [-d MODEL] [-x CPU] -o OUTPUT
 
 SWORD2: SWift and Optimized Recognition of protein Domains.
 The SWORD2 partitioning algorithm produces multiple alternative
@@ -104,7 +109,7 @@ options:
                         MGnify Id.
                         The corresponding predicted structure will be downloaded from the ESM Metagenomic Atlas database.
   -p PDB_ID, --pdb-id PDB_ID
-                        PDB code.
+                        PDB id.
                         The corresponding structure will be downloaded from the PDB database.
   -i INPUT_FILE, --input-file INPUT_FILE
                         Path to an input PDB or mmCIF file.
@@ -112,6 +117,8 @@ options:
 optional arguments:
   -c PDB_CHAIN, --pdb-chain PDB_CHAIN
                         PDB chain. Default is A.
+  -d MODEL, --model MODEL
+                        Model to parse. Especially usefull for NMR files which contain several models. Default is 1.
   -x CPU, --cpu CPU     How many CPUs to use.
                         Default all (0).
                         Max on this computer is: 32

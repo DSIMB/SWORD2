@@ -29,7 +29,7 @@ from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 
 
-def check_parsing_pdb(uniprot_id, mgnify_id, pdb_id, pdb_chain, input_file):
+def check_parsing_pdb(uniprot_id, mgnify_id, pdb_id, pdb_chain, model, input_file):
     """
     This function tries to fetch and parse the input PDB submitted,
     either PDB code and chain or a whole PDB file downloaded by the user.
@@ -39,6 +39,7 @@ def check_parsing_pdb(uniprot_id, mgnify_id, pdb_id, pdb_chain, input_file):
         - mgnify_id (str): MGnifyID for the ESM Metagenomic Atlas
         - pdb_id (str): PDB code to fetch and parse
         - pdb_chain (str): PDB chain to fetch and parse
+        - model (int): Structure model to parse
         - input_file (str): The path to the file downloaded by the user
 
 
@@ -51,9 +52,9 @@ def check_parsing_pdb(uniprot_id, mgnify_id, pdb_id, pdb_chain, input_file):
         file_ext = os.path.splitext(input_file)[1]
         try:
             if file_ext in [".cif", ".mmcif"]:
-                prot = parseMMCIF(input_file, chain=pdb_chain)
+                prot = parseMMCIF(input_file, chain=pdb_chain, model=model)
             else:
-                prot = parsePDB(input_file, chain=pdb_chain)
+                prot = parsePDB(input_file, chain=pdb_chain, model=model)
         except Exception as e:
             sys.exit(str(e))
         if prot is None:
@@ -62,9 +63,9 @@ def check_parsing_pdb(uniprot_id, mgnify_id, pdb_id, pdb_chain, input_file):
             # It is necessary because the scoring program
             # accepts only PDB files which contain a chain
             if file_ext in [".cif", ".mmcif"]:
-                prot = parseMMCIF(input_file)
+                prot = parseMMCIF(input_file, model=model)
             else:
-                prot = parsePDB(input_file)
+                prot = parsePDB(input_file, model=model)
             if prot is not None and prot.getChids()[0] == ' ':
                 prot.setChids([pdb_chain for i in range(prot.numAtoms())])
             else:
@@ -83,7 +84,7 @@ def check_parsing_pdb(uniprot_id, mgnify_id, pdb_id, pdb_chain, input_file):
             input_file = response
         # Redirect useful error of ProDy
         try:  # Try to parse PDB file
-            prot = parsePDB(input_file, chain=pdb_chain)
+            prot = parsePDB(input_file, chain=pdb_chain, model=model)
         except Exception as e:
             sys.exit(str(e))
         # A parsed PDB by ProDy returns an AtomGroup, else it could be an EMD file, which we don't want...
@@ -106,7 +107,7 @@ def check_parsing_pdb(uniprot_id, mgnify_id, pdb_id, pdb_chain, input_file):
             input_file = response
         # Redirect useful error of ProDy
         try:  # Try to parse PDB file
-            prot = parsePDB(input_file, chain=pdb_chain)
+            prot = parsePDB(input_file, chain=pdb_chain, model=model)
         except Exception as e:
             sys.exit(str(e))
         # A parsed PDB by ProDy returns an AtomGroup, else it could be an EMD file, which we don't want...
@@ -124,7 +125,7 @@ def check_parsing_pdb(uniprot_id, mgnify_id, pdb_id, pdb_chain, input_file):
         logging.info(f"Fetch PDB ID: {pdb_id}")
         # Redirect useful error of ProDy
         try:  # Try to parse fetched PDB file
-            prot = parsePDB(pdb_id, chain=pdb_chain, folder=RESULTS_DIR, compressed=False)
+            prot = parsePDB(pdb_id, chain=pdb_chain, model=model, folder=RESULTS_DIR, compressed=False)
         except Exception as e:
             sys.exit(str(e))
         # A parsed PDB by ProDy returns an AtomGroup, else it could be an EMD file, which we don't want...
@@ -492,6 +493,23 @@ if __name__ == '__main__':
         raise argparse.ArgumentTypeError(
             f"Error option -c/--cpu: nb_cpu should be 0 <= nb_cpu <= {cpu_count()}")
 
+
+    def check_model(model):
+        """
+        Check if the user input model nb is valid
+        """
+        try:
+            model = int(model)
+        except ValueError as e:
+            print("Unable to cast ", type(model), " into integer (int)")
+            raise argparse.ArgumentTypeError(
+                "Error option -c/--cpu: please input an integer or string integer"
+            ) from e
+        if model >= 1:
+            return model
+        raise argparse.ArgumentTypeError(
+                f"Error option -d/--model: model should be >= 1")
+
     parser = argparse.ArgumentParser(
                 description=textwrap.dedent('''\
                     SWORD2: SWift and Optimized Recognition of protein Domains.
@@ -520,6 +538,7 @@ if __name__ == '__main__':
                                                 The corresponding structure will be downloaded from the PDB database.'''), type=str)
     group.add_argument("-i", "--input-file", help="Path to an input PDB or mmCIF file.", type=str)
     optional.add_argument("-c", "--pdb-chain", help="PDB chain. Default is A.", type=str, required=False, default="A")
+    optional.add_argument("-d", "--model", help="Model to parse. Especially usefull for NMR files which contain several models. Default is 1.", type=check_cpu, required=False, default=1)
     optional.add_argument("-x", "--cpu", help=textwrap.dedent(f'''\
                                                                 How many CPUs to use.
                                                                 Default all (0). 
@@ -538,6 +557,7 @@ if __name__ == '__main__':
     pdb_id = args.pdb_id
     input_file = args.input_file
     pdb_chain = args.pdb_chain
+    model = args.model
     output_dir = args.output
     nb_cpu = args.cpu
     if nb_cpu == 0:
@@ -593,7 +613,7 @@ if __name__ == '__main__':
     DISPLAY_SWORD2 = os.path.join(BIN_DIR, "display_SWORD2_output.pl")
 
     # CHECK ENTRIES
-    prot = check_parsing_pdb(uniprot_id, mgnify_id, pdb_id, pdb_chain, input_file)
+    prot = check_parsing_pdb(uniprot_id, mgnify_id, pdb_id, pdb_chain, model, input_file)
 
     # ESTIMATE THE RUNTIME
     est_time_in_minutes = int(predict_time(prot))
