@@ -290,7 +290,6 @@ def write_partitionings_json(sword_results, energies):
     Returns:
         - None
     """
-    logging.info("Write the SWORD results")
     partitioning = os.path.join(RESULTS_DIR, "SWORD2_summary.json")
     with open(partitioning, "w") as f:
         json_results = {}
@@ -754,6 +753,7 @@ if __name__ == '__main__':
     ############################
 
     write_partitionings(sword_results, energies)
+    write_partitionings_json(sword_results, energies)
 
     #######################
     # Write Peeling results
