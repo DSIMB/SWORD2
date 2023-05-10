@@ -15,6 +15,7 @@ import subprocess
 import sys
 import textwrap
 import time
+import json
 from copy import copy
 from functools import partial
 
@@ -277,6 +278,49 @@ def write_partitionings(sword_results, energies):
                 f.write(f"""Domain:{i+1}       AUL={int((1-(1/(energies[(nb_alt_part, i)][1])**2))*100) if abs(energies[(nb_alt_part, i)][1]) >= 1 else 0:3}% Z-score={round(energies[(nb_alt_part, i)][1], 1)}\n""")
                 for j, (start_pu, end_pu) in enumerate(dom):
                     f.write(f"""    PU:{str(start_pu)+"-"+str(end_pu):>7} AUL={int((1-(1/(energies[(nb_alt_part, i, start_pu, end_pu)][1])**2))*100) if abs(energies[(nb_alt_part, i, start_pu, end_pu)][1]) >= 1 else 0:3}% Z-score={round(energies[(nb_alt_part, i, start_pu, end_pu)][1], 1)}\n""")
+
+
+def write_partitionings_json(sword_results, energies):
+    """
+    Write the partitionnings into JSON formatted file
+
+    Args:
+        - sword_results (dict): Dictionary containing all partitioning assignments
+                                made by SWORD and Peeling
+    Returns:
+        - None
+    """
+    logging.info("Write the SWORD results")
+    partitioning = os.path.join(RESULTS_DIR, "SWORD2_summary.json")
+    with open(partitioning, "w") as f:
+        json_results = {}
+        # AMBIGUITY INDEX
+        nb_bars = get_quality_as_nb_bars(sword_results["AMBIGUITY"])
+        json_results["Ambiguity index"] = "*" * nb_bars
+        for nb_alt_part, alt_part in sword_results["DOMAINS"].items():
+            alt_part_json = {}
+            # OPTIMAL PARTITIONING
+            if nb_alt_part == 0:
+                alt_part_json["Partition"] = "Optimal partition"
+            # ALTERNATIVE PARTITIONINGS
+            else:
+                alt_part_json["Partition"] = f"Alternative partition {nb_alt_part}"
+            nb_bars = get_quality_as_nb_bars(alt_part["QUALITY"])
+            alt_part_json["Quality"] = "*" * nb_bars
+            alt_part_json["Nb. domains"] = len(alt_part["BOUNDARIES"])
+            domains_json = {}
+            for i, dom in alt_part["BOUNDARIES"].items():
+                domain_json = []
+                domain_json.append(("AUL", int((1-(1/(energies[(nb_alt_part, i)][1])**2))*100) if abs(energies[(nb_alt_part, i)][1]) >= 1 else 0))
+                domain_json.append(("Z-score", round(energies[(nb_alt_part, i)][1], 1)))
+                p_unit_json = {}
+                for j, (start_pu, end_pu) in enumerate(dom):
+                    p_unit_json[f"{str(start_pu)}-{str(end_pu)}"] = {"AUL": int((1-(1/(energies[(nb_alt_part, i, start_pu, end_pu)][1])**2))*100) if abs(energies[(nb_alt_part, i, start_pu, end_pu)][1]) >= 1 else 0, "Z-score": round(energies[(nb_alt_part, i, start_pu, end_pu)][1], 1)}
+                domain_json.append(("PUs", p_unit_json))
+                domains_json[f"Domain {i+1}"] = dict(domain_json)
+            alt_part_json["Domains"] = domains_json
+            json_results[alt_part_json["Partition"]] = alt_part_json
+        f.write(json.dumps(json_results, indent=4))
 
 
 def define_colors(sword_results):
