@@ -40,17 +40,24 @@ or
 mamba env create -f environment.yml
 ```
 
-If necessary, a docker is also available:
-```
-docker pull dsimb/sword2
-```
-
 Compile necessary dependencies:
 ```
 bash install.sh
 ```
 
+Otherwise, a docker is also available:
+```
+docker pull dsimb/sword2
+```
+
 ## How to use SWORD2
+
+Launch the docker version:
+```
+# This will mount the local `results` directory inside the Docker image and run the program inside the image as you (local user)
+# so that the results generated have good rights.
+docker run -it -e LOCAL_UID=$(id -u $USER) -e LOCAL_GID=$(id -g $USER) -v $(pwd)/results:/app/results dsimb/sword2 -p 1jx4 -o results
+```
 
 First, activate the working environment:
 ```
@@ -158,3 +165,4 @@ $ ./SWORD2.py -p 1jx4 -o results                                                
 2022/11/03 02:03:09 INFO     Results can be found here: results/1jx4_A
 ```
 
+An easily parseable output in JSON format is generated for easier downstream tasks/analysis: `SWORD2_summary.json`
