@@ -30,21 +30,28 @@ RUN /venv/bin/conda-unpack
 ### Install and run 
 ###################
 
-FROM ubuntu:20.04
+FROM ubuntu:22.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    make gcc g++ libc-dev libc6 gosu\
+    && rm -rf /var/lib/apt/lists/*
 
 LABEL program="SWORD2"
 LABEL description="SWift and Optimized Recognition of protein Domains"
-LABEL version="1"
+LABEL version="1.1.2"
 LABEL maintainer="gabriel.cretin@u-paris.fr"
-
-WORKDIR /sword2
 
 # Keep only necessary files from previous stage: conda env
 COPY --from=mamba_build /venv /venv
 
+WORKDIR /app
+
 # Copy sources to build the program
+COPY install.sh install.sh
 COPY bin/ bin/
 COPY SWORD2.py SWORD2.py
+
+RUN bash install.sh
 
 # Use `bash --login`:
 SHELL ["/bin/bash", "--login", "-c"]
@@ -53,5 +60,12 @@ SHELL ["/bin/bash", "--login", "-c"]
 ENV PATH="/venv/bin:$PATH"
 ENV CONDA_PREFIX="/venv"
 
-ENTRYPOINT ["./SWORD2.py"]
-CMD ["--help"]
+RUN echo $'#!/bin/bash\n\
+USER_ID=${LOCAL_UID:-9001}\n\
+GROUP_ID=${LOCAL_GID:-9001}\n\
+#echo "Starting with UID: $USER_ID, GID: $GROUP_ID"\n\
+useradd -u $USER_ID -o -m user\n\
+groupmod -g $GROUP_ID user\n\
+/app/SWORD2.py "$@"' > entrypoint.sh && chmod +x entrypoint.sh
+
+ENTRYPOINT [ "/app/entrypoint.sh" ]
