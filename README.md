@@ -166,3 +166,34 @@ $ ./SWORD2.py -p 1jx4 -o results                                                
 ```
 
 An easily parseable output in JSON format is generated for easier downstream tasks/analysis: `SWORD2_summary.json`
+
+
+
+## Multithreading
+
+Users can now run multiple SWORD2 jobs in parallel.
+Here is an example script:
+```python
+import subprocess
+from concurrent.futures import ThreadPoolExecutor
+
+# List of 5 PDB codes
+pdb_list = ['1jx4', '2c78', '1f5n', '1a8y', '1b89']
+
+# Function to run a SWORD2 job
+def run_sword2(pdb_code):
+    command = f'./SWORD2.py -p {pdb_code} -o results'
+    try:
+        subprocess.run(command, shell=True, check=True)
+        print(f"Job for {pdb_code} completed successfully.")
+    except subprocess.CalledProcessError as e:
+        print(f"Error running job for {pdb_code}: {e}")
+
+# Run 5 jobs using ThreadPoolExecutor
+def run_sword2_jobs():
+    with ThreadPoolExecutor(max_workers=5) as executor:  # Adjust max_workers based on your system's capabilities
+        executor.map(run_sword2, pdb_list)
+
+if __name__ == "__main__":
+    run_sword2_jobs()
+```
