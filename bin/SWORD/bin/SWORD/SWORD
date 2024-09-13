@@ -440,10 +440,8 @@ sub peeling {
     }
 
     my $temp = `mkdir -p $path$PDB/Peeling/`;
-    my $opt_peeling = '-R2 98 -ss2 8 -lspu 30 -mspu 0 -d0 6.0 -delta 1.5 -oss 0 -p 0 -cp 0 -npu 30';
-    my $peeling_output = `$prog_peeling -pdb $path$PDB/$PDB.pdb -dssp $path$PDB/$PDB.dssp $opt_peeling 2> /dev/null`;
-
-    $temp = `mv file_ca_coo.pdb file_matrix_pu_contact.mtx file_proba_contact.mat file_pu_delineation.mtx $path$PDB 2> /dev/null`;
+    my $opt_peeling = '-R2 98 -ss2 8 -lspu 30 -mspu 0 -d0 6.0 -delta 1.5 -oss 0 -p 0 -cp 0 -npu 30 -outdir '.$path.$PDB;
+    my $peeling_output = `$prog_peeling -pdb $path$PDB/$PDB.pdb -dssp $path$PDB/$PDB.dssp $opt_peeling`;
 
     my $i = 1;
     my ( $j, $k, $l ) = (0) x 3;
