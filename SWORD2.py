@@ -518,8 +518,8 @@ def write_domains_histogram(sword_results, domains_colors):
 
 
 def predict_time(prot):
-    """Predict time in minutes based on protein length."""
-    return str(int(133 * math.exp(2.06e-3 * len(set(prot.getResnums()))) / 60))
+    """Predict time in seconds based on protein length. 40,1e^6,7E-04x """
+    return int(40.1 * math.exp(6.7e-04 * len(set(prot.getResnums()))))
 
 
 def get_energy_and_z_score(bin_dir, pdb, res_list=None):
@@ -727,7 +727,7 @@ if __name__ == "__main__":
     optional.add_argument(
         "-d",
         "--model",
-        help="Model to parse. Default is 1.",
+        help="Model to parse. Especially usefull for NMR files which contain several models. Default is 1.",
         type=check_model,
         default=1,
     )
@@ -745,7 +745,11 @@ if __name__ == "__main__":
         help="Disable the calculation of pseudo-energy of domains and PUs.",
     )
     required.add_argument(
-        "-o", "--output", help="Output directory.", type=str, required=True
+        "-o",
+        "--output",
+        help="Output directory. Results will be generated inside in a dedicated directory named after OUTPUT/PDBID_CHAIN/",
+        type=str,
+        required=True,
     )
 
     args = parser.parse_args()
@@ -813,10 +817,18 @@ if __name__ == "__main__":
         uniprot_id, mgnify_id, pdb_id, pdb_chain, model, input_file
     )
 
-    est_time_in_minutes = int(predict_time(prot))
-    est_time_in_minutes = max(est_time_in_minutes, 1)
+    # predict_time(prot) returns the time in seconds
+    est_time_in_seconds = predict_time(prot)
+
+    if est_time_in_seconds < 60:
+        est_time_str = f"Estimated runtime: {est_time_in_seconds} seconds"
+    else:
+        minutes = est_time_in_seconds // 60
+        seconds = est_time_in_seconds % 60
+        est_time_str = f"Estimated runtime: {minutes} minutes and {seconds} seconds"
+
     logging.info("")
-    logging.info(f">>>   Estimated runtime: {est_time_in_minutes} minutes")
+    logging.info(f">>>   {est_time_str}")
     logging.info(f">>>   Using {nb_cpu} cpus")
     logging.info(f"")
 
@@ -826,14 +838,14 @@ if __name__ == "__main__":
 
     pdb_chain_file = os.path.join(RESULTS_DIR, pdb_id_chain + ".pdb")
     logging.info("Write a clean version of the PDB: remove non standard residues")
-    
+
     # Remove residues which have insertion codes
     res_to_remove = " "
     hv = prot.getHierView()
     for residue in hv.iterResidues():
         if residue.getIcode():
             res_to_remove += f"{residue.getResnum()} "
-            
+
     # Keep only what constitutes the protein, remove the non standard residues
     if res_to_remove != " ":
         prot = prot.select(
@@ -852,14 +864,14 @@ if __name__ == "__main__":
             f"PDB file {pdb_chain_file} could not be written using function writePDB of ProDy"
         )
         sys.exit(1)
-        
+
     # Remove the ".pdb" extension for SWORD
     os.rename(file_written, os.path.splitext(file_written)[0])
 
     # Now that the protein is clean, get some infos
     hv = prot.getHierView()
     ch = hv.getChain(pdb_chain)
-    
+
     # Get the aa sequence
     seq = ch.getSequence()
     prot_len = len(seq)
@@ -889,7 +901,7 @@ if __name__ == "__main__":
     #####################################################
     # Calculate the energy and Z-score of PUs and Domains
     #####################################################
-    
+
     if not disable_energies:
         logging.info("Calculate pseudo-energies of Domains")
         manager = multiprocessing.Manager()
@@ -910,7 +922,7 @@ if __name__ == "__main__":
                 p.join()
     else:
         energies = {}
-        
+
     ############################
     # Write  SWORD partitionings
     ############################
@@ -929,7 +941,7 @@ if __name__ == "__main__":
     ############
 
     pus_colors, dom_colors = define_colors(sword_results)
-    
+
     ######################################################
     # Write Javascript formated histogram of SWORD Domains
     ######################################################
@@ -1093,8 +1105,7 @@ if __name__ == "__main__":
         del junctions[min(junctions.keys())]
         del junctions[max(junctions.keys())]
 
-
-    # Mapping of authors PDB residues numbers with the new one presented on the server 
+    # Mapping of authors PDB residues numbers with the new one presented on the server
     with open(f"{RESULTS_DIR}/mapping_auth_resnums.txt", "w") as f1:
         f1.write(
             "# Mapping of authors PDB residues numbers \n# with the new one presented on the server\nORIGINAL RENUM\n"
