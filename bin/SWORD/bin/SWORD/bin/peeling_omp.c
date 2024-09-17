@@ -132,6 +132,11 @@ int main(int argc, char *argv[]) {
     CUTOFF_PRUNING = DEFAULT_CUTOFF_PRUNING;
     MAXNUMBEROFPU = DEFAULT_MAX_PU_NUMBER;
 
+    /* ----- Addition Start: Number of CPUs Option ----- */
+    /* Initialize NUM_CPU to the maximum number of available threads */
+    int NUM_CPU = omp_get_max_threads();
+    /* ----- Addition End ----- */
+
     int opt;
     int option_index = 0;
     static struct option long_options[] = {
@@ -150,11 +155,14 @@ int main(int argc, char *argv[]) {
         {"output-directory", required_argument, 0, 'O'},
         {"verbose", no_argument, 0, 'v'},
         {"help", no_argument, 0, 'h'},
+        /* ----- Addition Start: Number of CPUs Option ----- */
+        {"num-cpu", required_argument, 0, 'C'},
+        /* ----- Addition End ----- */
         {0, 0, 0, 0}
     };
 
     /* Parse command-line arguments */
-    while ((opt = getopt_long(argc, argv, "p:d:r:s:l:m:0:t:o:g:c:n:O:vh", long_options, &option_index)) != -1) {
+    while ((opt = getopt_long(argc, argv, "p:d:r:s:l:m:0:t:o:g:c:n:O:vhC:", long_options, &option_index)) != -1) {
         switch (opt) {
             case 'p':
                 strncpy(NAME_PDB_FILE, optarg, sizeof(NAME_PDB_FILE) - 1);
@@ -202,6 +210,20 @@ int main(int argc, char *argv[]) {
             default:
                 help();
                 exit(EXIT_FAILURE);
+            /* ----- Addition Start: Number of CPUs Option ----- */
+            case 'C':
+                NUM_CPU = atoi(optarg);
+                if (NUM_CPU < 1) {
+                    fprintf(stderr, "Error: Number of CPUs must be at least 1.\n");
+                    exit(EXIT_FAILURE);
+                }
+                /* Optionally, limit NUM_CPU to a reasonable maximum, e.g., 1024 */
+                if (NUM_CPU > 1024) {
+                    fprintf(stderr, "Warning: Number of CPUs is too high. Setting to 1024.\n");
+                    NUM_CPU = 1024;
+                }
+                break;
+            /* ----- Addition End ----- */
         }
     }
 
@@ -210,6 +232,10 @@ int main(int argc, char *argv[]) {
         help();
         exit(EXIT_FAILURE);
     }
+
+    /* ----- Addition Start: Set Number of Threads ----- */
+    omp_set_num_threads(NUM_CPU);
+    /* ----- Addition End ----- */
 
     VERBOSE_PRINT("Starting the program with the following parameters:\n");
     VERBOSE_PRINT("PDB file: %s\n", NAME_PDB_FILE);
@@ -225,7 +251,10 @@ int main(int argc, char *argv[]) {
     VERBOSE_PRINT("Cutoff Pruning: %.2f\n", CUTOFF_PRUNING);
     VERBOSE_PRINT("Max PU number: %d\n", MAXNUMBEROFPU);
     VERBOSE_PRINT("Output directory: %s\n", NAME_OUTPUT_DIR);
-    VERBOSE_PRINT("Verbose mode: %s\n\n", VERBOSE ? "Enabled" : "Disabled");
+    VERBOSE_PRINT("Verbose mode: %s\n", VERBOSE ? "Enabled" : "Disabled");
+    /* ----- Addition Start: Print Number of CPUs ----- */
+    VERBOSE_PRINT("Number of CPUs (threads): %d\n\n", NUM_CPU);
+    /* ----- Addition End ----- */
 
     /* Parse PDB and DSSP files */
     parse_pdb(NAME_PDB_FILE);
@@ -593,6 +622,7 @@ void compute_cumulative_sums(int size) {
     VERBOSE_PRINT("Computing cumulative sums...\n");
 
     /* Allocate memory for cum_pcontact */
+    //VERBOSE_PRINT("Coucou %ld\n", (size + 2) * sizeof(double *));
     cum_pcontact = (double **)malloc((size + 2) * sizeof(double *));
     if (cum_pcontact == NULL) {
         fprintf(stderr, "Memory allocation failed for cum_pcontact.\n");
@@ -689,13 +719,14 @@ void parse_dssp(const char *dssp_filename) {
     index2--;
     fclose(dssp_file);
 
-    /* Initialize tab_decoupe */
-    tab_decoupe = (int *)malloc((ind + 1) * sizeof(int));
+    /* Initialize tab_decoupe with the larger of ind and index2 */
+    int max_residues = (ind > index2) ? ind : index2;
+    tab_decoupe = (int *)malloc((max_residues + 1) * sizeof(int));
     if (tab_decoupe == NULL) {
         fprintf(stderr, "Memory allocation failed for tab_decoupe.\n");
         exit(EXIT_FAILURE);
     }
-    for (int i = 0; i <= ind; i++)
+    for (int i = 0; i <= max_residues; i++)
         tab_decoupe[i] = 1;
 
     /* Process secondary structure segments */
@@ -1105,10 +1136,11 @@ void help(void) {
     printf("\t--cutoff-pruning, -c <value>\tSet cutoff pruning value (default: %.1f)\n", DEFAULT_CUTOFF_PRUNING);
     printf("\t--max-pu-number, -n <value>\tSet maximum number of PUs (default: %d)\n", DEFAULT_MAX_PU_NUMBER);
     printf("\t--output-directory, -O <dir>\tSet output directory\n");
+    printf("\t--num-cpu, -C <value>\t\tSet number of CPUs (threads) to use (default: maximum available)\n");
     printf("\t--verbose, -v\t\t\tEnable verbose mode\n");
     printf("\t--help, -h\t\t\tDisplay this help and exit\n\n");
     printf("Example:\n");
-    printf("\tpeeling -p input.pdb -d input.dssp -r 98 -s 8 -l 30 -m 0 -0 6.0 -t 1.5 -o 0 -g 0 -c 0 -n 16\n\n");
+    printf("\tpeeling -p input.pdb -d input.dssp -r 98 -s 8 -l 30 -m 0 -0 6.0 -t 1.5 -o 0 -g 0 -c 0 -n 16 -C 4\n\n"); // Updated example with -C
     printf("DISCLAIMER:\n");
     printf("THIS SOFTWARE IS PROVIDED \"AS IS\" AND ANY EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.\n");
     printf("IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE.\n");
