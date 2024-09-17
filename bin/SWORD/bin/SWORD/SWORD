@@ -100,7 +100,6 @@ sub main {
 
     $path = $dir;
 
-    print STDERR "Peel $PDB: ";
     my $ori_name = $PDB;    # original input name
     my $rename_after;
 
@@ -434,14 +433,11 @@ sub peeling {
     my $path = shift;
     my $PDB  = shift;
     $path .= '/PDBs_Clean/';
-    my $prog_peeling = "$dirname/bin/Peeling1141";
-    if ( $osName eq "darwin" ) {
-        $prog_peeling = "$dirname/bin/Peeling1141_macos_intel_arm64";
-    }
+    my $prog_peeling = "$dirname/bin/Peeling_omp";
 
     my $temp = `mkdir -p $path$PDB/Peeling/`;
-    my $opt_peeling = '-R2 98 -ss2 8 -lspu 30 -mspu 0 -d0 6.0 -delta 1.5 -oss 0 -p 0 -cp 0 -npu 30 -outdir '.$path.$PDB;
-    my $peeling_output = `$prog_peeling -pdb $path$PDB/$PDB.pdb -dssp $path$PDB/$PDB.dssp $opt_peeling`;
+    my $opt_peeling = '-r 98 -s 8 -l 30 -m 0 -0 6.0 -t 1.5 -o 0 -g 0 -c 0 -n 30 -O '.$path.$PDB;
+    my $peeling_output = `$prog_peeling -p $path$PDB/$PDB.pdb -d $path$PDB/$PDB.dssp $opt_peeling`;
 
     my $i = 1;
     my ( $j, $k, $l ) = (0) x 3;
@@ -788,8 +784,6 @@ sub restore_name {
     sleep 1 while ( !( -e "$path/PDBs_Stand/$name" ) );
     `mv $path/XXXX* $path/$name`;
     sleep 1 while ( !( -e "$path/$name" ) );
-
-    `mv $path/PDBs_Clean/XXXX* $path/PDBs_Clean/$name`;
 
     my @files2 = `find $path/PDBs_Clean/$name -name XXXX* -type f`;
 
