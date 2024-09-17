@@ -210,20 +210,13 @@ int main(int argc, char *argv[]) {
             default:
                 help();
                 exit(EXIT_FAILURE);
-            /* ----- Addition Start: Number of CPUs Option ----- */
             case 'C':
                 NUM_CPU = atoi(optarg);
                 if (NUM_CPU < 1) {
                     fprintf(stderr, "Error: Number of CPUs must be at least 1.\n");
                     exit(EXIT_FAILURE);
                 }
-                /* Optionally, limit NUM_CPU to a reasonable maximum, e.g., 1024 */
-                if (NUM_CPU > 1024) {
-                    fprintf(stderr, "Warning: Number of CPUs is too high. Setting to 1024.\n");
-                    NUM_CPU = 1024;
-                }
                 break;
-            /* ----- Addition End ----- */
         }
     }
 
@@ -233,9 +226,7 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
-    /* ----- Addition Start: Set Number of Threads ----- */
     omp_set_num_threads(NUM_CPU);
-    /* ----- Addition End ----- */
 
     VERBOSE_PRINT("Starting the program with the following parameters:\n");
     VERBOSE_PRINT("PDB file: %s\n", NAME_PDB_FILE);
@@ -252,9 +243,7 @@ int main(int argc, char *argv[]) {
     VERBOSE_PRINT("Max PU number: %d\n", MAXNUMBEROFPU);
     VERBOSE_PRINT("Output directory: %s\n", NAME_OUTPUT_DIR);
     VERBOSE_PRINT("Verbose mode: %s\n", VERBOSE ? "Enabled" : "Disabled");
-    /* ----- Addition Start: Print Number of CPUs ----- */
     VERBOSE_PRINT("Number of CPUs (threads): %d\n\n", NUM_CPU);
-    /* ----- Addition End ----- */
 
     /* Parse PDB and DSSP files */
     parse_pdb(NAME_PDB_FILE);
