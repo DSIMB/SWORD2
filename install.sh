@@ -11,8 +11,8 @@ else
 fi
 
 # Compile MyPMFs
-make -C bin/mypmfs-master scoring >/dev/null
-if [ -f bin/mypmfs-master/scoring ]
+make -C bin/mypmfs-master scoring_omp >/dev/null
+if [ -f bin/mypmfs-master/scoring_omp ]
 then
     echo "Successfully compiled MyPMFs"
 else

@@ -6,7 +6,6 @@
 
 # Detect the operating system and architecture
 OS := $(shell uname)
-ARCH := $(shell uname -m)
 
 # Set the compiler based on the OS
 ifeq ($(OS), Darwin)
@@ -16,10 +15,7 @@ else
 endif
 
 # Compiler flags
-CFLAGS := -O3 -march=native -mtune=native -fopenmp -Wall -Wextra -std=c11
-
-# Linker flags
-LDFLAGS := -fopenmp
+CFLAGS := -O3 -march=native -mtune=native -Wall -Wextra -std=c11
 
 # Library flags
 LIBS := -lm
@@ -42,7 +38,11 @@ ifeq ($(OS), Darwin)
     # Uncomment and modify the following lines if necessary
     # CFLAGS += -I/path/to/libomp/include
     # LDFLAGS += -L/path/to/libomp/lib -lomp
+else
+	# Linker flags
+	LDFLAGS := -fopenmp
 endif
+
 
 # Source and target
 SRC := peeling_omp.c
