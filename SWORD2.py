@@ -956,7 +956,6 @@ if __name__ == "__main__":
     #############
     
     def generate_plots(i, part, mat, RESULTS_DIR, pus_colors):
-
         fig1, ax1 = plt.subplots(figsize=(6, 9), dpi=150)
         ax1.set_xlabel("Residues")
         ax1.set_ylabel("Residues")
@@ -1107,6 +1106,7 @@ if __name__ == "__main__":
         mat = np.loadtxt(proba_mat_file)
 
         # Use multiprocessing to parallelize plot generation
+        logging.info("Generate contact probability matrices")
         with multiprocessing.Pool(processes=nb_cpu) as pool:
             func = partial(generate_plots, mat=mat, RESULTS_DIR=RESULTS_DIR, pus_colors=pus_colors)
             pool.starmap(func, sword_results["DOMAINS"].items())
