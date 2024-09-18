@@ -1042,6 +1042,7 @@ if __name__ == "__main__":
                     fancybox=False,
                     shadow=False,
                     ncol=3,
+                    frameon=False
                 )
                 fig3.savefig(
                     os.path.join(
@@ -1059,6 +1060,7 @@ if __name__ == "__main__":
                 fancybox=True,
                 shadow=False,
                 ncol=3,
+                frameon=False
             )
             fig2.savefig(
                 os.path.join(
@@ -1076,6 +1078,7 @@ if __name__ == "__main__":
             fancybox=True,
             shadow=False,
             ncol=3,
+            frameon=False
         )
         fig1.savefig(
             os.path.join(
