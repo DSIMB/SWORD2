@@ -751,6 +751,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Disable the calculation of pseudo-energy of domains and PUs.",
     )
+    optional.add_argument(
+        "-l",
+        "--disable-plots",
+        action="store_true",
+        help="Disable the generation of contact probability matrices plots.",
+    )
     required.add_argument(
         "-o",
         "--output",
@@ -770,14 +776,7 @@ if __name__ == "__main__":
     output_dir = args.output
     nb_cpu = args.cpu if args.cpu != 0 else multiprocessing.cpu_count()
     disable_energies = args.disable_energies
-
-    if input_file:
-        if os.path.exists(input_file):
-            pdb_id_chain = (
-                os.path.basename(os.path.splitext(input_file)[0]) + "_" + pdb_chain
-            )
-        else:
-            sys.exit("Unable to open file: " + input_file)
+    disable_plots = args.disable_plots
     elif uniprot_id:
         pdb_id_chain = uniprot_id + "_" + pdb_chain
     elif mgnify_id:
@@ -1096,19 +1095,19 @@ if __name__ == "__main__":
             bbox_inches='tight',
         )
         plt.close(fig1)
+    if not disable_plots:
+        font = {"weight": "normal", "size": 11}
+        plt.rc("font", **font)
+        plt.rcParams["axes.linewidth"] = 0.5
+        plt.rcParams["xtick.major.size"] = 1.5
+        plt.rcParams["ytick.major.size"] = 1.5
+        plt.rcParams["figure.max_open_warning"] = 0
 
-    font = {"weight": "normal", "size": 11}
-    plt.rc("font", **font)
-    plt.rcParams["axes.linewidth"] = 0.5
-    plt.rcParams["xtick.major.size"] = 1.5
-    plt.rcParams["ytick.major.size"] = 1.5
-    plt.rcParams["figure.max_open_warning"] = 0
-
-    os.makedirs(os.path.join(RESULTS_DIR, "Contact_Probability_Matrix"), exist_ok=True)
-    proba_mat_file = os.path.join(
-        RESULTS_DIR, "PDBs_Clean", pdb_id_chain, "file_proba_contact.mat"
-    )
-    mat = np.loadtxt(proba_mat_file)
+        os.makedirs(os.path.join(RESULTS_DIR, "Contact_Probability_Matrix"), exist_ok=True)
+        proba_mat_file = os.path.join(
+            RESULTS_DIR, "PDBs_Clean", pdb_id_chain, "file_proba_contact.mat"
+        )
+        mat = np.loadtxt(proba_mat_file)
 
     # Use multiprocessing to parallelize plot generation
     with multiprocessing.Pool(processes=nb_cpu) as pool:
