@@ -71,6 +71,11 @@ Then, launch SWORD2:
 ./SWORD2.py -p 1jx4 -o results
 ```
 
+#### Skip calculation of pseudo-energy (faster):
+```
+./SWORD2.py -p 1jx4 -o results --disable-energy
+```
+
 #### On an AlphaFold predicted structure using its Uniprot Accession Id:
 ```
 ./SWORD2.py -u Q76EI6 -o results
@@ -94,9 +99,9 @@ Then, launch SWORD2:
 ## Help
 
 To get the full help:
-```
-$ ./SWORD2.py --help                                                                                                                                                        ─╯
-usage: SWORD2.py [-h] (-u UNIPROT_ID | -m MGNIFY_ID | -p PDB_ID | -i INPUT_FILE) [-c PDB_CHAIN] [-d MODEL] [-x CPU] -o OUTPUT
+```console
+$ ./SWORD2.py --help
+usage: SWORD2.py [-h] [--version] (-u UNIPROT_ID | -m MGNIFY_ID | -p PDB_ID | -i INPUT_FILE) [-c PDB_CHAIN] [-d MODEL] [-x CPU] [-e] -o OUTPUT
 
 SWORD2: SWift and Optimized Recognition of protein Domains.
 The SWORD2 partitioning algorithm produces multiple alternative
@@ -109,15 +114,13 @@ secondary structures and domains.
 
 options:
   -h, --help            show this help message and exit
+  --version             show program's version number and exit
   -u UNIPROT_ID, --uniprot-id UNIPROT_ID
                         AlphaFold Uniprot Accession Id.
-                        The corresponding predicted structure will be downloaded from the AlphaFold database.
   -m MGNIFY_ID, --mgnify-id MGNIFY_ID
-                        MGnify Id.
-                        The corresponding predicted structure will be downloaded from the ESM Metagenomic Atlas database.
+                        MGnify Id for the ESM Metagenomic Atlas.
   -p PDB_ID, --pdb-id PDB_ID
-                        PDB id.
-                        The corresponding structure will be downloaded from the PDB database.
+                        PDB id to download from the PDB database.
   -i INPUT_FILE, --input-file INPUT_FILE
                         Path to an input PDB or mmCIF file.
 
@@ -126,15 +129,13 @@ optional arguments:
                         PDB chain. Default is A.
   -d MODEL, --model MODEL
                         Model to parse. Especially usefull for NMR files which contain several models. Default is 1.
-  -x CPU, --cpu CPU     How many CPUs to use.
-                        Default all (0).
-                        Max on this computer is: 32
+  -x CPU, --cpu CPU     Number of CPUs to use. Default all (0). Max on this computer is: 40
+  -e, --disable-energies
+                        Disable the calculation of pseudo-energy of domains and PUs.
 
 required arguments:
   -o OUTPUT, --output OUTPUT
-                        Output directory.
-                        Results will be generated inside in a dedicated directory
-                        named after OUTPUT/PDBID_CHAIN/
+                        Output directory. Results will be generated inside in a dedicated directory named after OUTPUT/PDBID_CHAIN/
 ```
 
 
@@ -142,27 +143,28 @@ required arguments:
 
 Example:
 ```
-$ ./SWORD2.py -p 1jx4 -o results                                                                                                                                            ─╯
-2022/11/03 02:00:04 INFO     Fetch PDB ID: 1jx4
-2022/11/03 02:00:04 DEBUG    Connecting wwPDB FTP server RCSB PDB (USA).
-2022/11/03 02:00:08 DEBUG    1jx4 downloaded (results/1jx4_A/1jx4.pdb)
-2022/11/03 02:00:08 DEBUG    PDB download via FTP completed (1 downloaded, 0 failed).
-2022/11/03 02:00:08 DEBUG    3162 atoms and 1 coordinate set(s) were parsed in 0.03s.
-2022/11/03 02:00:08 INFO
-2022/11/03 02:00:08 INFO     >>>   Estimated runtime: 4 minutes
-2022/11/03 02:00:08 INFO     >>>   Using 8 cpus
-2022/11/03 02:00:08 INFO
-2022/11/03 02:00:08 INFO     Write a clean version of the PDB: remove non standard residues
-2022/11/03 02:00:08 INFO     Launch SWORD
-2022/11/03 02:00:23 INFO     Parse SWORD output
-2022/11/03 02:00:23 INFO     Calculate pseudo-energies of Domains
-2022/11/03 02:01:57 INFO     Write the SWORD results
-2022/11/03 02:01:57 INFO     Calculate pseudo-energies of PUs
-2022/11/03 02:02:37 INFO     Write the Peeling results
-2022/11/03 02:02:37 INFO     Generate histogram of SWORD2 domains consistency
-2022/11/03 02:03:09 INFO     Calculate junctions consistencies
-2022/11/03 02:03:09 INFO     Clean and prepare results
-2022/11/03 02:03:09 INFO     Results can be found here: results/1jx4_A
+$ conda activate sword2
+(sword2) $ ./SWORD2.py -p 1jx4 -o results
+2024/09/17 16:23:34 INFO     Fetch PDB ID: 1jx4
+2024/09/17 16:23:34 DEBUG    Connecting wwPDB FTP server RCSB PDB (USA).
+2024/09/17 16:23:36 DEBUG    1jx4 downloaded (results/1jx4_A/1jx4.pdb)
+2024/09/17 16:23:36 DEBUG    PDB download via FTP completed (1 downloaded, 0 failed).
+2024/09/17 16:23:36 DEBUG    3162 atoms and 1 coordinate set(s) were parsed in 0.05s.
+2024/09/17 16:23:36 INFO
+2024/09/17 16:23:36 INFO     >>>   Estimated runtime: 50 seconds
+2024/09/17 16:23:36 INFO     >>>   Using 40 cpus
+2024/09/17 16:23:36 INFO
+2024/09/17 16:23:36 INFO     Write a clean version of the PDB: remove non standard residues
+2024/09/17 16:23:36 INFO     Launch SWORD
+2024/09/17 16:23:49 INFO     Parse SWORD output
+2024/09/17 16:23:49 INFO     Calculate pseudo-energies of Domains
+2024/09/17 16:23:57 INFO     Write the SWORD results
+2024/09/17 16:23:57 INFO     Writing Peeling results
+2024/09/17 16:24:01 INFO     Finished writing Peeling results
+2024/09/17 16:24:01 INFO     Generate histogram of SWORD2 domains consistency
+2024/09/17 16:24:22 INFO     Calculate junctions consistencies
+2024/09/17 16:24:22 INFO     Clean and prepare results
+2024/09/17 16:24:22 INFO     Results can be found here: results/1jx4_A
 ```
 
 An easily parseable output in JSON format is generated for easier downstream tasks/analysis: `SWORD2_summary.json`

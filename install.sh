@@ -19,3 +19,13 @@ else
     echo "Error: unable to compile necessary dependancies for SWORD"
     exit 1
 fi
+
+# Compile Peeling
+make -C ./bin/SWORD/bin/SWORD/bin Peeling_omp
+if [ -f ./bin/SWORD/bin/SWORD/bin/Peeling_omp ]
+then
+    echo "Successfully compiled Peeling"
+else
+    echo "Error: unable to compile Peeling"
+    exit 1
+fi

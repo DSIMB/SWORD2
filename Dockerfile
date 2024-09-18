@@ -38,7 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 LABEL program="SWORD2"
 LABEL description="SWift and Optimized Recognition of protein Domains"
-LABEL version="1.1.2"
+LABEL version="2.0.0"
 LABEL maintainer="gabriel.cretin@u-paris.fr"
 
 # Keep only necessary files from previous stage: conda env
