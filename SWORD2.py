@@ -1109,10 +1109,10 @@ if __name__ == "__main__":
         )
         mat = np.loadtxt(proba_mat_file)
 
-    # Use multiprocessing to parallelize plot generation
-    with multiprocessing.Pool(processes=nb_cpu) as pool:
-        func = partial(generate_plots, mat=mat, RESULTS_DIR=RESULTS_DIR, pus_colors=pus_colors)
-        pool.starmap(func, sword_results["DOMAINS"].items())
+        # Use multiprocessing to parallelize plot generation
+        with multiprocessing.Pool(processes=nb_cpu) as pool:
+            func = partial(generate_plots, mat=mat, RESULTS_DIR=RESULTS_DIR, pus_colors=pus_colors)
+            pool.starmap(func, sword_results["DOMAINS"].items())
     
     #########################
     # Junctions consistencies
