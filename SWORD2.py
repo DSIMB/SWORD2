@@ -48,37 +48,17 @@ def check_parsing_pdb(uniprot_id, mgnify_id, pdb_id, pdb_chain, model, input_fil
         - pdb_chain (str): PDB chain to fetch and parse
         - model (int): Structure model to parse
         - input_file (str): The path to the file downloaded by the user
+        - output_dir (str): The output directory to save fetched files
 
     Returns:
         - prot (ProDy Protein object): if fetched and parsed correctly, else exits
+        - pdb_chain (str): the chain that was used
     """
     prot = None
     # Custom user file
     if input_file:
         logging.info("Try to parse user input structure file")
-        file_ext = os.path.splitext(input_file)[1]
-        try:
-            if file_ext in [".cif", ".mmcif"]:
-                prot = parseMMCIF(input_file, chain=pdb_chain, model=model)
-            else:
-                prot = parsePDB(input_file, chain=pdb_chain, model=model)
-        except Exception as e:
-            sys.exit(str(e))
-        if prot is None:
-            # Try again without specifying the chain
-            try:
-                if file_ext in [".cif", ".mmcif"]:
-                    prot = parseMMCIF(input_file, model=model)
-                else:
-                    prot = parsePDB(input_file, model=model)
-            except Exception as e:
-                sys.exit(str(e))
-            if prot is not None and prot.getChids()[0] == " ":
-                prot.setChids([pdb_chain for _ in range(prot.numAtoms())])
-            else:
-                sys.exit(
-                    f"Atomic data could not be parsed for chain {pdb_chain}. Please check the input PDB file"
-                )
+        prot, pdb_chain = parse_structure(input_file, pdb_chain, model)
         prot = prot.select("protein and not nonstdaa")
         if prot is None:
             sys.exit(
@@ -87,23 +67,12 @@ def check_parsing_pdb(uniprot_id, mgnify_id, pdb_id, pdb_chain, model, input_fil
     # Download the AlphaFold model
     elif uniprot_id:
         logging.info(f"Download AlphaFold Uniprot Accession ID: {uniprot_id}")
-        ok, response = download_af_model(uniprot_id)
+        ok, response = download_af_model(uniprot_id, output_dir)
         if not ok:
             sys.exit(f"Error: {response}. Please try again.")
         else:
             input_file = response
-        try:
-            prot = parsePDB(input_file, chain=pdb_chain, model=model)
-        except Exception as e:
-            sys.exit(str(e))
-        if type(prot) is not AtomGroup:
-            sys.exit(
-                f"Error: Something went wrong with the AlphaFold Uniprot Accession Id {uniprot_id}. Please make sure chain {pdb_chain} is valid and that it is a valid ID referenced in the AlphaFold database (https://alphafold.ebi.ac.uk/)"
-            )
-        if prot is None:
-            sys.exit(
-                f"Error: Atomic data could not be parsed. Please check the PDB file corresponding to the code {pdb_id}. Also check that it actually contains the chain {pdb_chain}."
-            )
+        prot, pdb_chain = parse_structure(input_file, pdb_chain, model)
         prot = prot.select("protein and not nonstdaa")
         if prot is None:
             sys.exit(
@@ -113,23 +82,12 @@ def check_parsing_pdb(uniprot_id, mgnify_id, pdb_id, pdb_chain, model, input_fil
     # Download the ESMFold model
     elif mgnify_id:
         logging.info(f"Download the ESM Metagenomic Atlas ID: {mgnify_id}")
-        ok, response = download_esm_model(mgnify_id)
+        ok, response = download_esm_model(mgnify_id, output_dir)
         if not ok:
             sys.exit(f"Error: {response}. Please try again.")
         else:
             input_file = response
-        try:
-            prot = parsePDB(input_file, chain=pdb_chain, model=model)
-        except Exception as e:
-            sys.exit(str(e))
-        if type(prot) is not AtomGroup:
-            sys.exit(
-                f"Error: Something went wrong with the ESM Metagenomic Atlas ID (MGnifyID) {mgnify_id}. Please make sure chain {pdb_chain} is valid and that it is a valid ID referenced in the ESM Metagenomic Atlas database (https://esmatlas.com/)"
-            )
-        if prot is None:
-            sys.exit(
-                f"Error: Atomic data could not be parsed. Please check the PDB file corresponding to the code {pdb_id}. Also check that it actually contains the chain {pdb_chain}."
-            )
+        prot, pdb_chain = parse_structure(input_file, pdb_chain, model)
         prot = prot.select("protein and not nonstdaa")
         if prot is None:
             sys.exit(
@@ -140,29 +98,58 @@ def check_parsing_pdb(uniprot_id, mgnify_id, pdb_id, pdb_chain, model, input_fil
     else:
         logging.info(f"Fetch PDB ID: {pdb_id}")
         try:
-            prot = parsePDB(
-                pdb_id,
-                chain=pdb_chain,
-                model=model,
-                folder=RESULTS_DIR,
-                compressed=False,
-            )
+            # First fetch the PDB file
+            pdb_file = fetchPDB(pdb_id, folder=output_dir, compressed=False)
+            if not pdb_file:
+                sys.exit(f"Error: Unable to fetch PDB ID {pdb_id}.")
+            prot, pdb_chain = parse_structure(pdb_file, pdb_chain, model)
+            prot = prot.select("protein and not nonstdaa")
+            if prot is None:
+                sys.exit(
+                    "Error: No atomic data is left after trying to keep the 20 classical residues. Please check your PDB file."
+                )
         except Exception as e:
             sys.exit(str(e))
-        if type(prot) is not AtomGroup:
-            sys.exit(
-                f"Error: No PDB file could be parsed. Please check that the PDB code {pdb_id} exists in the PDB RCSB database (https://www.rcsb.org) with a legacy PDB format file available, and contains the chain {pdb_chain}. Careful, 'A' is different than 'a'. Please note that mmCIF files are not yet supported."
-            )
-        if prot is None:
-            sys.exit(
-                f"Error: Atomic data could not be parsed. Please check the PDB file corresponding to the code {pdb_id}. Also check that it actually contains the chain {pdb_chain}."
-            )
-        prot = prot.select("protein and not nonstdaa")
-        if prot is None:
-            sys.exit(
-                "Error: No atomic data is left after trying to keep the 20 classical residues. Please check your PDB file."
-            )
-    return prot
+    return prot, pdb_chain
+
+
+def parse_structure(input_file, pdb_chain, model):
+    """
+    Parses a PDB or mmCIF file and selects the specified chain.
+    If no chain is specified, the first chain in the file is used.
+
+    Args:
+        - input_file (str): Path to the PDB or mmCIF file
+        - pdb_chain (str): Chain identifier (can be None)
+        - model (int): Model number to parse
+
+    Returns:
+        - prot (ProDy AtomGroup): Parsed protein structure
+        - pdb_chain (str): The chain identifier used
+    """
+    file_ext = os.path.splitext(input_file)[1]
+    try:
+        if file_ext in [".cif", ".mmcif"]:
+            prot = parseMMCIF(input_file, model=model)
+        else:
+            prot = parsePDB(input_file, model=model)
+    except Exception as e:
+        sys.exit(str(e))
+    if prot is None:
+        sys.exit("Atomic data could not be parsed. Please check the input file.")
+    chain_ids = np.unique(prot.getChids())
+    if len(chain_ids) == 0:
+        sys.exit("No chains found in the PDB file.")
+    if pdb_chain is None:
+        pdb_chain = chain_ids[0]
+        logging.info(f"No chain specified. Using first chain '{pdb_chain}' in the PDB file.")
+    elif pdb_chain not in chain_ids:
+        logging.info(f"Chain {pdb_chain} not found in PDB file. Available chains: {', '.join(chain_ids)}")
+        sys.exit(f"Chain {pdb_chain} not found in PDB file.")
+    prot = prot.select('chain ' + pdb_chain)
+    if prot is None:
+        sys.exit(f"Error selecting chain {pdb_chain}. Please check the input PDB file.")
+    return prot, pdb_chain
 
 
 def requests_retry_session(
@@ -183,7 +170,7 @@ def requests_retry_session(
     return session
 
 
-def download_af_model(uniprot_id):
+def download_af_model(uniprot_id, output_dir):
     """
     Download the Alphafold2 model corresponding to the Uniprot Id given by user
     https://alphafold.ebi.ac.uk/
@@ -198,13 +185,13 @@ def download_af_model(uniprot_id):
         response.raise_for_status()
     except Exception as x:
         return (False, str(x))
-    file_path = f"{RESULTS_DIR}/{name}.pdb"
+    file_path = f"{output_dir}/{name}.pdb"
     with open(file_path, "w") as f:
         f.write(response.text)
     return (True, file_path)
 
 
-def download_esm_model(mgnify_id):
+def download_esm_model(mgnify_id, output_dir):
     """
     Download the ESM-2 model corresponding to the MGnify Id given by user
     https://esmatlas.com
@@ -218,7 +205,7 @@ def download_esm_model(mgnify_id):
         response.raise_for_status()
     except Exception as x:
         return (False, str(x))
-    file_path = f"{RESULTS_DIR}/{mgnify_id}.pdb"
+    file_path = f"{output_dir}/{mgnify_id}.pdb"
     with open(file_path, "w") as f:
         f.write(response.text)
     return (True, file_path)
@@ -636,7 +623,7 @@ def write_peeling_results(disable_energies):
                 }
                 nb_lvl += 1
 
-    logging.info("Writing Peeling results")
+    logging.info("Write Peeling results")
     peeling = os.path.join(RESULTS_DIR, "PEELING_summary.txt")
     with open(peeling, "w") as f:
         for lvl, data in peeling_results.items():
@@ -661,7 +648,6 @@ def write_peeling_results(disable_energies):
                     )
                 else:
                     f.write(f"    {str(start_pu)+'-'+str(end_pu):>7}\n")
-    logging.info("Finished writing Peeling results")
 
 
 if __name__ == "__main__":
@@ -729,12 +715,12 @@ if __name__ == "__main__":
         "-i", "--input-file", help="Path to an input PDB or mmCIF file.", type=str
     )
     optional.add_argument(
-        "-c", "--pdb-chain", help="PDB chain. Default is A.", type=str, default="A"
+        "-c", "--pdb-chain", help="PDB chain. If not specified, the first chain in the PDB file will be used.", type=str, default=None
     )
     optional.add_argument(
         "-d",
         "--model",
-        help="Model to parse. Especially usefull for NMR files which contain several models. Default is 1.",
+        help="Model to parse. Especially useful for NMR files which contain several models. Default is 1.",
         type=check_model,
         default=1,
     )
@@ -777,51 +763,61 @@ if __name__ == "__main__":
     nb_cpu = args.cpu if args.cpu != 0 else multiprocessing.cpu_count()
     disable_energies = args.disable_energies
     disable_plots = args.disable_plots
-    elif uniprot_id:
-        pdb_id_chain = uniprot_id + "_" + pdb_chain
-    elif mgnify_id:
-        pdb_id_chain = mgnify_id + "_" + pdb_chain
-    else:
-        pdb_id_chain = pdb_id + "_" + pdb_chain
 
-    confProDy(verbosity="none")
+    
 
-    logging.basicConfig(
-        level=logging.INFO,
-        handlers=[logging.StreamHandler()],
-        format="%(asctime)s %(levelname)-8s %(message)s",
-        datefmt="%Y/%m/%d %H:%M:%S",
+    BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+    BIN_DIR = os.path.join(BASE_DIR, "bin")
+    SWORD_DIR = os.path.join(BIN_DIR, "SWORD/bin/SWORD")
+    SWORD = os.path.join(SWORD_DIR, "SWORD")
+    DISPLAY_SWORD2 = os.path.join(BIN_DIR, "display_SWORD2_output.pl")
+
+    # Define a temporary RESULTS_DIR
+    TEMP_RESULTS_DIR = output_dir  # Use output_dir for temporary storage
+
+    # Parse and check the PDB, get the prot object and updated pdb_chain
+    prot, pdb_chain = check_parsing_pdb(
+        uniprot_id, mgnify_id, pdb_id, pdb_chain, model, input_file, TEMP_RESULTS_DIR
     )
 
+    # Now, construct the pdb_id_chain string
+    if input_file:
+        pdb_id_chain = os.path.basename(os.path.splitext(input_file)[0])
+    elif uniprot_id:
+        pdb_id_chain = uniprot_id
+    elif mgnify_id:
+        pdb_id_chain = mgnify_id
+    else:
+        pdb_id_chain = pdb_id
+
+    pdb_id_chain = pdb_id_chain + "_" + pdb_chain
+
     RESULTS_DIR = os.path.join(output_dir, pdb_id_chain)
+    new_dir = False
     if not os.path.exists(RESULTS_DIR):
         os.makedirs(RESULTS_DIR)
     else:
+        new_dir = True
         name_rep = time.strftime("_%d_%m_%Y_") + "".join(
             random.choice("0123456789") for _ in range(5)
         )
         RESULTS_DIR += name_rep
         os.makedirs(RESULTS_DIR)
-        fh = logging.FileHandler(os.path.join(RESULTS_DIR, "sword2.log"))
-        fh.setLevel(logging.DEBUG)
-        formatter = logging.Formatter(
-            "%(asctime)s %(levelname)s %(filename)s %(funcName)s() %(lineno)s - %(message)s"
-        )
-        fh.setFormatter(formatter)
-        logging.getLogger("").addHandler(fh)
+    
+    if new_dir:
         logging.warning(
-            f"Results dir '{os.path.join(output_dir, pdb_id_chain)}' already exists. We created '{RESULTS_DIR}' instead."
+            f"Results dir '{os.path.join(output_dir, pdb_id_chain)}' already exists --> New results dir '{RESULTS_DIR}'"
         )
         
     fh = log.FileHandler(os.path.join(RESULTS_DIR, "sword2.log"))
     logging.addHandler(fh)
 
-    SWORD = os.path.join(SWORD_DIR, "SWORD")
-    DISPLAY_SWORD2 = os.path.join(BIN_DIR, "display_SWORD2_output.pl")
-
-    prot = check_parsing_pdb(
-        uniprot_id, mgnify_id, pdb_id, pdb_chain, model, input_file
-    )
+    # If any files were downloaded to TEMP_RESULTS_DIR, move them to RESULTS_DIR
+    if TEMP_RESULTS_DIR != RESULTS_DIR:
+        for file_name in os.listdir(TEMP_RESULTS_DIR):
+            full_file_name = os.path.join(TEMP_RESULTS_DIR, file_name)
+            if os.path.isfile(full_file_name):
+                shutil.move(full_file_name, RESULTS_DIR)
 
     # predict_time(prot) returns the time in seconds
     est_time_in_seconds = predict_time(prot)
@@ -834,6 +830,7 @@ if __name__ == "__main__":
         est_time_str = f"Estimated runtime: {minutes} minutes and {seconds} seconds"
 
     logging.info("")
+    logging.info(f">>>   {pdb_id_chain} ({len(set(prot.getResnums()))} aa)")
     logging.info(f">>>   {est_time_str}")
     logging.info(f">>>   Using {nb_cpu} cpus")
     logging.info(f"")
