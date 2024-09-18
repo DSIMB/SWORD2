@@ -3,7 +3,6 @@
 
 import argparse
 import json
-import logging
 import math
 import multiprocessing
 import os
@@ -25,11 +24,19 @@ import plotly.express as px
 import requests
 from matplotlib import patches
 from prody import *
+import logging as log
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+confProDy(verbosity="info")
+from prody import LOGGER as logging
+# Create a new formatter with the desired format
+formatter = log.Formatter("%(asctime)s %(levelname)-8s %(message)s", datefmt="%Y/%m/%d %H:%M:%S")
+# Get the current handler and set the new formatter
+for handler in logging.getHandlers():
+    handler.setFormatter(formatter)
 
-def check_parsing_pdb(uniprot_id, mgnify_id, pdb_id, pdb_chain, model, input_file):
+def check_parsing_pdb(uniprot_id, mgnify_id, pdb_id, pdb_chain, model, input_file, output_dir):
     """
     This function tries to fetch and parse the input PDB submitted,
     either PDB code and chain or a whole PDB file downloaded by the user.
@@ -806,10 +813,10 @@ if __name__ == "__main__":
         logging.warning(
             f"Results dir '{os.path.join(output_dir, pdb_id_chain)}' already exists. We created '{RESULTS_DIR}' instead."
         )
+        
+    fh = log.FileHandler(os.path.join(RESULTS_DIR, "sword2.log"))
+    logging.addHandler(fh)
 
-    BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-    BIN_DIR = os.path.join(BASE_DIR, "bin")
-    SWORD_DIR = os.path.join(BIN_DIR, "SWORD/bin/SWORD")
     SWORD = os.path.join(SWORD_DIR, "SWORD")
     DISPLAY_SWORD2 = os.path.join(BIN_DIR, "display_SWORD2_output.pl")
 
