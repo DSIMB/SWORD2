@@ -657,6 +657,143 @@ def write_peeling_results(disable_energies):
                     f.write(f"    {str(start_pu)+'-'+str(end_pu):>7}\n")
 
 
+def generate_plots(i, part, mat, RESULTS_DIR, pus_colors):
+    fig1, ax1 = plt.subplots(figsize=(6, 9), dpi=150)
+    ax1.set_xlabel("Residues")
+    ax1.set_ylabel("Residues")
+    ax1.imshow(mat, cmap="RdPu")
+    ax1.invert_yaxis()
+    box1 = ax1.get_position()
+    ax1.set_position(
+        [box1.x0, box1.y0 + box1.height * 0.2, box1.width, box1.height * 0.9]
+    )
+    if i == 0:
+        ax1.set_title(
+            "Contact Probability Map of the\noptimal partition (all Protein Units)"
+        )
+    else:
+        ax1.set_title(
+            f"Contact Probability Map of the alternative\npartition n°{i} (all Protein Units)"
+        )
+    for j, domain in part["BOUNDARIES"].items():
+        fig2, ax2 = plt.subplots(figsize=(6, 9), dpi=150)
+        ax2.set_xlabel("Residues")
+        ax2.set_ylabel("Residues")
+        ax2.imshow(mat, cmap="RdPu")
+        ax2.invert_yaxis()
+        box2 = ax2.get_position()
+        ax2.set_position(
+            [box2.x0, box2.y0 + box2.height * 0.2, box2.width, box2.height * 0.9]
+        )
+        if i == 0:
+            ax2.set_title(
+                f"Contact Probability Map of the domain {j+1}\nof the optimal partition"
+            )
+        else:
+            ax2.set_title(
+                f"Contact Probability Map of the domain {j+1}\nof the alternative partition n°{i}"
+            )
+        for start_pu, end_pu in domain:
+            fig3, ax3 = plt.subplots(figsize=(5, 6.5), dpi=150)
+            ax3.set_xlabel("Residues")
+            ax3.set_ylabel("Residues")
+            ax3.imshow(mat, cmap="RdPu")
+            ax3.invert_yaxis()
+            if i == 0:
+                ax3.set_title(
+                    f"Contact Probability Map of PU {start_pu}-{end_pu} of the domain {j+1}\nof the optimal partition"
+                )
+            else:
+                ax3.set_title(
+                    f"Contact Probability Map of PU {start_pu}-{end_pu} of the domain {j+1}\nof the alternative partition n°{i}"
+                )
+            l = end_pu - start_pu
+            rect = patches.Rectangle(
+                (start_pu - 1, start_pu - 1),
+                l,
+                l,
+                linewidth=1.5,
+                edgecolor="#%02x%02x%02x" % pus_colors[(start_pu, end_pu)],
+                facecolor="none",
+            )
+            rect.set_label(f"{start_pu}-{end_pu}")
+            # Set labels on rectangles added to ax1 and ax2
+            rect1 = patches.Rectangle(
+                (start_pu - 1, start_pu - 1),
+                l,
+                l,
+                linewidth=1.5,
+                edgecolor="#%02x%02x%02x" % pus_colors[(start_pu, end_pu)],
+                facecolor="none",
+                label=f"{start_pu}-{end_pu}",
+            )
+            rect2 = patches.Rectangle(
+                (start_pu - 1, start_pu - 1),
+                l,
+                l,
+                linewidth=1.5,
+                edgecolor="#%02x%02x%02x" % pus_colors[(start_pu, end_pu)],
+                facecolor="none",
+                label=f"{start_pu}-{end_pu}",
+            )
+            ax1.add_patch(rect1)
+            ax2.add_patch(rect2)
+            ax3.add_patch(rect)
+            ax3.legend(
+                title="Protein Unit",
+                loc="upper center",
+                bbox_to_anchor=(0.5, -0.15),
+                fancybox=False,
+                shadow=False,
+                ncol=3,
+                frameon=False
+            )
+            fig3.savefig(
+                os.path.join(
+                    RESULTS_DIR,
+                    "Contact_Probability_Matrix",
+                    f"contact_probability_matrix_alternative_{i}_domain_{j}_pu_{start_pu}_{end_pu}.png",
+                ),
+                bbox_inches='tight',
+            )
+            plt.close(fig3)
+        ax2.legend(
+            title="Protein Units",
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.15),
+            fancybox=True,
+            shadow=False,
+            ncol=3,
+            frameon=False
+        )
+        fig2.savefig(
+            os.path.join(
+                RESULTS_DIR,
+                "Contact_Probability_Matrix",
+                f"contact_probability_matrix_alternative_{i}_domain_{j}.png",
+            ),
+            bbox_inches='tight'
+        )
+        plt.close(fig2)
+    ax1.legend(
+        title="Protein Units",
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.15),
+        fancybox=True,
+        shadow=False,
+        ncol=3,
+        frameon=False
+    )
+    fig1.savefig(
+        os.path.join(
+            RESULTS_DIR,
+            "Contact_Probability_Matrix",
+            f"contact_probability_matrix_alternative_{i}.png",
+        ),
+        bbox_inches='tight',
+    )
+    plt.close(fig1)
+
 if __name__ == "__main__":
     
     start = time.time()
@@ -967,143 +1104,7 @@ if __name__ == "__main__":
     #############
     # Contact map
     #############
-    
-    def generate_plots(i, part, mat, RESULTS_DIR, pus_colors):
-        fig1, ax1 = plt.subplots(figsize=(6, 9), dpi=150)
-        ax1.set_xlabel("Residues")
-        ax1.set_ylabel("Residues")
-        ax1.imshow(mat, cmap="RdPu")
-        ax1.invert_yaxis()
-        box1 = ax1.get_position()
-        ax1.set_position(
-            [box1.x0, box1.y0 + box1.height * 0.2, box1.width, box1.height * 0.9]
-        )
-        if i == 0:
-            ax1.set_title(
-                "Contact Probability Map of the\noptimal partition (all Protein Units)"
-            )
-        else:
-            ax1.set_title(
-                f"Contact Probability Map of the alternative\npartition n°{i} (all Protein Units)"
-            )
-        for j, domain in part["BOUNDARIES"].items():
-            fig2, ax2 = plt.subplots(figsize=(6, 9), dpi=150)
-            ax2.set_xlabel("Residues")
-            ax2.set_ylabel("Residues")
-            ax2.imshow(mat, cmap="RdPu")
-            ax2.invert_yaxis()
-            box2 = ax2.get_position()
-            ax2.set_position(
-                [box2.x0, box2.y0 + box2.height * 0.2, box2.width, box2.height * 0.9]
-            )
-            if i == 0:
-                ax2.set_title(
-                    f"Contact Probability Map of the domain {j+1}\nof the optimal partition"
-                )
-            else:
-                ax2.set_title(
-                    f"Contact Probability Map of the domain {j+1}\nof the alternative partition n°{i}"
-                )
-            for start_pu, end_pu in domain:
-                fig3, ax3 = plt.subplots(figsize=(5, 6.5), dpi=150)
-                ax3.set_xlabel("Residues")
-                ax3.set_ylabel("Residues")
-                ax3.imshow(mat, cmap="RdPu")
-                ax3.invert_yaxis()
-                if i == 0:
-                    ax3.set_title(
-                        f"Contact Probability Map of PU {start_pu}-{end_pu} of the domain {j+1}\nof the optimal partition"
-                    )
-                else:
-                    ax3.set_title(
-                        f"Contact Probability Map of PU {start_pu}-{end_pu} of the domain {j+1}\nof the alternative partition n°{i}"
-                    )
-                l = end_pu - start_pu
-                rect = patches.Rectangle(
-                    (start_pu - 1, start_pu - 1),
-                    l,
-                    l,
-                    linewidth=1.5,
-                    edgecolor="#%02x%02x%02x" % pus_colors[(start_pu, end_pu)],
-                    facecolor="none",
-                )
-                rect.set_label(f"{start_pu}-{end_pu}")
-                # Set labels on rectangles added to ax1 and ax2
-                rect1 = patches.Rectangle(
-                    (start_pu - 1, start_pu - 1),
-                    l,
-                    l,
-                    linewidth=1.5,
-                    edgecolor="#%02x%02x%02x" % pus_colors[(start_pu, end_pu)],
-                    facecolor="none",
-                    label=f"{start_pu}-{end_pu}",
-                )
-                rect2 = patches.Rectangle(
-                    (start_pu - 1, start_pu - 1),
-                    l,
-                    l,
-                    linewidth=1.5,
-                    edgecolor="#%02x%02x%02x" % pus_colors[(start_pu, end_pu)],
-                    facecolor="none",
-                    label=f"{start_pu}-{end_pu}",
-                )
-                ax1.add_patch(rect1)
-                ax2.add_patch(rect2)
-                ax3.add_patch(rect)
-                ax3.legend(
-                    title="Protein Unit",
-                    loc="upper center",
-                    bbox_to_anchor=(0.5, -0.15),
-                    fancybox=False,
-                    shadow=False,
-                    ncol=3,
-                    frameon=False
-                )
-                fig3.savefig(
-                    os.path.join(
-                        RESULTS_DIR,
-                        "Contact_Probability_Matrix",
-                        f"contact_probability_matrix_alternative_{i}_domain_{j}_pu_{start_pu}_{end_pu}.png",
-                    ),
-                    bbox_inches='tight',
-                )
-                plt.close(fig3)
-            ax2.legend(
-                title="Protein Units",
-                loc="upper center",
-                bbox_to_anchor=(0.5, -0.15),
-                fancybox=True,
-                shadow=False,
-                ncol=3,
-                frameon=False
-            )
-            fig2.savefig(
-                os.path.join(
-                    RESULTS_DIR,
-                    "Contact_Probability_Matrix",
-                    f"contact_probability_matrix_alternative_{i}_domain_{j}.png",
-                ),
-                bbox_inches='tight'
-            )
-            plt.close(fig2)
-        ax1.legend(
-            title="Protein Units",
-            loc="upper center",
-            bbox_to_anchor=(0.5, -0.15),
-            fancybox=True,
-            shadow=False,
-            ncol=3,
-            frameon=False
-        )
-        fig1.savefig(
-            os.path.join(
-                RESULTS_DIR,
-                "Contact_Probability_Matrix",
-                f"contact_probability_matrix_alternative_{i}.png",
-            ),
-            bbox_inches='tight',
-        )
-        plt.close(fig1)
+
     if not disable_plots:
         font = {"weight": "normal", "size": 11}
         plt.rc("font", **font)
