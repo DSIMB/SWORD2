@@ -710,7 +710,7 @@ if __name__ == "__main__":
     group = parser.add_mutually_exclusive_group(required=True)
     optional = parser.add_argument_group("optional arguments")
     required = parser.add_argument_group("required arguments")
-    parser.add_argument("--version", action="version", version="SWORD2 1.1.2")
+    parser.add_argument("--version", action="version", version="SWORD2 2.0.0")
     group.add_argument(
         "-u", "--uniprot-id", help="AlphaFold Uniprot Accession Id.", type=str
     )
