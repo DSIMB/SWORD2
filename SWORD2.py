@@ -27,8 +27,9 @@ from prody import *
 import logging as log
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-
+log.disable(log.CRITICAL)
 confProDy(verbosity="info")
+log.disable(log.NOTSET)
 from prody import LOGGER as logging
 # Create a new formatter with the desired format
 formatter = log.Formatter("%(asctime)s %(levelname)-8s %(message)s", datefmt="%Y/%m/%d %H:%M:%S")
@@ -511,10 +512,16 @@ def write_domains_histogram(sword_results, domains_colors):
     fig.write_image(histogram, scale=4)
 
 
-def predict_time(prot):
-    """Predict time in seconds based on protein length. 40,1e^6,7E-04x """
-    return int(40.1 * math.exp(6.7e-04 * len(set(prot.getResnums()))))
+def predict_time_full(prot):
+    """Predict time in seconds based on protein length when user runs SWORD2 completely."""
+    x = len(set(prot.getResnums()))
+    return int(16.8 + 0.163 * x - 4.3e-5 * x**2)
 
+def predict_time_no_energy_no_plots(prot):
+    """Predict time in seconds based on protein length when user runs SWORD2 with options -e and -l
+    meaning without calculation of pseudo-energies and plots"""
+    x = len(set(prot.getResnums()))
+    return int(4.23 + 0.0412 * x - 8.42e-6 * x**2)
 
 def get_energy_and_z_score(bin_dir, pdb, res_list=None):
     """
@@ -651,6 +658,8 @@ def write_peeling_results(disable_energies):
 
 
 if __name__ == "__main__":
+    
+    start = time.time()
 
     def check_cpu(nb_cpu):
         """
@@ -820,7 +829,11 @@ if __name__ == "__main__":
                 shutil.move(full_file_name, RESULTS_DIR)
 
     # predict_time(prot) returns the time in seconds
-    est_time_in_seconds = predict_time(prot)
+    est_time_in_seconds = None
+    if disable_energies and disable_plots:
+        est_time_in_seconds = predict_time_no_energy_no_plots(prot)
+    else:
+        est_time_in_seconds = predict_time_full(prot)
 
     if est_time_in_seconds < 60:
         est_time_str = f"Estimated runtime: {est_time_in_seconds} seconds"
@@ -1157,3 +1170,5 @@ if __name__ == "__main__":
     )
     os.system(f"mv {RESULTS_DIR}/SWORD/*/Peeling {RESULTS_DIR}/Protein_Units")
     logging.info(f"Results can be found here: {RESULTS_DIR}")
+
+    logging.info(f"Total runtime: {int(time.time()-start)} seconds")
