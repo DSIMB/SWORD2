@@ -898,7 +898,7 @@ if __name__ == "__main__":
     if not os.path.exists(SWORD_DIR + "/bin/Dssp/dsspcmbi"):
         subprocess.run(SWORD, capture_output=True)
     cmd_args = (
-        f"{DISPLAY_SWORD2} '{SWORD} -i {pdb_id_chain} --dir {RESULTS_DIR} -max 9'"
+        f"{DISPLAY_SWORD2} '{SWORD} -i {pdb_id_chain} --dir {RESULTS_DIR} -max 9 -nbcpu {nb_cpu}'"
     )
     cmd_args = shlex.split(cmd_args)
     output = subprocess.run(cmd_args, capture_output=True, check=True)
