@@ -105,7 +105,7 @@ Then, launch SWORD2:
 To get the full help:
 ```console
 $ ./SWORD2.py --help
-usage: SWORD2.py [-h] [--version] (-u UNIPROT_ID | -m MGNIFY_ID | -p PDB_ID | -i INPUT_FILE) [-c PDB_CHAIN] [-d MODEL] [-x CPU] [-e] -o OUTPUT
+usage: SWORD2.py [-h] [--version] (-u UNIPROT_ID | -m MGNIFY_ID | -p PDB_ID | -i INPUT_FILE) [-c PDB_CHAIN] [-d MODEL] [-x CPU] [-e] [-l] -o OUTPUT
 
 SWORD2: SWift and Optimized Recognition of protein Domains.
 The SWORD2 partitioning algorithm produces multiple alternative
@@ -130,12 +130,13 @@ options:
 
 optional arguments:
   -c PDB_CHAIN, --pdb-chain PDB_CHAIN
-                        PDB chain. Default is A.
+                        PDB chain. If not specified, the first chain in the PDB file will be used.
   -d MODEL, --model MODEL
-                        Model to parse. Especially usefull for NMR files which contain several models. Default is 1.
-  -x CPU, --cpu CPU     Number of CPUs to use. Default all (0). Max on this computer is: 40
+                        Model to parse. Especially useful for NMR files which contain several models. Default is 1.
+  -x CPU, --cpu CPU     Number of CPUs to use. Default all (0). Max on this computer is: 10
   -e, --disable-energies
                         Disable the calculation of pseudo-energy of domains and PUs.
+  -l, --disable-plots   Disable the generation of contact probability matrices plots.
 
 required arguments:
   -o OUTPUT, --output OUTPUT
