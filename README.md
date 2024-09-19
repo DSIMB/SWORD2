@@ -150,26 +150,25 @@ Example:
 ```
 $ conda activate sword2
 (sword2) $ ./SWORD2.py -p 1jx4 -o results
-2024/09/17 16:23:34 INFO     Fetch PDB ID: 1jx4
-2024/09/17 16:23:34 DEBUG    Connecting wwPDB FTP server RCSB PDB (USA).
-2024/09/17 16:23:36 DEBUG    1jx4 downloaded (results/1jx4_A/1jx4.pdb)
-2024/09/17 16:23:36 DEBUG    PDB download via FTP completed (1 downloaded, 0 failed).
-2024/09/17 16:23:36 DEBUG    3162 atoms and 1 coordinate set(s) were parsed in 0.05s.
-2024/09/17 16:23:36 INFO
-2024/09/17 16:23:36 INFO     >>>   Estimated runtime: 50 seconds
-2024/09/17 16:23:36 INFO     >>>   Using 40 cpus
-2024/09/17 16:23:36 INFO
-2024/09/17 16:23:36 INFO     Write a clean version of the PDB: remove non standard residues
-2024/09/17 16:23:36 INFO     Launch SWORD
-2024/09/17 16:23:49 INFO     Parse SWORD output
-2024/09/17 16:23:49 INFO     Calculate pseudo-energies of Domains
-2024/09/17 16:23:57 INFO     Write the SWORD results
-2024/09/17 16:23:57 INFO     Writing Peeling results
-2024/09/17 16:24:01 INFO     Finished writing Peeling results
-2024/09/17 16:24:01 INFO     Generate histogram of SWORD2 domains consistency
-2024/09/17 16:24:22 INFO     Calculate junctions consistencies
-2024/09/17 16:24:22 INFO     Clean and prepare results
-2024/09/17 16:24:22 INFO     Results can be found here: results/1jx4_A
+2024/09/19 11:14:27 INFO     Fetch PDB ID: 1jx4
+2024/09/19 11:14:28 INFO     No chain specified. Using first chain 'A' in the PDB file.
+2024/09/19 11:14:28 INFO
+2024/09/19 11:14:28 INFO     >>>   1jx4_A (335 aa)
+2024/09/19 11:14:28 INFO     >>>   Estimated runtime: 1 minutes and 6 seconds
+2024/09/19 11:14:28 INFO     >>>   Using 10 cpus
+2024/09/19 11:14:28 INFO
+2024/09/19 11:14:28 INFO     Write a clean version of the PDB: remove non standard residues
+2024/09/19 11:14:28 INFO     Launch SWORD
+2024/09/19 11:14:34 INFO     Parse SWORD output
+2024/09/19 11:14:34 INFO     Calculate pseudo-energies of Domains
+2024/09/19 11:15:27 INFO     Write the SWORD results
+2024/09/19 11:15:27 INFO     Write Peeling results
+2024/09/19 11:15:48 INFO     Generate histogram of SWORD2 domains consistency
+2024/09/19 11:15:49 INFO     Generate contact probability matrices
+2024/09/19 11:15:54 INFO     Calculate junctions consistencies
+2024/09/19 11:15:54 INFO     Clean and prepare results
+2024/09/19 11:15:54 INFO     Results can be found here: results/1jx4_A
+2024/09/19 11:15:54 INFO     Total runtime: 87 seconds
 ```
 
 An easily parseable output in JSON format is generated for easier downstream tasks/analysis: `SWORD2_summary.json`
