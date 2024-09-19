@@ -48,16 +48,16 @@ bash install.sh
 
 Otherwise, a docker is also available:
 ```
-docker pull dsimb/sword2
+docker pull dsimb/sword2:latest
 ```
 
 ## How to use SWORD2
 
 Launch the docker version:
 ```
-# This will mount the local `results` directory inside the Docker image and run the program inside the image as you (local user)
-# so that the results generated have good rights.
-docker run -it -e LOCAL_UID=$(id -u $USER) -e LOCAL_GID=$(id -g $USER) -v $(pwd)/results:/app/results dsimb/sword2 -p 1jx4 -o results
+# This will mount the local `results` directory inside the `/output` Docker image directory and run SWORD2 as you (local user)
+# so that the results files are owned by you and not root.
+(sudo) docker run --rm -e USER_ID=$(id -u) -e GROUP_ID=$(id -g) -v $(pwd)/results:/output dsimb/sword2:latest -p 1jx4 -o /output
 ```
 
 First, activate the working environment:

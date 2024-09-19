@@ -44,28 +44,34 @@ LABEL maintainer="gabriel.cretin@u-paris.fr"
 # Keep only necessary files from previous stage: conda env
 COPY --from=mamba_build /venv /venv
 
+# Set the working directory to /app
 WORKDIR /app
 
 # Copy sources to build the program
 COPY install.sh install.sh
 COPY bin/ bin/
 COPY SWORD2.py SWORD2.py
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
-RUN bash install.sh
+# Make the entrypoint script executable
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-# Use `bash --login`:
-SHELL ["/bin/bash", "--login", "-c"]
-
-# Activate the conda environment by setting env paths
-ENV PATH="/venv/bin:$PATH"
+# Make sure the Conda environment's binaries are in the PATH
+ENV PATH=/venv/bin:$PATH
 ENV CONDA_PREFIX="/venv"
 
-RUN echo $'#!/bin/bash\n\
-USER_ID=${LOCAL_UID:-9001}\n\
-GROUP_ID=${LOCAL_GID:-9001}\n\
-#echo "Starting with UID: $USER_ID, GID: $GROUP_ID"\n\
-useradd -u $USER_ID -o -m user\n\
-groupmod -g $GROUP_ID user\n\
-/app/SWORD2.py "$@"' > entrypoint.sh && chmod +x entrypoint.sh
+# Activate the Conda environment and run the install.sh script
+# This step compiles all C/C++ dependencies
+RUN bash install.sh
 
-ENTRYPOINT [ "/app/entrypoint.sh" ]
+# Change ownership of the /app directory to root initially
+RUN chown -R root:root /app
+
+# Switch back to root to allow the entrypoint script to manage user creation
+USER root
+
+# Set the entrypoint to the entrypoint script
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+
+# Define a volume for the output directory
+VOLUME /output
