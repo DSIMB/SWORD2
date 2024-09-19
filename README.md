@@ -2,7 +2,7 @@
 
 [![DOI](https://zenodo.org/badge/518046197.svg)](https://zenodo.org/badge/latestdoi/518046197)
 [![Docker Pulls](https://img.shields.io/docker/pulls/dsimb/sword2.svg)](https://hub.docker.com/r/dsimb/sword2)
-
+![GitHub Release](https://img.shields.io/github/v/release/DSIMB/SWORD2)
 
 The SWORD2 partitioning algorithm produces multiple alternative domain assignments for a given protein structure. This unique approach handles ambiguous protein structure partitioning, admitting several solutions. The decomposition of the protein structure into domains is achieved through the hierarchical clustering of Protein Units, evolutionarily preserved structural descriptors at the interface between secondary structures and domains.
 
@@ -13,9 +13,11 @@ The SWORD2 partitioning algorithm produces multiple alternative domain assignmen
 </picture>
 </p>
 
-This is the repository of the standalone version of the corresponding webserver:  
-https://www.dsimb.inserm.fr/SWORD2/index.html
 
+## Webserver
+
+This is the repository of the standalone version of the corresponding webserver:  
+[dsimb.inserm.fr/SWORD2](https://dsimb.inserm.fr/SWORD2)
 
 
 ## Publications
@@ -30,7 +32,7 @@ Science advances, 3(1), e1600552.10.1126/sciadv.1600552](https://doi.org/10.1126
 
 
 
-## Install (Linux, macOS <= 13 Intel, M1/M2, Windows)
+## Install on Linux, macOS (Intel & Apple Silicon) and Windows
 
 (Easy & recommanded)  
 Install the conda environment using the `environment.yml` file:
@@ -71,11 +73,6 @@ Then, launch SWORD2:
 ./SWORD2.py -p 1jx4 -o results
 ```
 
-#### Skip calculation of pseudo-energy (faster):
-```
-./SWORD2.py -p 1jx4 -o results --disable-energy
-```
-
 #### On an AlphaFold predicted structure using its Uniprot Accession Id:
 ```
 ./SWORD2.py -u Q76EI6 -o results
@@ -94,6 +91,13 @@ Then, launch SWORD2:
 #### On your own PDB/mmCIF of an NMR structure, model 2:
 ```
 ./SWORD2.py -i ./structure.pdb -d 2 -o results
+```
+
+## Fast mode 
+
+#### Skip calculation of pseudo-energy and plots of contact probability maps (2x faster)
+```
+./SWORD2.py -p 1jx4 -o results --disable-energy --disable-plots
 ```
 
 ## Help
