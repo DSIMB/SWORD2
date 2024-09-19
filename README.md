@@ -99,6 +99,11 @@ Then, launch SWORD2:
 ./SWORD2.py -p 1jx4 -o results --disable-energy --disable-plots
 ```
 
+## Memory usage
+
+SWORD2 will have a peak memory usage of 150-200 Mb for average protein sizes of 100-300 residues.
+The largest proteins, for example 2700 residues can take up to 1.5 Gb memory.
+
 ## Help
 
 To get the full help:
