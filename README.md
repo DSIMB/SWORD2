@@ -1,6 +1,5 @@
 # SWORD2: SWift and Optimized Recognition of protein Domains
 
-[![DOI](https://zenodo.org/badge/518046197.svg)](https://zenodo.org/badge/latestdoi/518046197)
 [![Docker Pulls](https://img.shields.io/docker/pulls/dsimb/sword2.svg)](https://hub.docker.com/r/dsimb/sword2)
 ![GitHub Release](https://img.shields.io/github/v/release/DSIMB/SWORD2)
 
