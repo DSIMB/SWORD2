@@ -53,13 +53,15 @@ docker pull dsimb/sword2:latest
 
 ## How to use SWORD2
 
-Launch the docker version:
+### Docker
+
 ```
 # This will mount the local `results` directory inside the `/output` Docker image directory and run SWORD2 as you (local user)
 # so that the results files are owned by you and not root.
 (sudo) docker run --rm -e USER_ID=$(id -u) -e GROUP_ID=$(id -g) -v $(pwd)/results:/output dsimb/sword2:latest -p 1jx4 -o /output
 ```
 
+### Conda
 First, activate the working environment:
 ```
 conda activate sword2
