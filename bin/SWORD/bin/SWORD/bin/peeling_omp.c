@@ -677,9 +677,20 @@ void parse_dssp(const char *dssp_filename) {
         if (isspace(line[126]) || line[126] == '-')
             continue;
 
-        char ss2 = line[16];
+        /* Adjust the line as in the old code */
+        line[6] = ' ';
+        line[11] = ' ';
+
         int numaa2;
         sscanf(&line[6], "%d", &numaa2);
+
+        /* Read and check the amino acid type */
+        char aatype[2];
+        aatype[0] = line[13];
+        aatype[1] = '\0';
+
+        if (aatype[0] == '!')
+            continue;
 
         if (index2 >= capacity) {
             capacity *= 2;
@@ -692,6 +703,8 @@ void parse_dssp(const char *dssp_filename) {
         }
 
         tab_true_num[index2] = numaa2;
+
+        char ss2 = line[16];
 
         if (isspace(ss2))
             tab_ss2[index2] = 0;
