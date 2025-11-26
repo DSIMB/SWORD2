@@ -98,7 +98,7 @@ Then, launch SWORD2:
 
 #### Skip calculation of pseudo-energy and plots of contact probability maps (2x faster)
 ```
-./SWORD2.py -p 1jx4 -o results --disable-energy --disable-plots
+./SWORD2.py -p 1jx4 -o results --disable-energies --disable-plots
 ```
 
 ## Memory usage
