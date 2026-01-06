@@ -905,7 +905,7 @@ if __name__ == "__main__":
     input_file = args.input_file
     pdb_chain = args.pdb_chain
     model = args.model
-    output_dir = args.output
+    output_dir = os.path.abspath(args.output)
     nb_cpu = args.cpu if args.cpu != 0 else multiprocessing.cpu_count()
     disable_energies = args.disable_energies
     disable_plots = args.disable_plots
