@@ -1,0 +1,11 @@
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Build artifacts
+*.o
+bin/SWORD/bin/SWORD/bin/Dssp/dsspcmbi
+bin/SWORD/bin/SWORD/bin/Peeling_omp
+bin/mypmfs-master/scoring_omp
