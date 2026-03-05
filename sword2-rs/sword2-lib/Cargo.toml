@@ -1,0 +1,19 @@
+[package]
+name = "sword2-lib"
+version = "2.0.0"
+edition = "2021"
+description = "SWORD2: SWift and Optimized Recognition of protein Domains - library"
+
+[dependencies]
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["blocking"] }
+rayon = "1"
+regex = "1"
+flate2 = "1"
+chrono = "0.4"
+num_cpus = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
