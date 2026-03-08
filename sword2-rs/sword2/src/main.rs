@@ -140,7 +140,14 @@ fn main() -> Result<()> {
     let chain_id = if let Some(ref chain_str) = cli.chain {
         chain_str.chars().next().unwrap_or('A')
     } else if let Some(model) = structure.first_model() {
-        if let Some(chain) = model.chains.first() {
+        // Find the first chain that contains at least one standard amino acid residue
+        // (skip nucleic acid chains like DNA/RNA)
+        if let Some(chain) = model.chains.iter().find(|c| {
+            c.residues.iter().any(|r| pdb::amino_acids::is_standard(&r.name))
+        }) {
+            tracing::info!("No chain specified. Using first protein chain '{}'", chain.id);
+            chain.id
+        } else if let Some(chain) = model.chains.first() {
             tracing::info!("No chain specified. Using first chain '{}'", chain.id);
             chain.id
         } else {
