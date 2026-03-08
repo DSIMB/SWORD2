@@ -5,6 +5,7 @@
 
 pub mod dssp;
 pub mod energy;
+pub mod fetch;
 pub mod output;
 pub mod pdb;
 pub mod peeling;
