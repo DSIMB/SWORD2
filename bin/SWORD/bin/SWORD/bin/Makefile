@@ -39,7 +39,8 @@ ifeq ($(OS), Darwin)
     # CFLAGS += -I/path/to/libomp/include
     # LDFLAGS += -L/path/to/libomp/lib -lomp
 else
-	# Linker flags
+	# OpenMP flags for both compilation and linking
+	CFLAGS += -fopenmp
 	LDFLAGS := -fopenmp
 endif
 
