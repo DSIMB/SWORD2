@@ -51,6 +51,12 @@ bash install.sh
 
 The Rust version provides the same core pipeline (SWORD partitioning, peeling, pseudo-energies) with faster startup and lower overhead. It requires [Rust](https://www.rust-lang.org/tools/install) (1.70+).
 
+On macOS, you also need the Xcode Command Line Tools with the license accepted:
+```bash
+xcode-select --install        # install if missing
+sudo xcodebuild -license      # accept the license
+```
+
 ```bash
 # Install Rust (if not already installed)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
