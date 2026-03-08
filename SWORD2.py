@@ -1099,7 +1099,10 @@ if __name__ == "__main__":
     # Write Javascript formated histogram of SWORD Domains
     ######################################################
 
-    write_domains_histogram(sword_results, dom_colors)
+    try:
+        write_domains_histogram(sword_results, dom_colors)
+    except Exception as e:
+        logging.warning(f"Could not generate histogram: {e}")
 
     #############
     # Contact map

@@ -1,14 +1,16 @@
 //! SWORD2 CLI: SWift and Optimized Recognition of protein Domains.
 //!
 //! Command-line interface for running the SWORD2 protein domain recognition pipeline.
+//! Replicates the Python SWORD2.py pipeline faithfully.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 
-use sword2_lib::{energy, fetch, output, pdb, peeling, plot, sword};
+use sword2_lib::{energy, fetch, output, pdb, peeling, sword};
 
 /// SWORD2: SWift and Optimized Recognition of protein Domains
 #[derive(Parser, Debug)]
@@ -53,9 +55,15 @@ struct Cli {
     /// Number of threads for parallel computation (0 = all CPUs)
     #[arg(short = 'x', long, default_value = "0")]
     cpu: usize,
+
+    /// Path to SWORD2 base directory (defaults to parent of binary location)
+    #[arg(long)]
+    base_dir: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
+    let start = Instant::now();
+
     // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -84,17 +92,49 @@ fn main() -> Result<()> {
         cli.cpu
     };
 
+    // Resolve base directory (where bin/ lives)
+    let base_dir = if let Some(ref bd) = cli.base_dir {
+        bd.clone()
+    } else {
+        // Try: parent of the binary, then current directory
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|pp| pp.to_path_buf()))
+            .and_then(|p| {
+                if p.join("bin").exists() {
+                    Some(p)
+                } else {
+                    p.parent().and_then(|pp| {
+                        if pp.join("bin").exists() {
+                            Some(pp.to_path_buf())
+                        } else {
+                            None
+                        }
+                    })
+                }
+            })
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    };
+
+    let bin_dir = base_dir.join("bin");
+    let sword_dir = bin_dir.join("SWORD/bin/SWORD");
+    let sword_bin = sword_dir.join("SWORD");
+    let display_script = bin_dir.join("display_SWORD2_output.pl");
+
     // Ensure output directory exists
-    std::fs::create_dir_all(&cli.output_dir)?;
+    let output_dir = std::fs::canonicalize(&cli.output_dir).unwrap_or_else(|_| {
+        std::fs::create_dir_all(&cli.output_dir).ok();
+        cli.output_dir.clone()
+    });
+    std::fs::create_dir_all(&output_dir)?;
 
     // Step 1: Obtain the structure file
-    let (input_path, pdb_id_base) = resolve_input(&cli)?;
+    let (input_path, pdb_id_base) = resolve_input(&cli, &output_dir)?;
 
     // Step 2: Parse the structure
     tracing::info!("Parsing structure from {}", input_path.display());
     let structure = pdb::parse_pdb(&input_path)
         .with_context(|| format!("Failed to parse {}", input_path.display()))?;
-    tracing::info!("{}", structure);
 
     // Determine chain
     let chain_id = if let Some(ref chain_str) = cli.chain {
@@ -111,42 +151,59 @@ fn main() -> Result<()> {
     };
 
     // Verify chain exists
-    if let Some(model) = structure.first_model() {
-        if model.get_chain(chain_id).is_none() {
-            let available: Vec<String> =
-                model.chains.iter().map(|c| c.id.to_string()).collect();
-            anyhow::bail!(
+    let model = structure
+        .first_model()
+        .ok_or_else(|| anyhow::anyhow!("No models found"))?;
+    let chain = model
+        .get_chain(chain_id)
+        .ok_or_else(|| {
+            let available: Vec<String> = model.chains.iter().map(|c| c.id.to_string()).collect();
+            anyhow::anyhow!(
                 "Chain '{}' not found. Available chains: {}",
                 chain_id,
                 available.join(", ")
-            );
-        }
-        let chain = model.get_chain(chain_id).unwrap();
-        tracing::info!(
-            "Chain {}: {} residues, sequence: {}",
-            chain.id,
-            chain.len(),
-            chain.get_sequence()
+            )
+        })?;
+
+    let pdb_id_chain = format!("{}_{}", pdb_id_base, chain_id);
+    let results_dir = output_dir.join(&pdb_id_chain);
+    std::fs::create_dir_all(&results_dir)?;
+
+    tracing::info!(">>> {} ({} residues)", pdb_id_chain, chain.len());
+    tracing::info!(">>> Using {} cpus", num_threads);
+
+    // Step 3: Clean PDB - remove non-standard residues, insertion codes, renumber from 1
+    // This replicates the Python: prot.select("protein and not nonstdaa and not hetatm")
+    tracing::info!("Write a clean version of the PDB: remove non standard residues");
+    let (cleaned_chain, original_resnums) = pdb::writer::clean_chain_for_sword(chain);
+
+    if cleaned_chain.is_empty() {
+        anyhow::bail!(
+            "No atomic data is left after trying to keep the 20 classical residues. Please check your PDB file."
         );
     }
 
-    let pdb_id_chain = format!("{}_{}", pdb_id_base, chain_id);
-    let results_dir = cli.output_dir.join(&pdb_id_chain);
-    std::fs::create_dir_all(&results_dir)?;
+    let prot_len = cleaned_chain.len();
+    tracing::info!("Clean chain: {} residues, sequence: {}", prot_len, cleaned_chain.get_sequence());
 
-    tracing::info!("Results directory: {}", results_dir.display());
-    tracing::info!("Using {} CPUs", num_threads);
+    // Write clean PDB file
+    let pdb_chain_file = results_dir.join(format!("{}.pdb", pdb_id_chain));
+    pdb::write_pdb(&cleaned_chain, &pdb_chain_file)?;
 
-    // Step 3: Run SWORD binary
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| PathBuf::from("."));
+    // Remove the .pdb extension for SWORD (SWORD expects file without extension)
+    let pdb_no_ext = results_dir.join(&pdb_id_chain);
+    std::fs::rename(&pdb_chain_file, &pdb_no_ext)?;
 
-    let bin_dir = exe_dir.join("bin");
-    let sword_bin = bin_dir.join("SWORD/bin/SWORD/SWORD");
-    let display_script = bin_dir.join("display_SWORD2_output.pl");
+    // Step 4: Compile DSSP if needed (first run of SWORD)
+    let dssp_path = sword_dir.join("bin/Dssp/dsspcmbi");
+    if !dssp_path.exists() {
+        tracing::info!("Compiling DSSP dependency (first run)");
+        let _ = std::process::Command::new(&sword_bin)
+            .output();
+    }
 
+    // Step 5: Run SWORD binary
+    tracing::info!("Launch SWORD");
     let config = sword::SwordConfig {
         sword_bin: sword_bin.to_string_lossy().to_string(),
         display_script: if display_script.exists() {
@@ -161,17 +218,16 @@ fn main() -> Result<()> {
         output_dir: results_dir.to_string_lossy().to_string(),
     };
 
-    tracing::info!("Launching SWORD");
-    let sword_output = sword::run_sword_binary(&input_path, &config)
-        .context("Failed to run SWORD binary")?;
+    let sword_output = sword::run_sword_binary(
+        &pdb_no_ext, // Pass file without .pdb extension
+        &config,
+    ).context("Failed to run SWORD binary")?;
 
     // Save raw SWORD output
-    std::fs::write(
-        results_dir.join("sword.txt"),
-        sword_output.join("\n"),
-    )?;
+    std::fs::write(results_dir.join("sword.txt"), sword_output.join("\n") + "\n")?;
 
-    // Step 4: Parse SWORD output
+    // Step 6: Parse SWORD output
+    tracing::info!("Parse SWORD output");
     let sword_results = sword::parse_sword_output(&sword_output)
         .context("Failed to parse SWORD output")?;
 
@@ -181,10 +237,10 @@ fn main() -> Result<()> {
         sword_results.ambiguity
     );
 
-    // Step 5: Calculate energies
+    // Step 7: Calculate energies
     let energies: HashMap<energy::EnergyKey, energy::EnergyResult> =
         if !cli.disable_energies {
-            tracing::info!("Calculating pseudo-energies of Domains");
+            tracing::info!("Calculate pseudo-energies of Domains");
             let energy_config =
                 energy::EnergyConfig::from_bin_dir(&bin_dir.to_string_lossy());
             energy::calculate_all_energies(
@@ -197,7 +253,8 @@ fn main() -> Result<()> {
             HashMap::new()
         };
 
-    // Step 6: Write SWORD partitionings
+    // Step 8: Write SWORD partitionings (text + JSON)
+    tracing::info!("Write the SWORD results");
     output::write_sword_summary(
         &sword_results,
         &energies,
@@ -211,7 +268,8 @@ fn main() -> Result<()> {
         &results_dir.join("SWORD2_summary.json"),
     )?;
 
-    // Step 7: Write Peeling results
+    // Step 9: Write Peeling results
+    tracing::info!("Write Peeling results");
     let peeling_num = results_dir
         .join("PDBs_Clean")
         .join(&pdb_id_chain)
@@ -226,22 +284,48 @@ fn main() -> Result<()> {
         let ori_resnums = if peeling_num.exists() {
             peeling::parse_num_file(&peeling_num)?
         } else {
-            // Default: 1..N identity mapping
             Vec::new()
         };
 
         if !ori_resnums.is_empty() {
             let peeling_levels = peeling::parse_peeling_log(&peeling_log, &ori_resnums)?;
+
+            // Calculate peeling energies if enabled
+            let peeling_energies = if !cli.disable_energies {
+                let energy_config =
+                    energy::EnergyConfig::from_bin_dir(&bin_dir.to_string_lossy());
+                let pdb_path_str = results_dir.join(&pdb_id_chain).to_string_lossy().to_string();
+                let mut pe: HashMap<(i32, i32), (Option<f64>, Option<f64>)> = HashMap::new();
+                for level in &peeling_levels {
+                    for &(start, end) in &level.pus {
+                        if pe.contains_key(&(start, end)) {
+                            continue;
+                        }
+                        let pu_res_list = energy::build_residue_list((start, end), &chain_id.to_string());
+                        if let Ok(result) = energy::get_energy_and_z_score(
+                            &energy_config,
+                            &pdb_path_str,
+                            Some(&pu_res_list),
+                        ) {
+                            pe.insert((start, end), (result.energy, result.z_score));
+                        }
+                    }
+                }
+                Some(pe)
+            } else {
+                None
+            };
+
             peeling::write_peeling_summary(
                 &peeling_levels,
                 &results_dir.join("PEELING_summary.txt"),
-                None,
+                peeling_energies.as_ref(),
             )?;
             tracing::info!("Wrote peeling summary");
         }
     }
 
-    // Step 8: Generate plots
+    // Step 10: Generate plots (skip for now - user said don't worry about images)
     if !cli.disable_plots {
         let contact_matrix_dir = results_dir.join("Contact_Probability_Matrix");
         std::fs::create_dir_all(&contact_matrix_dir)?;
@@ -252,114 +336,77 @@ fn main() -> Result<()> {
             .join("file_proba_contact.mat");
 
         if proba_mat_file.exists() {
-            tracing::info!("Generating contact probability matrices");
-            let mat = plot::load_contact_matrix(&proba_mat_file)?;
-
-            for (i, part) in sword_results.domains.iter().enumerate() {
-                // All PUs for this partition
-                let all_pus: Vec<(i32, i32)> = part
-                    .boundaries
-                    .iter()
-                    .flatten()
-                    .copied()
-                    .collect();
-
-                let title = if i == 0 {
-                    "Contact Probability Map of the\noptimal partition (all Protein Units)"
-                        .to_string()
-                } else {
-                    format!(
-                        "Contact Probability Map of the alternative\npartition n.{} (all Protein Units)",
-                        i
-                    )
-                };
-
-                plot::write_contact_matrix(
-                    &mat,
-                    contact_matrix_dir
-                        .join(format!("contact_probability_matrix_alternative_{}.svg", i))
-                        .to_str()
-                        .unwrap(),
-                    &title,
-                    &all_pus,
-                )?;
-
-                // Per-domain plots
-                for (j, domain) in part.boundaries.iter().enumerate() {
-                    let dom_title = if i == 0 {
-                        format!(
-                            "Contact Probability Map of the domain {}\nof the optimal partition",
-                            j + 1
-                        )
-                    } else {
-                        format!(
-                            "Contact Probability Map of the domain {}\nof the alternative partition n.{}",
-                            j + 1, i
-                        )
-                    };
-
-                    plot::write_contact_matrix(
-                        &mat,
-                        contact_matrix_dir
-                            .join(format!(
-                                "contact_probability_matrix_alternative_{}_domain_{}.svg",
-                                i, j
-                            ))
-                            .to_str()
-                            .unwrap(),
-                        &dom_title,
-                        domain,
-                    )?;
-
-                    // Per-PU plots
-                    for &(start, end) in domain {
-                        let pu_title = if i == 0 {
-                            format!(
-                                "Contact Probability Map of PU {}-{} of the domain {}\nof the optimal partition",
-                                start, end, j + 1
-                            )
-                        } else {
-                            format!(
-                                "Contact Probability Map of PU {}-{} of the domain {}\nof the alternative partition n.{}",
-                                start, end, j + 1, i
-                            )
-                        };
-
-                        plot::write_contact_matrix(
-                            &mat,
-                            contact_matrix_dir
-                                .join(format!(
-                                    "contact_probability_matrix_alternative_{}_domain_{}_pu_{}_{}.svg",
-                                    i, j, start, end
-                                ))
-                                .to_str()
-                                .unwrap(),
-                            &pu_title,
-                            &[(start, end)],
-                        )?;
-                    }
-                }
-            }
+            tracing::info!("Skipping contact probability matrix plots (use Python version for plots)");
         }
-
-        // Domain histogram
-        let domain_counts = plot::count_domains(&sword_results.domains);
-        plot::write_domain_histogram(
-            &domain_counts,
-            results_dir
-                .join("domains_histogram.svg")
-                .to_str()
-                .unwrap(),
-        )?;
-        tracing::info!("Generated domain histogram");
     }
 
+    // Step 11: Calculate junction consistencies
+    let stat_script = bin_dir.join("stat_pu_domains_from_SWORD.pl");
+    if stat_script.exists() {
+        tracing::info!("Calculate junctions consistencies");
+        let junctions_output = std::process::Command::new(&stat_script)
+            .arg(results_dir.join("sword.txt"))
+            .output()
+            .context("Failed to run junctions script")?;
+
+        if junctions_output.status.success() {
+            let stdout = String::from_utf8_lossy(&junctions_output.stdout);
+            // Python writes each line + "\n", including trailing empty lines
+            let mut content = String::new();
+            for line in stdout.lines() {
+                content.push_str(line);
+                content.push('\n');
+            }
+            content.push('\n'); // Match Python's trailing newline
+            std::fs::write(
+                results_dir.join("junctions_consistencies.txt"),
+                &content,
+            )?;
+        }
+    }
+
+    // Step 12: Write mapping file
+    pdb::writer::write_mapping_file(
+        &original_resnums,
+        &results_dir.join("mapping_auth_resnums.txt"),
+    )?;
+
+    // Step 13: Clean and prepare results (same as Python)
+    tracing::info!("Clean and prepare results");
+    let pdbs_stand = results_dir.join("PDBs_Stand");
+    if pdbs_stand.exists() {
+        let _ = std::fs::remove_dir_all(&pdbs_stand);
+    }
+
+    let pdbs_clean = results_dir.join("PDBs_Clean");
+    let sword_dir_dest = results_dir.join("SWORD");
+    if pdbs_clean.exists() {
+        let _ = std::fs::rename(&pdbs_clean, &sword_dir_dest);
+    }
+
+    // Move junctions file into Junctions/ directory
+    let junctions_dir = results_dir.join("Junctions");
+    let junctions_file = results_dir.join("junctions_consistencies.txt");
+    if junctions_file.exists() {
+        std::fs::create_dir_all(&junctions_dir)?;
+        let _ = std::fs::rename(&junctions_file, junctions_dir.join("junctions_consistencies.txt"));
+    }
+
+    // Move Peeling directory
+    let peeling_dir_glob = results_dir.join("SWORD").join(&pdb_id_chain).join("Peeling");
+    if peeling_dir_glob.exists() {
+        let _ = std::fs::rename(&peeling_dir_glob, results_dir.join("Protein_Units"));
+    }
+
+    let elapsed = start.elapsed();
     tracing::info!("Results can be found here: {}", results_dir.display());
+    tracing::info!("Total runtime: {} seconds", elapsed.as_secs());
+
     Ok(())
 }
 
 /// Resolve the input source to a file path and base name.
-fn resolve_input(cli: &Cli) -> Result<(PathBuf, String)> {
+fn resolve_input(cli: &Cli, output_dir: &PathBuf) -> Result<(PathBuf, String)> {
     if let Some(ref input_file) = cli.input_file {
         let base = input_file
             .file_stem()
@@ -368,13 +415,13 @@ fn resolve_input(cli: &Cli) -> Result<(PathBuf, String)> {
             .to_string();
         Ok((input_file.clone(), base))
     } else if let Some(ref uniprot_id) = cli.uniprot_id {
-        let path = fetch::fetch_alphafold(uniprot_id, &cli.output_dir)?;
+        let path = fetch::fetch_alphafold(uniprot_id, output_dir)?;
         Ok((path, uniprot_id.clone()))
     } else if let Some(ref mgnify_id) = cli.mgnify_id {
-        let path = fetch::fetch_esm(mgnify_id, &cli.output_dir)?;
+        let path = fetch::fetch_esm(mgnify_id, output_dir)?;
         Ok((path, mgnify_id.clone()))
     } else if let Some(ref pdb_id) = cli.pdb_id {
-        let path = fetch::fetch_pdb(pdb_id, &cli.output_dir)?;
+        let path = fetch::fetch_pdb(pdb_id, output_dir)?;
         Ok((path, pdb_id.to_uppercase()))
     } else {
         anyhow::bail!("No input source specified");

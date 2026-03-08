@@ -33,7 +33,8 @@ Science advances, 3(1), e1600552.10.1126/sciadv.1600552](https://doi.org/10.1126
 
 ## Install on Linux, macOS (Intel & Apple Silicon) and Windows
 
-(Easy & recommanded)  
+### Python version (recommended)
+
 Install the conda environment using the `environment.yml` file:
 ```
 conda env create -f environment.yml
@@ -46,7 +47,29 @@ Compile necessary dependencies:
 bash install.sh
 ```
 
-Otherwise, a docker is also available:
+### Rust version (experimental, faster)
+
+The Rust version provides the same core pipeline (SWORD partitioning, peeling, pseudo-energies) with faster startup and lower overhead. It requires [Rust](https://www.rust-lang.org/tools/install) (1.70+).
+
+```bash
+# Install Rust (if not already installed)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# Build the Rust binary
+cd sword2-rs
+cargo build --release
+
+# The binary is at sword2-rs/target/release/sword2
+```
+
+You still need to compile the native dependencies (SWORD, DSSP, MyPMFs, Peeling):
+```
+bash install.sh
+```
+
+### Docker
+
+A Docker image is also available:
 ```
 docker pull dsimb/sword2:latest
 ```
@@ -61,7 +84,7 @@ docker pull dsimb/sword2:latest
 (sudo) docker run --rm -e USER_ID=$(id -u) -e GROUP_ID=$(id -g) -v $(pwd)/results:/output dsimb/sword2:latest -p 1jx4 -o /output
 ```
 
-### Conda
+### Python version (Conda)
 First, activate the working environment:
 ```
 conda activate sword2
@@ -93,6 +116,26 @@ Then, launch SWORD2:
 ```
 ./SWORD2.py -i ./structure.pdb -d 2 -o results
 ```
+
+### Rust version
+
+The Rust CLI accepts the same flags as the Python version. Run from the repository root:
+
+```bash
+# On a PDB id:
+./sword2-rs/target/release/sword2 -p 1jx4 -o results
+
+# On an AlphaFold structure:
+./sword2-rs/target/release/sword2 -u Q76EI6 -o results
+
+# On your own PDB file:
+./sword2-rs/target/release/sword2 -i ./structure.pdb -o results
+
+# Specify the base directory explicitly (if not running from the repo root):
+./sword2-rs/target/release/sword2 -p 1jx4 -o results --base-dir /path/to/SWORD2
+```
+
+Note: The Rust version currently skips plot generation (contact probability matrices, domain histograms). Use the Python version if you need plots.
 
 ## Fast mode 
 

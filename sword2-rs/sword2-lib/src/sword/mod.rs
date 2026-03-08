@@ -74,12 +74,19 @@ pub struct SwordPartition {
 
 /// Run the SWORD binary on a PDB file and return the raw output lines.
 pub fn run_sword_binary(pdb_path: &Path, config: &SwordConfig) -> Result<Vec<String>> {
+    // SWORD expects -i to be just the basename (no extension, no path),
+    // and --dir to be the directory containing the file.
+    let pdb_name = pdb_path
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("unknown");
+
     let output = if let Some(display_script) = &config.display_script {
         // Use the display script wrapper: display_SWORD2_output.pl 'SWORD -i ...'
         let sword_cmd = format!(
             "{} -i {} --dir {} -max 9 -nbcpu {}",
             config.sword_bin,
-            pdb_path.display(),
+            pdb_name,
             config.output_dir,
             config.num_threads
         );
@@ -88,24 +95,32 @@ pub fn run_sword_binary(pdb_path: &Path, config: &SwordConfig) -> Result<Vec<Str
             .output()
             .with_context(|| {
                 format!(
-                    "Failed to execute display script: {}",
-                    display_script
+                    "Failed to execute display script: {} '{}'",
+                    display_script, sword_cmd
                 )
             })?
     } else {
         Command::new(&config.sword_bin)
-            .arg(pdb_path)
+            .arg("-i").arg(pdb_name)
+            .arg("--dir").arg(&config.output_dir)
+            .arg("-max").arg("9")
+            .arg("-nbcpu").arg(config.num_threads.to_string())
             .output()
             .with_context(|| {
                 format!("Failed to execute SWORD binary: {}", config.sword_bin)
             })?
     };
 
+    // Save stderr to sword.err file
+    let stderr_str = String::from_utf8_lossy(&output.stderr).to_string();
+    let sword_err_path = std::path::Path::new(&config.output_dir).join("sword.err");
+    let _ = std::fs::write(&sword_err_path, &stderr_str);
+
     if !output.status.success() {
         anyhow::bail!(
             "SWORD binary exited with status {}: {}",
             output.status,
-            String::from_utf8_lossy(&output.stderr)
+            stderr_str
         );
     }
 

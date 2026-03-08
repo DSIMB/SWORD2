@@ -167,10 +167,20 @@ pub fn write_peeling_summary(
         .with_context(|| format!("Cannot create {}", output_path.display()))?;
 
     for level in levels {
+        // Format CI to match Python's round(x, 2) which drops trailing zeros
+        let ci_rounded = (level.ci * 100.0).round() / 100.0;
+        let ci_str = format!("{:.2}", ci_rounded);
+        let ci_str = ci_str.trim_end_matches('0').trim_end_matches('.').to_string();
+        // If trimming removed everything after decimal, ensure at least one decimal digit
+        let ci_display = if ci_str.contains('.') {
+            ci_str
+        } else {
+            format!("{}.0", ci_str)
+        };
         writeln!(
             f,
-            "Peeling level {}\n    Number of Protein Units: {}\n    Compaction Index: {:.2}",
-            level.level, level.num_pus, level.ci
+            "Peeling level {}\n    Number of Protein Units: {}\n    Compaction Index: {}",
+            level.level, level.num_pus, ci_display
         )?;
 
         for &(start, end) in &level.pus {
