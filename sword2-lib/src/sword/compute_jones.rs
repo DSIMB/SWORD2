@@ -122,7 +122,6 @@ pub fn compute_jones(
 
     for_each_permutation(&domain_ids, &mut |perm| {
         let mut jones = 0i32;
-        let mut total = 0i32;
 
         for pos in 0..tab_protein_domain_peel.len() {
             if pos >= tab_protein_domain_authors.len() {
@@ -136,7 +135,6 @@ pub fn compute_jones(
             if tab_protein_domain_authors[pos] == -1 {
                 continue;
             }
-            total += 1;
             if remapped == tab_protein_domain_authors[pos] {
                 jones += 1;
             }

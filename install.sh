@@ -1,12 +1,18 @@
 #!/bin/bash
 
-# Run SWORD once to compile its dependency: DSSP
-./bin/SWORD/bin/SWORD/SWORD &>/dev/null
-if [ -f ./bin/SWORD/bin/SWORD/bin/Dssp/dsspcmbi ]
-then
-    echo "Successfully installed SWORD dependency"
+# Compile DSSP dependency
+if [ "$(uname)" == "Darwin" ]; then
+    ./bin/Dssp/DsspCompileGCCmacos &>/dev/null
 else
-    echo "Error: unable to compile necessary dependancies for SWORD"
+    ./bin/Dssp/DsspCompileGCC &>/dev/null
+fi
+mv dsspcmbi bin/Dssp/dsspcmbi &>/dev/null
+
+if [ -f ./bin/Dssp/dsspcmbi ]
+then
+    echo "Successfully compiled DSSP dependency"
+else
+    echo "Error: unable to compile DSSP dependency"
     exit 1
 fi
 
@@ -16,13 +22,13 @@ if [ -f bin/mypmfs-master/scoring_omp ]
 then
     echo "Successfully compiled MyPMFs"
 else
-    echo "Error: unable to compile necessary dependancies for SWORD"
+    echo "Error: unable to compile MyPMFs"
     exit 1
 fi
 
 # Compile Peeling
-make -C ./bin/SWORD/bin/SWORD/bin Peeling_omp
-if [ -f ./bin/SWORD/bin/SWORD/bin/Peeling_omp ]
+make -C bin/Peeling >/dev/null
+if [ -f bin/Peeling/Peeling_omp ]
 then
     echo "Successfully compiled Peeling"
 else

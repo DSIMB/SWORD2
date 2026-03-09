@@ -117,11 +117,10 @@ fn main() -> Result<()> {
     };
 
     let bin_dir = base_dir.join("bin");
-    let sword_dir = bin_dir.join("SWORD/bin/SWORD");
 
     // Resolve paths to C binaries (keep these — they're compiled and fast)
-    let dssp_bin = sword_dir.join("bin/Dssp/dsspcmbi");
-    let peeling_bin = sword_dir.join("bin/Peeling_omp");
+    let dssp_bin = bin_dir.join("Dssp/dsspcmbi");
+    let peeling_bin = bin_dir.join("Peeling/Peeling_omp");
 
     // Ensure output directory exists
     let output_dir = std::fs::canonicalize(&cli.output_dir).unwrap_or_else(|_| {
@@ -204,7 +203,7 @@ fn main() -> Result<()> {
     // Step 4: Compile DSSP if needed (first run)
     if !dssp_bin.exists() {
         tracing::info!("Compiling DSSP dependency (first run)");
-        let dssp_dir = sword_dir.join("bin/Dssp");
+        let dssp_dir = bin_dir.join("Dssp");
         let compile_script = if cfg!(target_os = "macos") {
             dssp_dir.join("DsspCompileGCCmacos")
         } else {

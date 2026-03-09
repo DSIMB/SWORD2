@@ -4,7 +4,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUST_BIN="$SCRIPT_DIR/sword2-rs/target/release/sword2"
+RUST_BIN="$SCRIPT_DIR/target/release/sword2"
 TEST_DIR="/home/chili/cretin/SWORD2/results"
 SIZES=(50 150 300)
 
@@ -15,9 +15,7 @@ echo ""
 
 # Ensure the executable is built
 if [ ! -f "$RUST_BIN" ]; then
-    echo "Building sword2-rs release..."
-    cd "$SCRIPT_DIR/sword2-rs" && cargo build --release
-    cd "$SCRIPT_DIR"
+    cd "$SCRIPT_DIR" && cargo build --release
 fi
 
 # Run benchmarks

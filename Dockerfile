@@ -6,10 +6,13 @@ FROM rust:1.76-bookworm AS rust_build
 WORKDIR /app
 
 # Copy the rust source code
-COPY sword2-rs/ sword2-rs/
+COPY Cargo.toml Cargo.lock ./
+COPY sword2-lib/ sword2-lib/
+COPY sword2/ sword2/
+COPY src/ src/
 
 # Build the release binary
-RUN cd sword2-rs && cargo build --release
+RUN cargo build --release
 
 ### Install and run 
 ###################
@@ -29,7 +32,7 @@ LABEL maintainer="gabriel.cretin@u-paris.fr"
 WORKDIR /app
 
 # Copy the compiled Rust binary from the build stage
-COPY --from=rust_build /app/sword2-rs/target/release/sword2 /usr/local/bin/sword2
+COPY --from=rust_build /app/target/release/sword2 /usr/local/bin/sword2
 
 # Copy sources to build the internal tools and data files needed
 COPY install.sh install.sh

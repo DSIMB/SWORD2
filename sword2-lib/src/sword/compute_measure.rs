@@ -46,8 +46,6 @@ impl MeasureLine {
 /// PU information.
 #[derive(Debug, Clone)]
 struct PuInfo {
-    start: i32,
-    end: i32,
     size: i32,
 }
 
@@ -61,7 +59,7 @@ struct PuInfo {
 pub fn compute_measure(
     file_contact: &Path,
     file_pu: &Path,
-    cutoff_pdp: f64,
+    _cutoff_pdp: f64,
 ) -> Vec<MeasureLine> {
     let max_number_results: usize = 500;
     let cutoff_size_domain: usize = 30;
@@ -97,8 +95,6 @@ pub fn compute_measure(
         id_to_idx.insert(*id_pu, pu_idx);
         pu_start_end.insert(pu_idx + 1, (*s, *e));
         pu_list.push(PuInfo {
-            start: *s,
-            end: *e,
             size,
         });
     }
@@ -345,7 +341,6 @@ fn measure_domain(
 
     let mut min_size = usize::MAX;
     let mut max_cr: f64 = 0.0;
-    let mut total_cr: f64 = 0.0;
     let mut min_density: f64 = f64::MAX;
     let mut density_tot: f64 = 0.0;
 
@@ -389,7 +384,6 @@ fn measure_domain(
             if current_cr > max_cr {
                 max_cr = current_cr;
             }
-            total_cr += current_cr;
         }
     }
 
@@ -444,8 +438,6 @@ fn print_domain(domains: &[String], pu_start_end: &BTreeMap<usize, (i32, i32)>) 
                     // Replace the last end number
                     if let Some(pos) = delineation.rfind('-') {
                         // Find the last end value and replace it
-                        let after_dash = &delineation[pos + 1..];
-                        let end_val = after_dash.trim_end_matches(';');
                         let new_delineation = format!("{}{};", &delineation[..pos + 1], e);
                         delineation = new_delineation;
                     }
