@@ -11,3 +11,5 @@ bin/SWORD/bin/SWORD/bin/Peeling_omp
 bin/mypmfs-master/scoring_omp
 results*/
 target/
+sword2-rs/target/
+sword2-rs/Cargo.lock
