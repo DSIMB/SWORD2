@@ -31,6 +31,7 @@ ifeq ($(OS),Darwin)
     # CFLAGS += -I/path/to/libomp/include
     # LDFLAGS += -L/path/to/libomp/lib -lomp
 else
+	CFLAGS += -fopenmp
 	# Linker flags
 	LDFLAGS := -fopenmp
 endif

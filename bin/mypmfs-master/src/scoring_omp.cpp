@@ -40,6 +40,8 @@
 #include <sys/stat.h>
 #include "functions.h"
 #include <omp.h>
+#include <unordered_map>
+#include <random>
 
 using namespace std;
 
@@ -51,6 +53,20 @@ void distances(vector<string>& filevec, vector<double>& sqdist, vector<string>& 
 
 string dirnaming(string filename, string indir, string chainname);
 vector<string> residuefilter(vector<string> filevec, string residueslist);
+
+// Fast linear interpolation using flat array and direct bin index computation
+inline double fast_linear_interpol(double x, int pair_idx,
+    const vector<double>& flat_potentials, int num_bins,
+    double first_bin, double inv_bin_step, double bin_step) {
+    int idx = (int)((x - first_bin) * inv_bin_step);
+    if (idx < 0) idx = 0;
+    if (idx >= num_bins - 1) idx = num_bins - 2;
+    int base = pair_idx * num_bins;
+    double x0 = first_bin + idx * bin_step;
+    double y0 = flat_potentials[base + idx];
+    double y1 = flat_potentials[base + idx + 1];
+    return y0 + (x - x0) * (y1 - y0) * inv_bin_step;
+}
 
 
 int main(int argc, char** argv){
@@ -251,9 +267,29 @@ int main(int argc, char** argv){
     sort(vecatypes.begin(), vecatypes.end());
     int atypessize = vecatypes.size();
 
+    // Build atom type to index mapping for fast pair lookups
+    unordered_map<string, int> atype_to_idx;
+    for (int i = 0; i < atypessize; ++i){
+        atype_to_idx[vecatypes[i]] = i;
+    }
+
     // For every atom pair (two loops)
     map<string, vector<double>> potentials; // This map is used for the cubic spline
     map<string, map<double, double>> nestedmap; // This (nested) map is used for the linear interpolation
+
+    // Flat potential array: pair_index * num_bins + bin_index
+    int num_bins = xvector.size();
+    int num_pairs = atypessize * (atypessize + 1) / 2;
+    vector<double> flat_potentials(num_pairs * num_bins, 0.0);
+
+    // Pair string to flat index mapping
+    unordered_map<string, int> pair_to_idx;
+
+    // Pair index lookup table: atype_idx_i, atype_idx_j -> pair_flat_idx
+    // For symmetric pairs: pair(i,j) = pair(j,i), stored with i <= j
+    vector<int> pair_lookup(atypessize * atypessize, -1);
+
+    int pair_count = 0;
     for (int i=0; i<atypessize; ++i){
         for (int j=i; j<atypessize; ++j){
             string pair = vecatypes[i]+vecatypes[j];
@@ -264,17 +300,30 @@ int main(int argc, char** argv){
             string energy;
             int k = 0;
             while(getline(fh, energy)){
+                double eval = atof(energy.c_str());
                 // Push all the energies into a vector corresponding to a key (e.g. LV) in the map
-                potentials[pair].push_back(atof(energy.c_str()));
+                potentials[pair].push_back(eval);
                 double mybin = xvector[k];
-                nestedmap[pair][mybin] = atof(energy.c_str());
+                nestedmap[pair][mybin] = eval;
+                // Store in flat array
+                flat_potentials[pair_count * num_bins + k] = eval;
                 k++;
             }
+            pair_to_idx[pair] = pair_count;
+            // Fill symmetric lookup table
+            pair_lookup[i * atypessize + j] = pair_count;
+            pair_lookup[j * atypessize + i] = pair_count;
+            pair_count++;
         }
     }
 
+    // Precompute bin parameters for fast interpolation
+    double first_bin = xvector[0];
+    double bin_step = xvector[1] - xvector[0];
+    double inv_bin_step = 1.0 / bin_step;
+
     // LINEAR INTERPOLATION
-    // References for the linear_interpol() function
+    // References for the linear_interpol() function (kept for cubic spline plotting path)
     vector<double>& refxvector(xvector);
     map<string, map<double, double>>& refnestedmap(nestedmap);
     int lastbinindex = xvector.size()-1;
@@ -390,11 +439,11 @@ int main(int argc, char** argv){
         vector<string>& refresID(resID); vector<string>& refaavec(aavec);
 
         // Fill the aavec and resID vectors
-        sequence(reffilevec, refresID, refaavec, three2one); 
+        sequence(reffilevec, refresID, refaavec, three2one);
 
         // For the current PDB file: find the chains
         vector<string> chains = findchains(reffilevec);
- 
+
         // If one (or several) particular chain has been chosen (-a option)
         if (!chainname.empty()){
             vector<string> validchains;
@@ -420,7 +469,7 @@ int main(int argc, char** argv){
         for (auto chain : chains)
             cout << chain << " ";
         cout << endl;
- 
+
         if (chains.size() < 1)
             cerr << "Warning: No chain found in " << filename << endl;
 
@@ -450,12 +499,19 @@ int main(int argc, char** argv){
                                   distmax, distmin, chains[i], chains[j], diffmin, diffmax, three2one);
             }
         }
-    
+
+        // Pre-compute pair indices for all interactions (avoids string lookups in hot loops)
+        const int sqdistsize = sqdist.size();
+        vector<int> pair_indices(sqdistsize);
+        for (int i = 0; i < sqdistsize; ++i){
+            auto it = pair_to_idx.find(atompairs[i]);
+            pair_indices[i] = (it != pair_to_idx.end()) ? it->second : 0;
+        }
+
         // Compute total energy
         double total_energy = 0;
         map<string, double> aaenergy; // Key: resID (num+chain); value: cumulated energy
         vector<string> data; // Tab-separated strings made of: distance, energy, AA pair, pair resID (num+chain)
-        const int sqdistsize = sqdist.size();
         if (cubicspline)
             for(int i=0; i<sqdistsize; ++i){
                 double myenergy = splinemap[atompairs[i]](sqdist[i]);
@@ -466,22 +522,23 @@ int main(int argc, char** argv){
             }
         else
             for(int i=0; i<sqdistsize; ++i){
-                double myenergy = linear_interpol(sqdist[i], atompairs[i], refxvector, refnestedmap, lastbinindex);
+                double myenergy = fast_linear_interpol(sqdist[i], pair_indices[i],
+                    flat_potentials, num_bins, first_bin, inv_bin_step, bin_step);
                 total_energy+=myenergy;
                 aaenergy[resIDl[i]]+=myenergy;
                 aaenergy[resIDr[i]]+=myenergy;
                 data.push_back(to_string(myenergy)+"\t"+to_string(sqdist[i])+"\t"+atompairs[i]+"\t"+resIDl[i]+"-"+resIDr[i]);
             }
 
-        if (chains.size() > 0) 
+        if (chains.size() > 0)
             cout << "\nPseudo-energy = " << total_energy << endl;
         cout << "Done\n" << endl;
- 
+
         // If write option activated
         if (write){
             if (!plotinterpol)
                 createdir(myjobdir);
-    
+
             ofstream tfh;
             cout << "Writing files \"data.tsv\", and \"energy_w" << to_string(windowsize) << ".tsv\"..." << endl;
             tfh.open (myjobdir+"/data.tsv");
@@ -507,80 +564,158 @@ int main(int argc, char** argv){
 
             cout << "Done\n" << endl;
         }
- 
- 
+
+
         // If Z-score computation activated
         if (zopt and total_energy != 0){
             cout << "Computing the Z-score..." << endl;
- 
+
             // Cannot compute a Z-score if the pseudo-energy is always 0
             if (chains.size() == 1 and !intrachain){
                 cerr << "\nProgram (or iteration) stopped: No inter-chain interactions in a monomeric structure" << endl;
                 continue;
             }
- 
+
             const int resIDsize = resID.size(); // size of the protein sequence
             const double resIDsizedouble = (double)resIDsize;
             const int resIDlsize = resIDl.size(); // size of all pairwise interactions in the protein
- 
+
+            // Pre-compute aavec integer indices for fast Z-score lookup
+            // Map each unique aavec string to an integer index
+            unordered_map<string, int> aavec_str_to_idx;
+            int next_aavec_idx = 0;
+            for (int i = 0; i < resIDsize; ++i){
+                if (aavec_str_to_idx.find(aavec[i]) == aavec_str_to_idx.end()){
+                    aavec_str_to_idx[aavec[i]] = next_aavec_idx++;
+                }
+            }
+            int num_aa_types = next_aavec_idx;
+
+            // Build integer aavec
+            vector<int> aavec_idx(resIDsize);
+            for (int i = 0; i < resIDsize; ++i){
+                aavec_idx[i] = aavec_str_to_idx[aavec[i]];
+            }
+
+            // Build resID -> position map for fast lookup during Z-score
+            unordered_map<string, int> resID_to_pos;
+            for (int i = 0; i < resIDsize; ++i){
+                resID_to_pos[resID[i]] = i;
+            }
+
+            // Pre-compute interaction position indices (avoid string lookups in Z-score loop)
+            vector<int> interact_pos_l(resIDlsize);
+            vector<int> interact_pos_r(resIDlsize);
+            for (int i = 0; i < resIDlsize; ++i){
+                interact_pos_l[i] = resID_to_pos[resIDl[i]];
+                interact_pos_r[i] = resID_to_pos[resIDr[i]];
+            }
+
+            // Build pair lookup table for integer AA types: aa_type_i x aa_type_j -> pair_flat_idx
+            // This maps from aavec integer indices to flat potential pair indices
+            vector<int> aa_pair_lookup(num_aa_types * num_aa_types, -1);
+            for (int i = 0; i < num_aa_types; ++i){
+                for (int j = 0; j < num_aa_types; ++j){
+                    // Find the atom type strings for these indices
+                    string aa_i, aa_j;
+                    for (auto& kv : aavec_str_to_idx){
+                        if (kv.second == i) aa_i = kv.first;
+                        if (kv.second == j) aa_j = kv.first;
+                    }
+                    string pair_str;
+                    if (aa_i.compare(aa_j) < 0)
+                        pair_str = aa_i + aa_j;
+                    else
+                        pair_str = aa_j + aa_i;
+                    auto pit = pair_to_idx.find(pair_str);
+                    if (pit != pair_to_idx.end())
+                        aa_pair_lookup[i * num_aa_types + j] = pit->second;
+                }
+            }
+
 	    vector<double> rand_energies(decoys);
 
-	    #pragma omp parallel for
+	    #pragma omp parallel for schedule(dynamic)
 	    for(int counter=0; counter<decoys; ++counter){
-		// Shuffle the sequence of residues (which are identified by their number + chain)
-		vector<string> resID_new(resID);
-		vector<string> aavec_new(aavec); // This second vector will be used to calculate the similarity
+		// Thread-local deterministic RNG (no data races, reproducible)
+		std::mt19937 rng(42 + counter);
+		std::uniform_int_distribution<int> dist(0, resIDsize - 1);
+
+		// Shuffle using integer indices for speed
+		vector<int> aavec_new_idx(aavec_idx);
+		int match_count = resIDsize; // initially all match
 		double similarity = 1.0;
 		while (similarity > simthres){
-		    int i = rand() % resIDsize + 0;
-		    int j = rand() % resIDsize + 0;
+		    int i = dist(rng);
+		    int j = dist(rng);
 
 		    if (i != j){
-			swap(resID_new[i], resID_new[j]);
-			swap(aavec_new[i], aavec_new[j]);
+			// Incremental similarity update: O(1) instead of O(N)
+			bool i_matched_before = (aavec_new_idx[i] == aavec_idx[i]);
+			bool j_matched_before = (aavec_new_idx[j] == aavec_idx[j]);
 
-			// After each residue swap, calculate the similarity with the original sequence
-			int count = 0;
-			for (int k=0; k<resIDsize; ++k)
-			    if (aavec_new[k] == aavec[k])
-				count++;
+			swap(aavec_new_idx[i], aavec_new_idx[j]);
 
-			similarity = (double)count/resIDsizedouble;
+			bool i_matches_now = (aavec_new_idx[i] == aavec_idx[i]);
+			bool j_matches_now = (aavec_new_idx[j] == aavec_idx[j]);
+
+			match_count += (i_matches_now - i_matched_before) + (j_matches_now - j_matched_before);
+			similarity = (double)match_count / resIDsizedouble;
 		    }
 		}
 
-		// Shuffled map (will be used to create a new vector of residue pairs):
-		// The amino acids (values) content is unchanged, but the corresponding residue number+chain (keys) is different
-		map<string,string> mapresID_new;
-		for(int i=0; i<resIDsize; ++i)
-		    mapresID_new[resID_new[i]] = aavec[i];
-
-		// The new vector of residue pairs after shuffling
-		vector<string> aapairs_new;
-		for (int i=0; i<resIDlsize; ++i){
-		    string aa1 = mapresID_new[resIDl[i]];
-		    string aa2 = mapresID_new[resIDr[i]];
-
-		    if (aa1.compare(aa2) < 0) // if alphabet order
-			aapairs_new.push_back(aa1 + aa2);
-		    else
-			aapairs_new.push_back(aa2 + aa1);
-		}
-
-		// Compute the energy of the decoys
+		// Compute the energy of the decoy using integer lookups
 		double rand_energy = 0;
-		if (cubicspline)
-		    for(int i=0; i<sqdistsize; ++i)
-			rand_energy+=splinemap[aapairs_new[i]](sqdist[i]);
-		else
-		    for(int i=0; i<sqdistsize; ++i)
-			rand_energy+=linear_interpol(sqdist[i], aapairs_new[i], refxvector, refnestedmap, lastbinindex);
+		if (cubicspline){
+		    // For cubic spline, fall back to string-based lookup
+		    // Build string aavec_new from shuffled indices
+		    vector<string> aavec_new_str(resIDsize);
+		    for (int i = 0; i < resIDsize; ++i){
+			for (auto& kv : aavec_str_to_idx){
+			    if (kv.second == aavec_new_idx[i]){
+				aavec_new_str[i] = kv.first;
+				break;
+			    }
+			}
+		    }
+		    // Build shuffled map
+		    map<string,string> mapresID_new;
+		    for(int i=0; i<resIDsize; ++i)
+			mapresID_new[resID[i]] = aavec_new_str[i];
+
+		    for (int i=0; i<resIDlsize; ++i){
+			string aa1 = mapresID_new[resIDl[i]];
+			string aa2 = mapresID_new[resIDr[i]];
+			string pair_str;
+			if (aa1.compare(aa2) < 0)
+			    pair_str = aa1 + aa2;
+			else
+			    pair_str = aa2 + aa1;
+			rand_energy += splinemap[pair_str](sqdist[i]);
+		    }
+		}
+		else{
+		    // Fast path: use integer indices and flat potential array
+		    // Build position -> new_aavec_idx mapping
+		    // The shuffled aavec_new_idx[pos] gives the new AA type at position pos
+		    // For each interaction (pos_l, pos_r), look up the new AA types and get pair index
+		    for (int i = 0; i < sqdistsize; ++i){
+			int pos_l = interact_pos_l[i];
+			int pos_r = interact_pos_r[i];
+			int aa_l = aavec_new_idx[pos_l];
+			int aa_r = aavec_new_idx[pos_r];
+			int pidx = aa_pair_lookup[aa_l * num_aa_types + aa_r];
+			if (pidx >= 0)
+			    rand_energy += fast_linear_interpol(sqdist[i], pidx,
+				flat_potentials, num_bins, first_bin, inv_bin_step, bin_step);
+		    }
+		}
 
 		// Store the energy in the rand_energies vector
 		rand_energies[counter] = rand_energy;
 	    }
             cout << endl;
- 
+
             // Compute the Z-score (requires sum, mean, and standard deviation)
             double sum = accumulate(rand_energies.begin(), rand_energies.end(), 0.0);
             double mean = sum / rand_energies.size();
@@ -588,9 +723,9 @@ int main(int argc, char** argv){
             transform(rand_energies.begin(), rand_energies.end(), diff.begin(), [mean](double x) { return x - mean; });
             double sq_sum = inner_product(diff.begin(), diff.end(), diff.begin(), 0.0);
             double stdev = sqrt(sq_sum / rand_energies.size());
- 
+
             double zscore = (total_energy-mean)/stdev;
- 
+
             cout << "Z-score = " << zscore << "\nDone\n" << endl;
         }
 
@@ -666,7 +801,7 @@ void distances(vector<string>& filevec, vector<double>& sqdist, vector<string>& 
                double distmax, double distmin, string chain1, string chain2, int diffmin, int diffmax, map<string,string> three2one){
 /* This functions
    - reads the vector containing (part of) the PDB file
-   - calculates all the S̶Q̶U̶A̶R̶E̶D̶ interatomic distances for the one or two chains
+   - calculates all the interatomic distances for the one or two chains
    - push these distances into a referenced vector
    - there are 2 other referenced vectors: 1 for the atoms names, 1 for the atoms names+numbers
 */
@@ -710,36 +845,47 @@ void distances(vector<string>& filevec, vector<double>& sqdist, vector<string>& 
     }
 
     bool samechain = (chain1 == chain2) ? true : false;
-    double sqd;
     const int atom1size = atom1.size(); const int atom2size = atom2.size();
 
-    #pragma omp parallel for private(sqd)
+    // Thread-local vectors to eliminate critical section
+    int num_threads = omp_get_max_threads();
+    vector<vector<double>> local_sqdist(num_threads);
+    vector<vector<string>> local_atompairs(num_threads);
+    vector<vector<string>> local_resIDl(num_threads);
+    vector<vector<string>> local_resIDr(num_threads);
+
+    #pragma omp parallel for schedule(dynamic)
     for(int i=0; i<atom1size; ++i){
+        int tid = omp_get_thread_num();
         int start = (samechain) ? i+1 : 0;
         for(int j=start; j<atom2size; ++j){
             int numdiff = num2[j]-num1[i];
             if ( (samechain and numdiff > diffmin and numdiff < diffmax) or (!samechain) ){
-                sqd = sqrt((x1[i]-x2[j])*(x1[i]-x2[j]) + (y1[i]-y2[j])*(y1[i]-y2[j]) + (z1[i]-z2[j])*(z1[i]-z2[j]));
+                double sqd = sqrt((x1[i]-x2[j])*(x1[i]-x2[j]) + (y1[i]-y2[j])*(y1[i]-y2[j]) + (z1[i]-z2[j])*(z1[i]-z2[j]));
 
                 if (sqd < distmax and sqd > distmin){
-                    #pragma omp critical
-                    {
-                        sqdist.push_back(sqd);
-                        if (atom1[i].compare(atom2[j]) < 0){ // if alphabet order
-                            atompairs.push_back(atom1[i]+atom2[j]);
-                            resIDl.push_back(to_string(num1[i])+chain1);
-                            resIDr.push_back(to_string(num2[j])+chain2);
-                        }
-                        else{
-                            atompairs.push_back(atom2[j]+atom1[i]);
-                            resIDl.push_back(to_string(num2[j])+chain2);
-                            resIDr.push_back(to_string(num1[i])+chain1);
-                        }
+                    local_sqdist[tid].push_back(sqd);
+                    if (atom1[i].compare(atom2[j]) < 0){ // if alphabet order
+                        local_atompairs[tid].push_back(atom1[i]+atom2[j]);
+                        local_resIDl[tid].push_back(to_string(num1[i])+chain1);
+                        local_resIDr[tid].push_back(to_string(num2[j])+chain2);
+                    }
+                    else{
+                        local_atompairs[tid].push_back(atom2[j]+atom1[i]);
+                        local_resIDl[tid].push_back(to_string(num2[j])+chain2);
+                        local_resIDr[tid].push_back(to_string(num1[i])+chain1);
                     }
                 }
             }
         }
+    }
 
+    // Merge thread-local vectors into output vectors
+    for (int t = 0; t < num_threads; ++t){
+        sqdist.insert(sqdist.end(), local_sqdist[t].begin(), local_sqdist[t].end());
+        atompairs.insert(atompairs.end(), local_atompairs[t].begin(), local_atompairs[t].end());
+        resIDl.insert(resIDl.end(), local_resIDl[t].begin(), local_resIDl[t].end());
+        resIDr.insert(resIDr.end(), local_resIDr[t].begin(), local_resIDr[t].end());
     }
     return;
 }
