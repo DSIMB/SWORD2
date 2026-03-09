@@ -19,4 +19,4 @@ fi
 chown -R sworduser:swordgroup /app
 
 # Execute the main application as the new user
-exec gosu sworduser python SWORD2.py "$@"
+exec gosu sworduser sword2 "$@"

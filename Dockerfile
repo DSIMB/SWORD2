@@ -1,31 +1,15 @@
-### BUILD-STAGE: conda environment
-##################################
+### BUILD-STAGE: Compile Rust SWORD2 binary
+##########################################
+FROM rust:1.76-bookworm AS rust_build
 
-FROM condaforge/mambaforge:4.12.0-2 AS mamba_build
+# Set the working directory to /app
+WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc g++ libc-dev\
-    && rm -rf /var/lib/apt/lists/*
+# Copy the rust source code
+COPY sword2-rs/ sword2-rs/
 
-# Install required python dependencies
-COPY environment.yml .
-RUN mamba env create -f environment.yml && \
-    conda clean -afy
-
-# Install conda-pack:
-RUN mamba install -c conda-forge conda-pack -y && \
-    conda clean -afy
-
-# Use conda-pack to create a standalone sword2 environment in /venv:
-RUN conda-pack -j -1 -n sword2 -o /tmp/sword2_env.tar && \
-    mkdir /venv && \
-    cd /venv && \
-    tar xf /tmp/sword2_env.tar && \
-    rm /tmp/sword2_env.tar
-
-# Finish unpacking the environment after unarchiving.
-# Cleans up absolute prefixes in any remaining files
-RUN /venv/bin/conda-unpack
+# Build the release binary
+RUN cd sword2-rs && cargo build --release
 
 ### Install and run 
 ###################
@@ -41,27 +25,22 @@ LABEL description="SWift and Optimized Recognition of protein Domains"
 LABEL version="2.0.0"
 LABEL maintainer="gabriel.cretin@u-paris.fr"
 
-# Keep only necessary files from previous stage: conda env
-COPY --from=mamba_build /venv /venv
-
 # Set the working directory to /app
 WORKDIR /app
 
-# Copy sources to build the program
+# Copy the compiled Rust binary from the build stage
+COPY --from=rust_build /app/sword2-rs/target/release/sword2 /usr/local/bin/sword2
+
+# Copy sources to build the internal tools and data files needed
 COPY install.sh install.sh
 COPY bin/ bin/
-COPY SWORD2.py SWORD2.py
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 # Make the entrypoint script executable
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-# Make sure the Conda environment's binaries are in the PATH
-ENV PATH=/venv/bin:$PATH
-ENV CONDA_PREFIX="/venv"
-
-# Activate the Conda environment and run the install.sh script
-# This step compiles all C/C++ dependencies
+# Run the install.sh script
+# This step compiles all C/C++ dependencies in bin/
 RUN bash install.sh
 
 # Change ownership of the /app directory to root initially
