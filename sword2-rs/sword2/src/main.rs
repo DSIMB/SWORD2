@@ -1,7 +1,7 @@
 //! SWORD2 CLI: SWift and Optimized Recognition of protein Domains.
 //!
 //! Command-line interface for running the SWORD2 protein domain recognition pipeline.
-//! Replicates the Python SWORD2.py pipeline faithfully.
+//! Fully in Rust — no Perl dependencies.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -118,8 +118,10 @@ fn main() -> Result<()> {
 
     let bin_dir = base_dir.join("bin");
     let sword_dir = bin_dir.join("SWORD/bin/SWORD");
-    let sword_bin = sword_dir.join("SWORD");
-    let display_script = bin_dir.join("display_SWORD2_output.pl");
+
+    // Resolve paths to C binaries (keep these — they're compiled and fast)
+    let dssp_bin = sword_dir.join("bin/Dssp/dsspcmbi");
+    let peeling_bin = sword_dir.join("bin/Peeling_omp");
 
     // Ensure output directory exists
     let output_dir = std::fs::canonicalize(&cli.output_dir).unwrap_or_else(|_| {
@@ -141,7 +143,6 @@ fn main() -> Result<()> {
         chain_str.chars().next().unwrap_or('A')
     } else if let Some(model) = structure.first_model() {
         // Find the first chain that contains at least one standard amino acid residue
-        // (skip nucleic acid chains like DNA/RNA)
         if let Some(chain) = model.chains.iter().find(|c| {
             c.residues.iter().any(|r| pdb::amino_acids::is_standard(&r.name))
         }) {
@@ -180,7 +181,6 @@ fn main() -> Result<()> {
     tracing::info!(">>> Using {} cpus", num_threads);
 
     // Step 3: Clean PDB - remove non-standard residues, insertion codes, renumber from 1
-    // This replicates the Python: prot.select("protein and not nonstdaa and not hetatm")
     tracing::info!("Write a clean version of the PDB: remove non standard residues");
     let (cleaned_chain, original_resnums) = pdb::writer::clean_chain_for_sword(chain);
 
@@ -201,43 +201,43 @@ fn main() -> Result<()> {
     let pdb_no_ext = results_dir.join(&pdb_id_chain);
     std::fs::rename(&pdb_chain_file, &pdb_no_ext)?;
 
-    // Step 4: Compile DSSP if needed (first run of SWORD)
-    let dssp_path = sword_dir.join("bin/Dssp/dsspcmbi");
-    if !dssp_path.exists() {
+    // Step 4: Compile DSSP if needed (first run)
+    if !dssp_bin.exists() {
         tracing::info!("Compiling DSSP dependency (first run)");
-        let _ = std::process::Command::new(&sword_bin)
-            .output();
+        let dssp_dir = sword_dir.join("bin/Dssp");
+        let compile_script = if cfg!(target_os = "macos") {
+            dssp_dir.join("DsspCompileGCCmacos")
+        } else {
+            dssp_dir.join("DsspCompileGCC")
+        };
+        if compile_script.exists() {
+            let _ = std::process::Command::new(&compile_script)
+                .current_dir(&dssp_dir)
+                .output();
+        }
     }
 
-    // Step 5: Run SWORD binary
-    tracing::info!("Launch SWORD");
+    // Step 5: Run the SWORD pipeline (pure Rust — no Perl!)
+    tracing::info!("Launch SWORD pipeline");
     let config = sword::SwordConfig {
-        sword_bin: sword_bin.to_string_lossy().to_string(),
-        display_script: if display_script.exists() {
-            Some(display_script.to_string_lossy().to_string())
-        } else {
-            None
-        },
-        energy_bin: None,
+        peeling_bin: peeling_bin.to_string_lossy().to_string(),
+        dssp_bin: dssp_bin.to_string_lossy().to_string(),
         compute_energies: !cli.disable_energies,
         generate_plots: !cli.disable_plots,
         num_threads,
         output_dir: results_dir.to_string_lossy().to_string(),
+        max_alternatives: 9,
     };
 
-    let sword_output = sword::run_sword_binary(
-        &pdb_no_ext, // Pass file without .pdb extension
+    let (sword_output, sword_results) = sword::run_pipeline(
+        &pdb_no_ext,
         &config,
-    ).context("Failed to run SWORD binary")?;
+    ).context("Failed to run SWORD pipeline")?;
 
     // Save raw SWORD output
     std::fs::write(results_dir.join("sword.txt"), sword_output.join("\n") + "\n")?;
 
-    // Step 6: Parse SWORD output
-    tracing::info!("Parse SWORD output");
-    let sword_results = sword::parse_sword_output(&sword_output)
-        .context("Failed to parse SWORD output")?;
-
+    // Step 6: Parse SWORD output (already done in run_pipeline)
     tracing::info!(
         "Found {} partitioning(s), ambiguity: {}",
         sword_results.domains.len(),
@@ -332,7 +332,7 @@ fn main() -> Result<()> {
         }
     }
 
-    // Step 10: Generate plots (skip for now - user said don't worry about images)
+    // Step 10: Generate plots
     if !cli.disable_plots {
         let contact_matrix_dir = results_dir.join("Contact_Probability_Matrix");
         std::fs::create_dir_all(&contact_matrix_dir)?;
@@ -347,29 +347,15 @@ fn main() -> Result<()> {
         }
     }
 
-    // Step 11: Calculate junction consistencies
-    let stat_script = bin_dir.join("stat_pu_domains_from_SWORD.pl");
-    if stat_script.exists() {
-        tracing::info!("Calculate junctions consistencies");
-        let junctions_output = std::process::Command::new(&stat_script)
-            .arg(results_dir.join("sword.txt"))
-            .output()
-            .context("Failed to run junctions script")?;
-
-        if junctions_output.status.success() {
-            let stdout = String::from_utf8_lossy(&junctions_output.stdout);
-            // Python writes each line + "\n", including trailing empty lines
-            let mut content = String::new();
-            for line in stdout.lines() {
-                content.push_str(line);
-                content.push('\n');
-            }
-            content.push('\n'); // Match Python's trailing newline
-            std::fs::write(
-                results_dir.join("junctions_consistencies.txt"),
-                &content,
-            )?;
-        }
+    // Step 11: Calculate junction consistencies (pure Rust — no Perl!)
+    tracing::info!("Calculate junctions consistencies");
+    let junctions_content =
+        sword::junctions::calculate_junction_consistencies(&sword_output);
+    if !junctions_content.is_empty() {
+        std::fs::write(
+            results_dir.join("junctions_consistencies.txt"),
+            &junctions_content,
+        )?;
     }
 
     // Step 12: Write mapping file
@@ -378,7 +364,7 @@ fn main() -> Result<()> {
         &results_dir.join("mapping_auth_resnums.txt"),
     )?;
 
-    // Step 13: Clean and prepare results (same as Python)
+    // Step 13: Clean and prepare results
     tracing::info!("Clean and prepare results");
     let pdbs_stand = results_dir.join("PDBs_Stand");
     if pdbs_stand.exists() {
