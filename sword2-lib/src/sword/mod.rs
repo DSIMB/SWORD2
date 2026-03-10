@@ -118,12 +118,17 @@ pub fn run_pipeline(
             .arg("-na")
             .arg(&pdb_file_dst)
             .arg(&dssp_file)
-            .stderr(std::process::Stdio::null())
             .output()
             .with_context(|| format!("Failed to run DSSP: {}", config.dssp_bin))?;
 
         if !dssp_output.status.success() {
-            tracing::warn!("DSSP exited with non-zero status (may be OK for some structures)");
+            let stderr_msg = String::from_utf8_lossy(&dssp_output.stderr);
+            let stderr_trimmed = stderr_msg.trim();
+            if stderr_trimmed.is_empty() {
+                tracing::warn!("DSSP exited with status {}", dssp_output.status);
+            } else {
+                tracing::warn!("DSSP exited with status {}: {}", dssp_output.status, stderr_trimmed);
+            }
         }
 
         // Parse DSSP to create .s2d file

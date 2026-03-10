@@ -431,10 +431,26 @@ fn main() -> Result<()> {
     let pdb_no_ext = results_dir.join(&pdb_id_chain);
     std::fs::rename(&pdb_chain_file, &pdb_no_ext)?;
 
-    // Step 4: Compile DSSP if needed (first run)
-    if !dssp_bin.exists() {
+    // Step 4: Compile DSSP if needed (first run or non-native binary)
+    let need_compile = if dssp_bin.exists() {
+        // On macOS, check if the binary is a native Mach-O (not a Linux ELF running via Rosetta)
+        if cfg!(target_os = "macos") {
+            let is_elf = std::fs::read(&dssp_bin)
+                .map(|bytes| bytes.starts_with(b"\x7fELF"))
+                .unwrap_or(false);
+            if is_elf {
+                tracing::debug!("DSSP binary is a Linux ELF, recompiling as native macOS binary");
+            }
+            is_elf
+        } else {
+            false
+        }
+    } else {
+        true
+    };
+    if need_compile {
         reporter.step("Compile DSSP");
-        tracing::debug!("Compiling DSSP dependency (first run)");
+        tracing::debug!("Compiling DSSP dependency");
         let dssp_dir = bin_dir.join("Dssp");
         let compile_script = if cfg!(target_os = "macos") {
             dssp_dir.join("DsspCompileGCCmacos")
@@ -442,9 +458,18 @@ fn main() -> Result<()> {
             dssp_dir.join("DsspCompileGCC")
         };
         if compile_script.exists() {
-            let _ = std::process::Command::new(&compile_script)
+            let output = std::process::Command::new("bash")
+                .arg(&compile_script)
                 .current_dir(&dssp_dir)
                 .output();
+            match output {
+                Ok(o) if !o.status.success() => {
+                    let stderr = String::from_utf8_lossy(&o.stderr);
+                    tracing::warn!("DSSP compilation failed: {}", stderr.trim());
+                }
+                Err(e) => tracing::warn!("Failed to run DSSP compile script: {}", e),
+                _ => tracing::debug!("DSSP compiled successfully"),
+            }
         }
         reporter.step_done("Compile DSSP", None);
     }
