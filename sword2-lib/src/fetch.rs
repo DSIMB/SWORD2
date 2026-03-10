@@ -13,7 +13,7 @@ pub fn fetch_pdb(pdb_id: &str, output_dir: &Path) -> Result<PathBuf> {
     let url = format!("https://files.rcsb.org/download/{}.pdb", pdb_id);
     let output_path = output_dir.join(format!("{}.pdb", pdb_id));
 
-    tracing::info!("Fetching PDB {} from RCSB", pdb_id);
+    tracing::debug!("Fetching PDB {} from RCSB", pdb_id);
     let response = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?
@@ -33,7 +33,7 @@ pub fn fetch_pdb(pdb_id: &str, output_dir: &Path) -> Result<PathBuf> {
     fs::write(&output_path, &content)
         .with_context(|| format!("Failed to write {}", output_path.display()))?;
 
-    tracing::info!("Downloaded PDB to {}", output_path.display());
+    tracing::debug!("Downloaded PDB to {}", output_path.display());
     Ok(output_path)
 }
 
@@ -45,7 +45,7 @@ pub fn fetch_alphafold(uniprot_id: &str, output_dir: &Path) -> Result<PathBuf> {
     let url = format!("https://alphafold.ebi.ac.uk/files/{}.pdb", name);
     let output_path = output_dir.join(format!("{}.pdb", name));
 
-    tracing::info!("Fetching AlphaFold model for UniProt {}", uniprot_id);
+    tracing::debug!("Fetching AlphaFold model for UniProt {}", uniprot_id);
     let response = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?
@@ -65,7 +65,7 @@ pub fn fetch_alphafold(uniprot_id: &str, output_dir: &Path) -> Result<PathBuf> {
     fs::write(&output_path, &content)
         .with_context(|| format!("Failed to write {}", output_path.display()))?;
 
-    tracing::info!("Downloaded AlphaFold model to {}", output_path.display());
+    tracing::debug!("Downloaded AlphaFold model to {}", output_path.display());
     Ok(output_path)
 }
 
@@ -79,7 +79,7 @@ pub fn fetch_esm(mgnify_id: &str, output_dir: &Path) -> Result<PathBuf> {
     );
     let output_path = output_dir.join(format!("{}.pdb", mgnify_id));
 
-    tracing::info!("Fetching ESM model for MGnify {}", mgnify_id);
+    tracing::debug!("Fetching ESM model for MGnify {}", mgnify_id);
     let response = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?
@@ -99,7 +99,7 @@ pub fn fetch_esm(mgnify_id: &str, output_dir: &Path) -> Result<PathBuf> {
     fs::write(&output_path, &content)
         .with_context(|| format!("Failed to write {}", output_path.display()))?;
 
-    tracing::info!("Downloaded ESM model to {}", output_path.display());
+    tracing::debug!("Downloaded ESM model to {}", output_path.display());
     Ok(output_path)
 }
 

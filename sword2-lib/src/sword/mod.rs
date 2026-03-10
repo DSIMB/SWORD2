@@ -9,9 +9,14 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
 use regex::Regex;
+
+static DIGITS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\d+").unwrap());
+static AMB_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^A-index = (\++)$").unwrap());
+static ASS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\d{1,}\s+\|").unwrap());
 
 use crate::output::Partitioning;
 
@@ -108,7 +113,7 @@ pub fn run_pipeline(
     // Step 1: Run DSSP
     let dssp_file = clean_dir.join(format!("{}.dssp", pdb_name));
     if !dssp_file.exists() {
-        tracing::info!("Running DSSP");
+        tracing::debug!("Running DSSP on {}", pdb_file_dst.display());
         let dssp_output = Command::new(&config.dssp_bin)
             .arg("-na")
             .arg(&pdb_file_dst)
@@ -128,7 +133,7 @@ pub fn run_pipeline(
     // Step 2: Run Peeling
     let pu_delineation = clean_dir.join("file_pu_delineation.mtx");
     if !pu_delineation.exists() {
-        tracing::info!("Running Peeling");
+        tracing::debug!("Running Peeling on {}", pdb_file_dst.display());
         let peeling_dir = clean_dir.join("Peeling");
         std::fs::create_dir_all(&peeling_dir)?;
 
@@ -186,7 +191,7 @@ pub fn run_pipeline(
     let contact_matrix = clean_dir.join("file_matrix_pu_contact.mtx");
     if !pu_delineation.exists() {
         // No peeling result → single domain
-        tracing::info!("No peeling for chain, treating as single domain");
+        tracing::debug!("No peeling for chain, treating as single domain");
         let first = tab_num.first().copied().unwrap_or(1);
         let last = tab_num.last().copied().unwrap_or(1);
         let line = format!(
@@ -216,7 +221,7 @@ pub fn run_pipeline(
     };
 
     // Run ComputeMeasure
-    tracing::info!("Computing criteria for PUs merging");
+    tracing::debug!("Computing criteria for PUs merging");
     let measure_lines = compute_measure::compute_measure(
         &contact_matrix,
         &pu_delineation,
@@ -238,7 +243,7 @@ pub fn run_pipeline(
     );
 
     // Prediction model
-    tracing::info!("Predicting structural domains");
+    tracing::debug!("Predicting structural domains from {} measures", relevant_measure.len());
     let predictions = prediction_model(&relevant_measure);
     let predictions_rev: Vec<i32> = predictions.iter().rev().cloned().collect();
     let mut n_dom = predictions_rev.len() + 1;
@@ -250,7 +255,7 @@ pub fn run_pipeline(
     }
 
     // Second ParseMeasure pass — select assignments around predicted N_dom
-    tracing::info!("Selecting domain assignments");
+    tracing::debug!("Selecting domain assignments around N_dom={}", n_dom);
     let relevant_measure2 = parse_measure::parse_measure(
         &measure_strings,
         &results_dir.join("PDBs_Clean").to_string_lossy(),
@@ -459,8 +464,7 @@ fn quality_and_display(
 
 /// Remap renumbered residue positions in a delineation string to original numbering.
 fn remap_residue_numbers(delineation: &str, tab_num: &[i32]) -> String {
-    let re = Regex::new(r"\d+").unwrap();
-    re.replace_all(delineation, |caps: &regex::Captures| {
+    DIGITS_RE.replace_all(delineation, |caps: &regex::Captures| {
         let idx: usize = caps[0].parse().unwrap_or(0);
         if idx > 0 && idx <= tab_num.len() {
             tab_num[idx - 1].to_string()
@@ -562,21 +566,18 @@ fn parse_dssp_to_s2d(dssp_file: &Path, s2d_file: &Path) -> Result<()> {
 ///   2 | 30 | 1-100 101-200 | 3.5 | *****
 /// ```
 pub fn parse_sword_output(output: &[String]) -> Result<SwordResults> {
-    let amb_re = Regex::new(r"^A-index = (\++)$")?;
-    let ass_re = Regex::new(r"\d{1,}\s+\|")?;
-
     let mut ambiguity = "n/a".to_string();
     let mut domains = Vec::new();
 
     for line in output {
         // Check for ambiguity index
-        if let Some(caps) = amb_re.captures(line) {
+        if let Some(caps) = AMB_RE.captures(line) {
             ambiguity = caps[1].to_string();
             continue;
         }
 
         // Check for a domain assignment line
-        if ass_re.is_match(line) {
+        if ASS_RE.is_match(line) {
             let parts: Vec<&str> = line.split('|').map(|s| s.trim()).collect();
             if parts.len() < 5 {
                 continue;

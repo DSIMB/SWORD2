@@ -4,11 +4,14 @@
 //! Fully in Rust — no Perl dependencies.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{ArgAction, Parser};
+use console::Style;
+use indicatif::{ProgressBar, ProgressStyle};
 
 use sword2_lib::{energy, fetch, output, pdb, peeling, sword};
 
@@ -59,20 +62,241 @@ struct Cli {
     /// Path to SWORD2 base directory (defaults to parent of binary location)
     #[arg(long)]
     base_dir: Option<PathBuf>,
+
+    /// Number of random shuffles for Z-score calculation (default: 2000, lower = faster)
+    #[arg(short = 's', long, default_value = "2000")]
+    num_shuffles: usize,
+
+    /// Increase verbosity (-v steps, -vv debug, -vvv trace)
+    #[arg(short = 'v', long = "verbose", action = ArgAction::Count)]
+    verbosity: u8,
+
+    /// Suppress all output except errors
+    #[arg(short = 'q', long)]
+    quiet: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Reporter — manages all user-visible terminal output
+// ---------------------------------------------------------------------------
+
+struct Reporter {
+    verbosity: u8,
+    quiet: bool,
+    spinner: Option<ProgressBar>,
+    step_start: Option<Instant>,
+    // Styles
+    s_ok: Style,
+    s_header: Style,
+    s_step: Style,
+    s_dim: Style,
+    s_warn: Style,
+    s_err: Style,
+}
+
+impl Reporter {
+    fn new(verbosity: u8, quiet: bool) -> Self {
+        let spinner = if verbosity == 0 && !quiet {
+            let pb = ProgressBar::new_spinner();
+            pb.set_style(
+                ProgressStyle::with_template(" {spinner:.cyan}  {msg}")
+                    .unwrap()
+                    .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏", " "]),
+            );
+            pb.enable_steady_tick(Duration::from_millis(80));
+            Some(pb)
+        } else {
+            None
+        };
+
+        Self {
+            verbosity,
+            quiet,
+            spinner,
+            step_start: None,
+            s_ok: Style::new().green().bold(),
+            s_header: Style::new().bold(),
+            s_step: Style::new().cyan(),
+            s_dim: Style::new().dim(),
+            s_warn: Style::new().yellow().bold(),
+            s_err: Style::new().red().bold(),
+        }
+    }
+
+    /// Print the header block (only in -v mode).
+    fn begin(&self, id: &str, chain: char, residues: usize, threads: usize) {
+        if self.quiet {
+            return;
+        }
+        if self.verbosity >= 1 {
+            eprintln!(
+                "\n {}  {}",
+                self.s_header.apply_to("▸"),
+                self.s_header.apply_to(format!(
+                    "{}  ·  chain {}  ·  {} residues  ·  {} threads",
+                    id, chain, residues, threads
+                )),
+            );
+            eprintln!();
+        } else if let Some(ref pb) = self.spinner {
+            pb.set_message(format!("{} · Initializing…", id));
+        }
+    }
+
+    /// Begin a step — show spinner text (v=0) or a running line (v≥1).
+    fn step(&mut self, label: &str) {
+        if self.quiet {
+            return;
+        }
+        self.step_start = Some(Instant::now());
+        if self.verbosity >= 1 {
+            // Don't print running indicator — step_done will print the completed line
+        } else if let Some(ref pb) = self.spinner {
+            // Update the spinner message with the current protein ID prefix
+            let current = pb.message();
+            // Keep prefix (before first ·) and replace suffix
+            let prefix = current.split('·').next().unwrap_or("").trim();
+            pb.set_message(format!("{} · {}…", prefix, label));
+        }
+    }
+
+    /// Complete the current step — print ✓ line (v≥1) or do nothing (v=0, spinner updates).
+    fn step_done(&mut self, label: &str, detail: Option<&str>) {
+        if self.quiet {
+            return;
+        }
+        if self.verbosity >= 1 {
+            let elapsed = self.step_start.map(|s| s.elapsed());
+            let mut line = format!(
+                " {}  {:<40}",
+                self.s_ok.apply_to("✓"),
+                label,
+            );
+            if let Some(d) = detail {
+                write!(line, " {}", self.s_dim.apply_to(d)).ok();
+            }
+            if self.verbosity >= 2 {
+                if let Some(el) = elapsed {
+                    write!(line, "  {}", self.s_dim.apply_to(format_duration(el))).ok();
+                }
+            }
+            eprintln!("{}", line.trim_end());
+        }
+        self.step_start = None;
+    }
+
+    /// Print a warning.
+    #[allow(dead_code)]
+    fn warn(&self, msg: &str) {
+        if self.quiet {
+            return;
+        }
+        if self.verbosity >= 1 {
+            eprintln!(" {}  {}", self.s_warn.apply_to("⚠"), msg);
+        }
+        // In v=0, warnings are suppressed (tracing handles them for -vv+)
+    }
+
+    /// Print the final summary line.
+    fn finish(&self, id: &str, n_domains: usize, residues: usize, elapsed: Duration, path: &std::path::Path) {
+        if self.quiet {
+            return;
+        }
+        if let Some(ref pb) = self.spinner {
+            pb.finish_and_clear();
+        }
+
+        let dur = format_duration(elapsed);
+        let rel_path = path
+            .strip_prefix(std::env::current_dir().unwrap_or_default())
+            .unwrap_or(path);
+
+        if self.verbosity >= 1 {
+            eprintln!();
+            eprintln!(
+                " {}  {}  ·  {} domain{}  ·  {}  →  {}",
+                self.s_ok.apply_to("✓"),
+                self.s_header.apply_to("Done"),
+                n_domains,
+                if n_domains == 1 { "" } else { "s" },
+                self.s_dim.apply_to(&dur),
+                self.s_step.apply_to(rel_path.display()),
+            );
+            eprintln!();
+        } else {
+            eprintln!(
+                " {}  {}  ·  {} residues  ·  {} domain{}  ·  {}  →  {}",
+                self.s_ok.apply_to("✓"),
+                self.s_header.apply_to(id),
+                residues,
+                n_domains,
+                if n_domains == 1 { "" } else { "s" },
+                self.s_dim.apply_to(&dur),
+                self.s_step.apply_to(rel_path.display()),
+            );
+        }
+    }
+
+    /// Print a fatal error before exit.
+    #[allow(dead_code)]
+    fn error(&self, msg: &str) {
+        eprintln!(" {}  {}", self.s_err.apply_to("✗"), msg);
+    }
+}
+
+/// Format a Duration into a human-readable string.
+fn format_duration(d: Duration) -> String {
+    let ms = d.as_millis();
+    if ms < 1000 {
+        format!("{}ms", ms)
+    } else {
+        format!("{:.2}s", d.as_secs_f64())
+    }
+}
+
+/// Configure tracing-subscriber based on verbosity.
+fn setup_logging(verbosity: u8, quiet: bool) {
+    use tracing_subscriber::fmt::format::FmtSpan;
+
+    let level = if quiet {
+        "error"
+    } else {
+        match verbosity {
+            0 | 1 => "warn",
+            2 => "debug",
+            _ => "trace",
+        }
+    };
+
+    let directive = format!("sword2={}", level);
+    let env_filter = tracing_subscriber::EnvFilter::from_default_env()
+        .add_directive(directive.parse().unwrap());
+
+    if verbosity >= 3 {
+        // Full trace: timestamps, spans, level, target
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .with_span_events(FmtSpan::CLOSE)
+            .init();
+    } else {
+        // Compact: no timestamps, colored level prefix
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .without_time()
+            .with_target(verbosity >= 2)
+            .init();
+    }
 }
 
 fn main() -> Result<()> {
     let start = Instant::now();
 
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("sword2=info".parse().unwrap()),
-        )
-        .init();
-
     let cli = Cli::parse();
+
+    // Initialize logging based on verbosity
+    setup_logging(cli.verbosity, cli.quiet);
+
+    let mut reporter = Reporter::new(cli.verbosity, cli.quiet);
 
     // Validate that at least one input source is provided
     if cli.pdb_id.is_none()
@@ -130,10 +354,13 @@ fn main() -> Result<()> {
     std::fs::create_dir_all(&output_dir)?;
 
     // Step 1: Obtain the structure file
+    reporter.step("Fetch structure");
     let (input_path, pdb_id_base) = resolve_input(&cli, &output_dir)?;
+    reporter.step_done("Fetch structure", None);
 
     // Step 2: Parse the structure
-    tracing::info!("Parsing structure from {}", input_path.display());
+    reporter.step("Parse structure");
+    tracing::debug!("Parsing structure from {}", input_path.display());
     let structure = pdb::parse_pdb(&input_path)
         .with_context(|| format!("Failed to parse {}", input_path.display()))?;
 
@@ -145,10 +372,10 @@ fn main() -> Result<()> {
         if let Some(chain) = model.chains.iter().find(|c| {
             c.residues.iter().any(|r| pdb::amino_acids::is_standard(&r.name))
         }) {
-            tracing::info!("No chain specified. Using first protein chain '{}'", chain.id);
+            tracing::debug!("No chain specified. Using first protein chain '{}'", chain.id);
             chain.id
         } else if let Some(chain) = model.chains.first() {
-            tracing::info!("No chain specified. Using first chain '{}'", chain.id);
+            tracing::debug!("No chain specified. Using first chain '{}'", chain.id);
             chain.id
         } else {
             anyhow::bail!("No chains found in the structure");
@@ -176,11 +403,11 @@ fn main() -> Result<()> {
     let results_dir = output_dir.join(&pdb_id_chain);
     std::fs::create_dir_all(&results_dir)?;
 
-    tracing::info!(">>> {} ({} residues)", pdb_id_chain, chain.len());
-    tracing::info!(">>> Using {} cpus", num_threads);
+    tracing::debug!(">>> {} ({} residues)", pdb_id_chain, chain.len());
+    tracing::debug!(">>> Using {} cpus", num_threads);
 
     // Step 3: Clean PDB - remove non-standard residues, insertion codes, renumber from 1
-    tracing::info!("Write a clean version of the PDB: remove non standard residues");
+    tracing::debug!("Write a clean version of the PDB: remove non standard residues");
     let (cleaned_chain, original_resnums) = pdb::writer::clean_chain_for_sword(chain);
 
     if cleaned_chain.is_empty() {
@@ -190,7 +417,11 @@ fn main() -> Result<()> {
     }
 
     let prot_len = cleaned_chain.len();
-    tracing::info!("Clean chain: {} residues, sequence: {}", prot_len, cleaned_chain.get_sequence());
+    tracing::debug!("Clean chain: {} residues, sequence: {}", prot_len, cleaned_chain.get_sequence());
+    reporter.step_done("Parse & clean PDB", Some(&format!("{} residues", prot_len)));
+
+    // Print header now that we know all details
+    reporter.begin(&pdb_id_chain, chain_id, prot_len, num_threads);
 
     // Write clean PDB file
     let pdb_chain_file = results_dir.join(format!("{}.pdb", pdb_id_chain));
@@ -202,7 +433,8 @@ fn main() -> Result<()> {
 
     // Step 4: Compile DSSP if needed (first run)
     if !dssp_bin.exists() {
-        tracing::info!("Compiling DSSP dependency (first run)");
+        reporter.step("Compile DSSP");
+        tracing::debug!("Compiling DSSP dependency (first run)");
         let dssp_dir = bin_dir.join("Dssp");
         let compile_script = if cfg!(target_os = "macos") {
             dssp_dir.join("DsspCompileGCCmacos")
@@ -214,10 +446,12 @@ fn main() -> Result<()> {
                 .current_dir(&dssp_dir)
                 .output();
         }
+        reporter.step_done("Compile DSSP", None);
     }
 
     // Step 5: Run the SWORD pipeline (pure Rust — no Perl!)
-    tracing::info!("Launch SWORD pipeline");
+    reporter.step("SWORD pipeline");
+    tracing::debug!("Launch SWORD pipeline");
     let config = sword::SwordConfig {
         peeling_bin: peeling_bin.to_string_lossy().to_string(),
         dssp_bin: dssp_bin.to_string_lossy().to_string(),
@@ -237,30 +471,78 @@ fn main() -> Result<()> {
     std::fs::write(results_dir.join("sword.txt"), sword_output.join("\n") + "\n")?;
 
     // Step 6: Parse SWORD output (already done in run_pipeline)
-    tracing::info!(
+    let n_domains = sword_results.domains.first().map_or(0, |p| p.nb_domains);
+    tracing::debug!(
         "Found {} partitioning(s), ambiguity: {}",
         sword_results.domains.len(),
         sword_results.ambiguity
     );
+    reporter.step_done(
+        "SWORD pipeline",
+        Some(&format!(
+            "{} domain{}, {} partitioning{}",
+            n_domains,
+            if n_domains == 1 { "" } else { "s" },
+            sword_results.domains.len(),
+            if sword_results.domains.len() == 1 { "" } else { "s" },
+        )),
+    );
 
     // Step 7: Calculate energies
+    // First, collect all unique PU ranges across SWORD partitions (for batch dedup)
+    let energy_config = if !cli.disable_energies {
+        let mut ec = energy::EnergyConfig::from_bin_dir(&bin_dir.to_string_lossy());
+        ec.num_shuffles = cli.num_shuffles;
+        Some(ec)
+    } else {
+        None
+    };
+    let pdb_path_str = results_dir.join(&pdb_id_chain).to_string_lossy().to_string();
+    let chain_str = chain_id.to_string();
+
+    // Pre-compute all unique PU energies in one parallel batch
+    let pu_energy_cache: HashMap<(i32, i32), energy::EnergyResult> =
+        if let Some(ref ec) = energy_config {
+            reporter.step("Pseudo-energies (PUs)");
+            let mut all_pu_ranges: std::collections::HashSet<(i32, i32)> = std::collections::HashSet::new();
+            for part in &sword_results.domains {
+                for domain in &part.boundaries {
+                    for &(s, e) in domain {
+                        all_pu_ranges.insert((s, e));
+                    }
+                }
+            }
+            let unique_ranges: Vec<(i32, i32)> = all_pu_ranges.into_iter().collect();
+            let cache = energy::compute_pu_energies_batch(ec, &pdb_path_str, &chain_str, &unique_ranges);
+            reporter.step_done(
+                "Pseudo-energies (PUs)",
+                Some(&format!("{} unique ranges", unique_ranges.len())),
+            );
+            cache
+        } else {
+            HashMap::new()
+        };
+
+    // Now compute domain-level energies using cached PU results
     let energies: HashMap<energy::EnergyKey, energy::EnergyResult> =
-        if !cli.disable_energies {
-            tracing::info!("Calculate pseudo-energies of Domains");
-            let energy_config =
-                energy::EnergyConfig::from_bin_dir(&bin_dir.to_string_lossy());
-            energy::calculate_all_energies(
-                &energy_config,
-                &results_dir.join(&pdb_id_chain).to_string_lossy(),
-                &chain_id.to_string(),
+        if let Some(ref ec) = energy_config {
+            reporter.step("Pseudo-energies (domains)");
+            let e = energy::calculate_all_energies_with_cache(
+                ec,
+                &pdb_path_str,
+                &chain_str,
                 &sword_results.domains,
-            )
+                &pu_energy_cache,
+            );
+            reporter.step_done("Pseudo-energies (domains)", None);
+            e
         } else {
             HashMap::new()
         };
 
     // Step 8: Write SWORD partitionings (text + JSON)
-    tracing::info!("Write the SWORD results");
+    reporter.step("Write results");
+    tracing::debug!("Write the SWORD results");
     output::write_sword_summary(
         &sword_results,
         &energies,
@@ -275,7 +557,7 @@ fn main() -> Result<()> {
     )?;
 
     // Step 9: Write Peeling results
-    tracing::info!("Write Peeling results");
+    tracing::debug!("Write Peeling results");
     let peeling_num = results_dir
         .join("PDBs_Clean")
         .join(&pdb_id_chain)
@@ -296,24 +578,33 @@ fn main() -> Result<()> {
         if !ori_resnums.is_empty() {
             let peeling_levels = peeling::parse_peeling_log(&peeling_log, &ori_resnums)?;
 
-            // Calculate peeling energies if enabled
-            let peeling_energies = if !cli.disable_energies {
-                let energy_config =
-                    energy::EnergyConfig::from_bin_dir(&bin_dir.to_string_lossy());
-                let pdb_path_str = results_dir.join(&pdb_id_chain).to_string_lossy().to_string();
+            // Calculate peeling energies if enabled — reuse global PU cache + compute missing
+            let peeling_energies = if let Some(ref ec) = energy_config {
+                // Collect unique PU ranges not already in the cache
+                let mut missing_ranges: Vec<(i32, i32)> = Vec::new();
+                let mut seen_pus: std::collections::HashSet<(i32, i32)> = std::collections::HashSet::new();
+                for level in &peeling_levels {
+                    for &(start, end) in &level.pus {
+                        if seen_pus.insert((start, end)) && !pu_energy_cache.contains_key(&(start, end)) {
+                            missing_ranges.push((start, end));
+                        }
+                    }
+                }
+                // Compute only the missing ones in parallel
+                let extra = if !missing_ranges.is_empty() {
+                    energy::compute_pu_energies_batch(ec, &pdb_path_str, &chain_str, &missing_ranges)
+                } else {
+                    HashMap::new()
+                };
+                // Build peeling energy map from both caches
                 let mut pe: HashMap<(i32, i32), (Option<f64>, Option<f64>)> = HashMap::new();
                 for level in &peeling_levels {
                     for &(start, end) in &level.pus {
                         if pe.contains_key(&(start, end)) {
                             continue;
                         }
-                        let pu_res_list = energy::build_residue_list((start, end), &chain_id.to_string());
-                        if let Ok(result) = energy::get_energy_and_z_score(
-                            &energy_config,
-                            &pdb_path_str,
-                            Some(&pu_res_list),
-                        ) {
-                            pe.insert((start, end), (result.energy, result.z_score));
+                        if let Some(r) = pu_energy_cache.get(&(start, end)).or_else(|| extra.get(&(start, end))) {
+                            pe.insert((start, end), (r.energy, r.z_score));
                         }
                     }
                 }
@@ -327,9 +618,10 @@ fn main() -> Result<()> {
                 &results_dir.join("PEELING_summary.txt"),
                 peeling_energies.as_ref(),
             )?;
-            tracing::info!("Wrote peeling summary");
+            tracing::debug!("Wrote peeling summary");
         }
     }
+    reporter.step_done("Write results", None);
 
     // Step 10: Generate plots
     if !cli.disable_plots {
@@ -342,12 +634,13 @@ fn main() -> Result<()> {
             .join("file_proba_contact.mat");
 
         if proba_mat_file.exists() {
-            tracing::info!("Skipping contact probability matrix plots (use Python version for plots)");
+            tracing::debug!("Skipping contact probability matrix plots (use Python version for plots)");
         }
     }
 
     // Step 11: Calculate junction consistencies (pure Rust — no Perl!)
-    tracing::info!("Calculate junctions consistencies");
+    reporter.step("Junctions & cleanup");
+    tracing::debug!("Calculate junctions consistencies");
     let junctions_content =
         sword::junctions::calculate_junction_consistencies(&sword_output);
     if !junctions_content.is_empty() {
@@ -364,7 +657,7 @@ fn main() -> Result<()> {
     )?;
 
     // Step 13: Clean and prepare results
-    tracing::info!("Clean and prepare results");
+    tracing::debug!("Clean and prepare results");
     let pdbs_stand = results_dir.join("PDBs_Stand");
     if pdbs_stand.exists() {
         let _ = std::fs::remove_dir_all(&pdbs_stand);
@@ -389,10 +682,10 @@ fn main() -> Result<()> {
     if peeling_dir_glob.exists() {
         let _ = std::fs::rename(&peeling_dir_glob, results_dir.join("Protein_Units"));
     }
+    reporter.step_done("Junctions & cleanup", None);
 
     let elapsed = start.elapsed();
-    tracing::info!("Results can be found here: {}", results_dir.display());
-    tracing::info!("Total runtime: {} seconds", elapsed.as_secs());
+    reporter.finish(&pdb_id_chain, n_domains, prot_len, elapsed, &results_dir);
 
     Ok(())
 }

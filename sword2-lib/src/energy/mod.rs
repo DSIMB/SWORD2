@@ -4,10 +4,14 @@
 //! pseudo-energy and Z-score for protein domains and protein units.
 
 use std::process::Command;
+use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
 use rayon::prelude::*;
 use regex::Regex;
+
+static ENERGY_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^Pseudo-energy = (.+)$").unwrap());
+static ZSCORE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^Z-score = (.+)$").unwrap());
 
 /// Result of an energy calculation for a domain or PU.
 #[derive(Debug, Clone)]
@@ -90,21 +94,20 @@ pub fn get_energy_and_z_score(
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let energy_re = Regex::new(r"^Pseudo-energy = (.+)$").unwrap();
-    let zscore_re = Regex::new(r"^Z-score = (.+)$").unwrap();
 
     let mut energy = None;
     let mut z_score = None;
 
     for line in stdout.lines() {
-        if let Some(caps) = energy_re.captures(line) {
+        if let Some(caps) = ENERGY_RE.captures(line) {
             energy = caps[1].trim().parse::<f64>().ok();
         }
-        if let Some(caps) = zscore_re.captures(line) {
+        if let Some(caps) = ZSCORE_RE.captures(line) {
             z_score = caps[1].trim().parse::<f64>().ok();
         }
     }
 
+    tracing::trace!("Energy result: energy={:?}, z_score={:?}", energy, z_score);
     Ok(EnergyResult { energy, z_score })
 }
 
@@ -180,6 +183,64 @@ pub fn calculate_all_energies(
     results.into_inner().unwrap()
 }
 
+/// Calculate energies for all domains, reusing pre-computed PU energy cache.
+///
+/// PU-level energies are looked up from `pu_cache` instead of re-invoking
+/// the external binary. Only domain-level (multi-PU) energies are computed fresh.
+pub fn calculate_all_energies_with_cache(
+    config: &EnergyConfig,
+    pdb_path: &str,
+    chain: &str,
+    partitions: &[crate::sword::SwordPartition],
+    pu_cache: &std::collections::HashMap<(i32, i32), EnergyResult>,
+) -> std::collections::HashMap<EnergyKey, EnergyResult> {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    let results = Mutex::new(HashMap::new());
+
+    // Collect all work items
+    let mut work_items: Vec<(usize, usize, Vec<(i32, i32)>)> = Vec::new();
+    for (i, part) in partitions.iter().enumerate() {
+        for (j, domain) in part.boundaries.iter().enumerate() {
+            work_items.push((i, j, domain.clone()));
+        }
+    }
+
+    // Process in parallel using rayon
+    work_items.par_iter().for_each(|(i, j, domain)| {
+        let mut dom_residues = String::new();
+
+        // Use cached PU energies
+        for &(start, end) in domain {
+            let pu_res_list = build_residue_list((start, end), chain);
+            if !dom_residues.is_empty() {
+                dom_residues.push(',');
+            }
+            dom_residues.push_str(&pu_res_list);
+
+            if let Some(pu_result) = pu_cache.get(&(start, end)) {
+                results
+                    .lock()
+                    .unwrap()
+                    .insert(EnergyKey::Pu(*i, *j, start, end), pu_result.clone());
+            }
+        }
+
+        // Calculate energy for the entire domain (not cached — unique per partition)
+        if let Ok(dom_result) =
+            get_energy_and_z_score(config, pdb_path, Some(&dom_residues))
+        {
+            results
+                .lock()
+                .unwrap()
+                .insert(EnergyKey::Domain(*i, *j), dom_result);
+        }
+    });
+
+    results.into_inner().unwrap()
+}
+
 /// Key for energy results lookup.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum EnergyKey {
@@ -187,6 +248,29 @@ pub enum EnergyKey {
     Domain(usize, usize),
     /// Energy for a PU: (partition_index, domain_index, start_residue, end_residue).
     Pu(usize, usize, i32, i32),
+}
+
+/// Pre-compute energies for a set of unique PU ranges in parallel.
+///
+/// Returns a map from (start, end) to EnergyResult. This avoids redundant
+/// external binary invocations when the same PU ranges appear across
+/// SWORD partitions and peeling levels.
+pub fn compute_pu_energies_batch(
+    config: &EnergyConfig,
+    pdb_path: &str,
+    chain: &str,
+    pu_ranges: &[(i32, i32)],
+) -> std::collections::HashMap<(i32, i32), EnergyResult> {
+    tracing::debug!("Computing energies for {} unique PU ranges", pu_ranges.len());
+    pu_ranges
+        .par_iter()
+        .filter_map(|&(start, end)| {
+            let res_list = build_residue_list((start, end), chain);
+            get_energy_and_z_score(config, pdb_path, Some(&res_list))
+                .ok()
+                .map(|r| ((start, end), r))
+        })
+        .collect()
 }
 
 #[cfg(test)]

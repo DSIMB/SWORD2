@@ -13,5 +13,8 @@ sword2-lib = { path = "../sword2-lib" }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 num_cpus = "1"
+rayon = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+indicatif = "0.17"
+console = "0.15"
