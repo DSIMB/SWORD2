@@ -4,9 +4,11 @@
 //! and a contact probability matrix and iteratively merges PUs into domains,
 //! computing quality measures at each level.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+
+use rayon::prelude::*;
 
 /// A single measure line from the hierarchical merging process.
 #[derive(Debug, Clone)]
@@ -156,12 +158,13 @@ pub fn compute_measure(
         }
         all_tab_domains = unique_domains;
 
-        // Try merging PU pairs
-        let mut all_results: Vec<MergeResult> = Vec::new();
-        for doms in &all_tab_domains {
-            let mut results = compute_merge_pu(doms, &tab_matrix, &pu_sizes);
-            all_results.append(&mut results);
-        }
+        // Try merging PU pairs (parallel across domain sets)
+        let all_results: Vec<MergeResult> = all_tab_domains
+            .par_iter()
+            .flat_map(|doms| compute_merge_pu(doms, &tab_matrix, &pu_sizes))
+            .collect();
+
+        let mut all_results = all_results;
 
         if all_results.is_empty() {
             break;
@@ -250,13 +253,27 @@ fn compute_merge_pu(
 ) -> Vec<MergeResult> {
     let mut results = Vec::new();
 
+    // Memoize measure_internal results keyed by sorted sub-domain indices
+    let mut internal_cache: HashMap<Vec<usize>, (f64, f64)> = HashMap::new();
+
+    let get_internal = |dom: &str, cache: &mut HashMap<Vec<usize>, (f64, f64)>| -> (f64, f64) {
+        let mut sub = parse_sub_domains(dom);
+        sub.sort();
+        if let Some(&cached) = cache.get(&sub) {
+            return cached;
+        }
+        let result = measure_internal(&sub, tab_matrix, pu_sizes);
+        cache.insert(sub, result);
+        result
+    };
+
     for j in 0..domains.len() {
         let sub_doms_1 = parse_sub_domains(&domains[j]);
-        let (size_int_1, contact_int_1) = measure_internal(&sub_doms_1, tab_matrix, pu_sizes);
+        let (size_int_1, contact_int_1) = get_internal(&domains[j], &mut internal_cache);
 
         for k in (j + 1)..domains.len() {
             let sub_doms_2 = parse_sub_domains(&domains[k]);
-            let (size_int_2, contact_int_2) = measure_internal(&sub_doms_2, tab_matrix, pu_sizes);
+            let (size_int_2, contact_int_2) = get_internal(&domains[k], &mut internal_cache);
             let (_size_ext, contact_ext) =
                 measure_external(&sub_doms_1, &sub_doms_2, tab_matrix, pu_sizes);
 

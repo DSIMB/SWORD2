@@ -88,6 +88,13 @@ fn parse_measure_with_diff(
     let mut temp_measure: Vec<String> = Vec::new();
     let mut max_dom: usize = 0;
 
+    // Pre-load CA residue numbers once for all Jones overlap checks
+    let pdb_base = &pdb_id[..pdb_id.len().saturating_sub(3)];
+    let pdb_file_path = std::path::Path::new(dir_data)
+        .join(pdb_base)
+        .join(format!("{}.pdb", pdb_base));
+    let cached_residue_nums = compute_jones::read_ca_residue_numbers(&pdb_file_path);
+
     // First pass: group and filter by domain count levels
     for line in measure_lines {
         if is_comment(line) {
@@ -151,11 +158,12 @@ fn parse_measure_with_diff(
                             let del_str1 = format!("{}{}", pdb_id, del1);
                             let del_str2 = format!("{}{}", pdb_id, del2);
 
-                            let (criterion, _) = compute_jones::compute_jones(
+                            let (criterion, _) = compute_jones::compute_jones_with_cache(
                                 pdb_id,
                                 &del_str1,
                                 &del_str2,
                                 dir_data,
+                                Some(&cached_residue_nums),
                             );
                             if criterion == 1 {
                                 // Too similar — remove
