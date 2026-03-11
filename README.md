@@ -98,7 +98,7 @@ Run from the repository root:
 ./sword2-rs/target/release/sword2 -p 1jx4 -o results --base-dir /path/to/SWORD2
 ```
 
-Note: The Rust version currently skips plot generation (contact probability matrices, domain histograms).
+The Rust version generates SVG plots for the contact probability matrix and domain consistency histogram by default. Use `--disable-plots` to skip those files.
 
 ## Fast mode 
 
@@ -147,8 +147,8 @@ Options:
           Number of CPUs to use. Default all (0).
   -e, --disable-energies
           Disable the calculation of pseudo-energy of domains and PUs.
-      --disable-plots
-          (Ignored in Rust port currently) Disable the generation of contact probability matrices plots.
+        -l, --disable-plots
+                                        Disable the generation of contact probability matrix plots and the domain consistency histogram.
   -b, --base-dir <BASE_DIR>
           Base directory string. Usually not needed if running from the source repository directory or installed with pip setup.
   -t, --tmp-dir <TMP_DIR>
