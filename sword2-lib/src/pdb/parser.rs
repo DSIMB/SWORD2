@@ -9,12 +9,13 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use flate2::read::GzDecoder;
+use pdbtbx::StrictnessLevel;
 
 use super::types::{Atom, Chain, Model, Point3D, Residue, Structure};
 
-/// Parse a PDB file from the given path.
+/// Parse a protein structure file from the given path.
 ///
-/// Supports plain `.pdb` files and gzip-compressed `.pdb.gz` files.
+/// Supports plain `.pdb`, `.cif` (mmCIF) files and gzip-compressed versions.
 pub fn parse_pdb(path: &Path) -> Result<Structure> {
     let name = path
         .file_stem()
@@ -22,15 +23,90 @@ pub fn parse_pdb(path: &Path) -> Result<Structure> {
         .unwrap_or("unknown")
         .to_string();
 
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    
+    // Check if it's mmCIF (possibly gzipped)
+    if ext == "cif" || (ext == "gz" && path.to_str().unwrap_or("").ends_with(".cif.gz")) {
+        return parse_mmcif(path);
+    }
+
     let file = fs::File::open(path).with_context(|| format!("Cannot open {}", path.display()))?;
 
-    let reader: Box<dyn BufRead> = if path.extension().and_then(|e| e.to_str()) == Some("gz") {
+    let reader: Box<dyn BufRead> = if ext == "gz" {
         Box::new(BufReader::new(GzDecoder::new(file)))
     } else {
         Box::new(BufReader::new(file))
     };
 
     parse_pdb_reader(reader, &name)
+}
+
+/// Parse an mmCIF file using pdbtbx and convert it to our internal Structure type.
+pub fn parse_mmcif(path: &Path) -> Result<Structure> {
+    let path_str = path.to_str().ok_or_else(|| anyhow::anyhow!("Invalid path"))?;
+    let (pdbtbx_struct, _warnings) = pdbtbx::ReadOptions::new()
+        .set_level(StrictnessLevel::Loose)
+        .read(path_str)
+        .map_err(|e| anyhow::anyhow!("pdbtbx error: {:?}", e))?;
+
+    let name = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    let mut structure = Structure::new(&name);
+
+    for pdbtbx_model in pdbtbx_struct.models() {
+        let mut model = Model::new(pdbtbx_model.serial_number() as i32);
+        for pdbtbx_chain in pdbtbx_model.chains() {
+            let chain_id = pdbtbx_chain.id().chars().next().unwrap_or(' ');
+            let mut chain = Chain::new(chain_id);
+
+            for pdbtbx_residue in pdbtbx_chain.residues() {
+                let res_name = pdbtbx_residue.name().unwrap_or("UNK");
+                let res_serial = pdbtbx_residue.serial_number() as i32;
+                let icode = pdbtbx_residue.insertion_code().and_then(|s| s.chars().next()).unwrap_or(' ');
+                
+                let mut residue = Residue::new(
+                    res_name,
+                    res_serial,
+                    icode,
+                    chain_id,
+                );
+
+                for pdbtbx_conformer in pdbtbx_residue.conformers() {
+                    let alt_loc = pdbtbx_conformer.alternative_location()
+                        .and_then(|s| s.chars().next())
+                        .unwrap_or(' ');
+
+                    for pdbtbx_atom in pdbtbx_conformer.atoms() {
+                        let atom = Atom::new(
+                            pdbtbx_atom.serial_number() as i32,
+                            pdbtbx_atom.name(),
+                            alt_loc,
+                            res_name,
+                            chain_id,
+                            res_serial,
+                            icode,
+                            Point3D::new(pdbtbx_atom.x(), pdbtbx_atom.y(), pdbtbx_atom.z()),
+                            pdbtbx_atom.occupancy(),
+                            pdbtbx_atom.b_factor(),
+                            pdbtbx_atom.element().map(|e| e.to_string()).unwrap_or_default().as_str(),
+                            "", // Charge
+                            pdbtbx_atom.hetero(),
+                        );
+                        residue.atoms.push(atom);
+                    }
+                }
+                chain.residues.push(residue);
+            }
+            model.chains.push(chain);
+        }
+        structure.models.push(model);
+    }
+
+    Ok(structure)
 }
 
 /// Parse PDB content from a string.

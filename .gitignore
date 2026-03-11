@@ -6,10 +6,7 @@ __pycache__/
 
 # Build artifacts
 *.o
-bin/SWORD/bin/SWORD/bin/Dssp/dsspcmbi
-bin/SWORD/bin/SWORD/bin/Peeling_omp
 bin/mypmfs-master/scoring_omp
+bin/Peeling/Peeling_omp
 results*/
 target/
-sword2-rs/target/
-sword2-rs/Cargo.lock

@@ -31,8 +31,6 @@ pub mod parse_measure;
 pub struct SwordConfig {
     /// Path to the Peeling_omp binary.
     pub peeling_bin: String,
-    /// Path to the dsspcmbi binary.
-    pub dssp_bin: String,
     /// Whether to compute energies.
     pub compute_energies: bool,
     /// Whether to generate plots.
@@ -49,7 +47,6 @@ impl Default for SwordConfig {
     fn default() -> Self {
         Self {
             peeling_bin: "Peeling_omp".to_string(),
-            dssp_bin: "dsspcmbi".to_string(),
             compute_energies: true,
             generate_plots: true,
             num_threads: num_cpus::get(),
@@ -110,29 +107,12 @@ pub fn run_pipeline(
         std::fs::copy(&pdb_file_src, &pdb_file_dst)?;
     }
 
-    // Step 1: Run DSSP
+    // Step 1: Run DSSP (pure Rust)
     let dssp_file = clean_dir.join(format!("{}.dssp", pdb_name));
     if !dssp_file.exists() {
         tracing::debug!("Running DSSP on {}", pdb_file_dst.display());
-        let dssp_output = Command::new(&config.dssp_bin)
-            .arg("-na")
-            .arg(&pdb_file_dst)
-            .arg(&dssp_file)
-            .output()
-            .with_context(|| format!("Failed to run DSSP: {}", config.dssp_bin))?;
-
-        if !dssp_output.status.success() {
-            let stderr_msg = String::from_utf8_lossy(&dssp_output.stderr);
-            let stderr_trimmed = stderr_msg.trim();
-            if stderr_trimmed.is_empty() {
-                tracing::warn!("DSSP exited with status {}", dssp_output.status);
-            } else {
-                tracing::warn!("DSSP exited with status {}: {}", dssp_output.status, stderr_trimmed);
-            }
-        }
-
-        // Parse DSSP to create .s2d file
-        parse_dssp_to_s2d(&dssp_file, &clean_dir.join(format!("{}.s2d", pdb_name)))?;
+        let s2d_file = clean_dir.join(format!("{}.s2d", pdb_name));
+        crate::dssp::run_dssp(&pdb_file_dst, &dssp_file, &s2d_file, pdb_name)?;
     }
 
     // Step 2: Run Peeling
@@ -507,61 +487,6 @@ fn compute_cindex(globqual: &[usize]) -> String {
     }
 }
 
-/// Parse DSSP output file to create a .s2d (3-state secondary structure) file.
-///
-/// Port of `parsing_dssp()` from SWORD Perl script.
-fn parse_dssp_to_s2d(dssp_file: &Path, s2d_file: &Path) -> Result<()> {
-    let content = std::fs::read_to_string(dssp_file).unwrap_or_default();
-    let pdb_name = dssp_file
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("unknown");
-
-    let mut ss_list = Vec::new();
-    let mut assign = false;
-    let mut buff: i32 = 1;
-
-    for line in content.lines() {
-        if line.contains("#  RESIDUE AA STRUCTURE") {
-            assign = true;
-            continue;
-        }
-        if assign && line.len() > 16 {
-            let ss = line.chars().nth(16).unwrap_or(' ');
-            let chain_break = line.chars().nth(13).unwrap_or(' ');
-
-            if chain_break == '!' {
-                continue;
-            }
-
-            // Check for gap
-            let resnum: i32 = line[7..11].trim().parse().unwrap_or(0);
-            if buff + 1 < resnum {
-                ss_list.push('*');
-            }
-            buff = resnum;
-
-            let ss3 = match ss {
-                'H' | 'G' | 'I' => 'H',
-                'E' | 'B' => 'E',
-                _ => 'C',
-            };
-            ss_list.push(ss3);
-        }
-    }
-
-    let mut out = format!("> {} \n", pdb_name);
-    for (i, chunk) in ss_list.chunks(80).enumerate() {
-        let s: String = chunk.iter().collect();
-        out.push_str(&s);
-        if i < ss_list.len() / 80 {
-            out.push('\n');
-        }
-    }
-
-    std::fs::write(s2d_file, out)?;
-    Ok(())
-}
 
 /// Parse the output from the SWORD pipeline into structured results.
 ///

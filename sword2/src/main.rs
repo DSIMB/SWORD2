@@ -342,8 +342,7 @@ fn main() -> Result<()> {
 
     let bin_dir = base_dir.join("bin");
 
-    // Resolve paths to C binaries (keep these — they're compiled and fast)
-    let dssp_bin = bin_dir.join("Dssp/dsspcmbi");
+    // Resolve path to Peeling C binary (DSSP is now pure Rust)
     let peeling_bin = bin_dir.join("Peeling/Peeling_omp");
 
     // Ensure output directory exists
@@ -431,55 +430,11 @@ fn main() -> Result<()> {
     let pdb_no_ext = results_dir.join(&pdb_id_chain);
     std::fs::rename(&pdb_chain_file, &pdb_no_ext)?;
 
-    // Step 4: Compile DSSP if needed (first run or non-native binary)
-    let need_compile = if dssp_bin.exists() {
-        // On macOS, check if the binary is a native Mach-O (not a Linux ELF running via Rosetta)
-        if cfg!(target_os = "macos") {
-            let is_elf = std::fs::read(&dssp_bin)
-                .map(|bytes| bytes.starts_with(b"\x7fELF"))
-                .unwrap_or(false);
-            if is_elf {
-                tracing::debug!("DSSP binary is a Linux ELF, recompiling as native macOS binary");
-            }
-            is_elf
-        } else {
-            false
-        }
-    } else {
-        true
-    };
-    if need_compile {
-        reporter.step("Compile DSSP");
-        tracing::debug!("Compiling DSSP dependency");
-        let dssp_dir = bin_dir.join("Dssp");
-        let compile_script = if cfg!(target_os = "macos") {
-            dssp_dir.join("DsspCompileGCCmacos")
-        } else {
-            dssp_dir.join("DsspCompileGCC")
-        };
-        if compile_script.exists() {
-            let output = std::process::Command::new("bash")
-                .arg(&compile_script)
-                .current_dir(&dssp_dir)
-                .output();
-            match output {
-                Ok(o) if !o.status.success() => {
-                    let stderr = String::from_utf8_lossy(&o.stderr);
-                    tracing::warn!("DSSP compilation failed: {}", stderr.trim());
-                }
-                Err(e) => tracing::warn!("Failed to run DSSP compile script: {}", e),
-                _ => tracing::debug!("DSSP compiled successfully"),
-            }
-        }
-        reporter.step_done("Compile DSSP", None);
-    }
-
-    // Step 5: Run the SWORD pipeline (pure Rust — no Perl!)
+    // Step 4: Run the SWORD pipeline (DSSP is pure Rust, no compilation needed)
     reporter.step("SWORD pipeline");
     tracing::debug!("Launch SWORD pipeline");
     let config = sword::SwordConfig {
         peeling_bin: peeling_bin.to_string_lossy().to_string(),
-        dssp_bin: dssp_bin.to_string_lossy().to_string(),
         compute_energies: !cli.disable_energies,
         generate_plots: !cli.disable_plots,
         num_threads,

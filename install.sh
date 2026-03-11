@@ -1,20 +1,6 @@
 #!/bin/bash
 
-# Compile DSSP dependency
-if [ "$(uname)" == "Darwin" ]; then
-    ./bin/Dssp/DsspCompileGCCmacos &>/dev/null
-else
-    ./bin/Dssp/DsspCompileGCC &>/dev/null
-fi
-mv dsspcmbi bin/Dssp/dsspcmbi &>/dev/null
-
-if [ -f ./bin/Dssp/dsspcmbi ]
-then
-    echo "Successfully compiled DSSP dependency"
-else
-    echo "Error: unable to compile DSSP dependency"
-    exit 1
-fi
+# DSSP is now implemented in pure Rust — no C compilation needed.
 
 # Compile MyPMFs
 make -C bin/mypmfs-master scoring_omp >/dev/null
