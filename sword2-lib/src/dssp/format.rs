@@ -21,13 +21,16 @@ use super::types::DsspChain;
 pub fn write_dssp(chain: &DsspChain, pdb_name: &str, output_path: &Path) -> Result<()> {
     let mut out = Vec::new();
 
-    // Header lines
-    writeln!(out, "==== Secondary Structure Definition by the program DSSP, Rust port ====")?;
-    writeln!(out, "REFERENCE W. KABSCH AND C.SANDER, BIOPOLYMERS 22 (1983) 2577-2637")?;
-    writeln!(out, "HEADER    {}", pdb_name)?;
-    writeln!(out, "COMPND")?;
-    writeln!(out, "SOURCE")?;
-    writeln!(out, "AUTHOR")?;
+    // Header lines — padded to ≥128 chars so that position 126 is always a space.
+    // The C binary's parse_dssp() skips lines where line[126] is whitespace or '-'.
+    // Without padding, short header lines leave position 126 as uninitialized buffer
+    // content, causing them to be incorrectly parsed as data lines.
+    write_padded_line(&mut out, "==== Secondary Structure Definition by the program DSSP, Rust port ====")?;
+    write_padded_line(&mut out, "REFERENCE W. KABSCH AND C.SANDER, BIOPOLYMERS 22 (1983) 2577-2637")?;
+    write_padded_line(&mut out, &format!("HEADER    {}", pdb_name))?;
+    write_padded_line(&mut out, "COMPND")?;
+    write_padded_line(&mut out, "SOURCE")?;
+    write_padded_line(&mut out, "AUTHOR")?;
 
     // Count residues (excluding chain breaks)
     let nres = (1..=chain.len)
@@ -199,5 +202,20 @@ pub fn write_s2d(chain: &DsspChain, pdb_name: &str, output_path: &Path) -> Resul
     }
 
     std::fs::write(output_path, out)?;
+    Ok(())
+}
+
+/// Write a line padded to at least 128 characters (spaces) so that
+/// the C binary's parse_dssp() sees a space at position 126 and skips it.
+fn write_padded_line(out: &mut Vec<u8>, content: &str) -> Result<()> {
+    const MIN_WIDTH: usize = 128;
+    write!(out, "{}", content)?;
+    let len = content.len();
+    if len < MIN_WIDTH {
+        for _ in len..MIN_WIDTH {
+            out.push(b' ');
+        }
+    }
+    writeln!(out)?;
     Ok(())
 }

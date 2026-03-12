@@ -215,6 +215,15 @@ pub fn run_pipeline(
 
     let measure_strings: Vec<String> = measure_lines.iter().map(|ml| ml.to_line()).collect();
 
+    // DEBUG: count measure lines per domain count
+    {
+        let mut counts: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+        for ml in &measure_lines {
+            *counts.entry(ml.num_domains).or_insert(0) += 1;
+        }
+        tracing::info!("ComputeMeasure lines per domain count: {:?}", counts);
+    }
+
     // First ParseMeasure pass — get all relevant measures
     let relevant_measure = parse_measure::parse_measure(
         &measure_strings,
@@ -241,6 +250,17 @@ pub fn run_pipeline(
 
     // Second ParseMeasure pass — select assignments around predicted N_dom
     tracing::debug!("Selecting domain assignments around N_dom={}", n_dom);
+
+    // DEBUG: dump relevant_measure from first pass
+    {
+        let mut counts: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+        for rm in &relevant_measure {
+            let nd: usize = rm.split('|').next().unwrap_or("0").trim().parse().unwrap_or(0);
+            *counts.entry(nd).or_insert(0) += 1;
+        }
+        tracing::info!("First ParseMeasure: {} lines, per level: {:?}", relevant_measure.len(), counts);
+    }
+
     let relevant_measure2 = parse_measure::parse_measure(
         &measure_strings,
         &results_dir.join("PDBs_Clean").to_string_lossy(),
@@ -253,6 +273,20 @@ pub fn run_pipeline(
     );
 
     // Find the measure line for the predicted N_dom
+    // DEBUG: dump relevant_measure2 from second pass
+    {
+        tracing::info!("Second ParseMeasure: {} lines total", relevant_measure2.len());
+        for (i, rm) in relevant_measure2.iter().enumerate() {
+            let fields: Vec<&str> = rm.split('|').collect();
+            let nd: usize = fields[0].trim().parse().unwrap_or(0);
+            let del = if fields.len() > 2 { fields[2].trim() } else { "?" };
+            let cr: f64 = if fields.len() > 3 { fields[3].trim().parse().unwrap_or(0.0) } else { 0.0 };
+            let cpd: f64 = if fields.len() > 5 { fields[5].trim().parse().unwrap_or(0.0) } else { 0.0 };
+            let dist_signed = crate::sword::distance_model::distance_model(cr, cpd, 1);
+            tracing::info!("  [{}] nd={} dist_signed={:.4} abs={:.4} del={}", i, nd, dist_signed, dist_signed.abs(), del);
+        }
+    }
+
     let mut to_print = String::new();
     for rm in &relevant_measure2 {
         let fields: Vec<&str> = rm.split('|').collect();
@@ -448,12 +482,14 @@ fn quality_and_display(
 }
 
 /// Remap renumbered residue positions in a delineation string to original numbering.
+///
+/// The delineation contains 0-based indices from file_pu_delineation.mtx.
+/// `tab_num` is 0-indexed: tab_num[i] = original residue number for index i.
+/// This matches the Perl original: `$$ref_tab_num[$1]` (direct 0-based access).
 fn remap_residue_numbers(delineation: &str, tab_num: &[i32]) -> String {
     DIGITS_RE.replace_all(delineation, |caps: &regex::Captures| {
         let idx: usize = caps[0].parse().unwrap_or(0);
-        if idx > 0 && idx <= tab_num.len() {
-            tab_num[idx - 1].to_string()
-        } else if idx < tab_num.len() {
+        if idx < tab_num.len() {
             tab_num[idx].to_string()
         } else {
             caps[0].to_string()

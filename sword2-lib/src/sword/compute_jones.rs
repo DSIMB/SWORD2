@@ -34,8 +34,14 @@ pub fn compute_jones_with_cache(
     dir_data: &str,
     cached_residue_nums: Option<&[i32]>,
 ) -> (i32, f64) {
-    let tab_del1: Vec<&str> = delineation1.split_whitespace().collect();
-    let tab_del2: Vec<&str> = delineation2.split_whitespace().collect();
+    // The caller (ParseMeasure) passes delineations with underscores replacing spaces
+    // and escaped semicolons (\\;). Convert back, matching the original Perl behaviour
+    // where ComputeJones.pl does: join(" ", split("_", $delineation))
+    let del1_clean = delineation1.replace('_', " ").replace("\\;", ";");
+    let del2_clean = delineation2.replace('_', " ").replace("\\;", ";");
+
+    let tab_del1: Vec<&str> = del1_clean.split_whitespace().collect();
+    let tab_del2: Vec<&str> = del2_clean.split_whitespace().collect();
 
     let skip1 = if tab_del1.len() > 2 && tab_del1[0].chars().any(|c| c.is_alphabetic()) { 2 } else { 0 };
     let skip2 = if tab_del2.len() > 2 && tab_del2[0].chars().any(|c| c.is_alphabetic()) { 2 } else { 0 };

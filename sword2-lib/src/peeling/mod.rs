@@ -7,37 +7,75 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+
+/// The backend that produced peeling results.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PeelingBackend {
+    /// Legacy external Peeling_omp binary.
+    LegacyBinary,
+    /// Future native Rust implementation.
+    NativeRust,
+}
+
+/// A residue interval in original residue numbering.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ResidueRange {
+    /// First residue in the interval.
+    pub start: i32,
+    /// Last residue in the interval.
+    pub end: i32,
+}
+
+impl ResidueRange {
+    /// Create a new residue range.
+    pub fn new(start: i32, end: i32) -> Self {
+        Self { start, end }
+    }
+}
 
 /// A Protein Unit (PU) identified by peeling.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProteinUnit {
     /// PU identifier.
     pub id: String,
     /// Chain ID.
     pub chain: char,
-    /// Residue ranges as (start, end) pairs.
-    pub segments: Vec<(i32, i32)>,
+    /// Residue ranges.
+    pub segments: Vec<ResidueRange>,
     /// Peeling level at which this PU was identified.
     pub level: usize,
 }
 
 /// Results from a single peeling level.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeelingLevel {
     /// Peeling level number (1-based).
     pub level: usize,
-    /// Internal/external contact ratio.
-    pub ie_ratio: f64,
-    /// Internal/(internal+external) ratio.
-    pub ii_plus_e_ratio: f64,
-    /// R-squared value.
-    pub r2: f64,
+    /// Maximum contact ratio (Max_CR in legacy output).
+    pub max_cr: f64,
+    /// Minimum density (Min_Density in legacy output).
+    pub min_density: f64,
     /// Compaction Index (CI).
     pub ci: f64,
+    /// R metric from the legacy output.
+    pub r: f64,
     /// Number of PUs at this level.
     pub num_pus: usize,
-    /// Protein Unit boundaries as (start, end) pairs in original residue numbering.
-    pub pus: Vec<(i32, i32)>,
+    /// Protein Unit boundaries in original residue numbering.
+    pub pus: Vec<ResidueRange>,
+}
+
+/// Structured peeling results independent of the producing backend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeelingResults {
+    /// Backend used to generate the results.
+    pub backend: PeelingBackend,
+    /// Original residue numbers for the cleaned chain.
+    pub original_resnums: Vec<i32>,
+    /// All peeling levels in ascending order.
+    pub levels: Vec<PeelingLevel>,
 }
 
 /// Parse the .num file that maps renumbered residues to original numbers.
@@ -60,7 +98,7 @@ pub fn parse_num_file(num_path: &Path) -> Result<Vec<i32>> {
 /// The log file format (after skipping the header line):
 /// ```text
 /// # header line
-/// ie_ratio  ii+e_ratio  R2  CI  N  start1 end1 start2 end2 ...
+/// Max_CR  Min_Density  CI  R  N  start1 end1 start2 end2 ...
 /// ```
 ///
 /// The residue numbers in the log are 1-based indices into the renumbered sequence.
@@ -90,10 +128,10 @@ pub fn parse_peeling_log(
             continue;
         }
 
-        let ie_ratio: f64 = fields[0].parse().unwrap_or(0.0);
-        let ii_plus_e_ratio: f64 = fields[1].parse().unwrap_or(0.0);
-        let r2: f64 = fields[2].parse().unwrap_or(0.0);
-        let ci: f64 = fields[3].parse().unwrap_or(0.0);
+        let max_cr: f64 = fields[0].parse().unwrap_or(0.0);
+        let min_density: f64 = fields[1].parse().unwrap_or(0.0);
+        let ci: f64 = fields[2].parse().unwrap_or(0.0);
+        let r: f64 = fields[3].parse().unwrap_or(0.0);
         let num_pus: usize = fields[4].parse().unwrap_or(0);
 
         // Parse PU boundaries from remaining fields
@@ -112,18 +150,18 @@ pub fn parse_peeling_log(
                 {
                     let start = ori_resnums[start_idx - 1];
                     let end = ori_resnums[end_idx - 1];
-                    pus.push((start, end));
+                    pus.push(ResidueRange::new(start, end));
                 }
             }
         }
-        pus.sort_by_key(|&(s, _)| s);
+        pus.sort_by_key(|range| range.start);
 
         levels.push(PeelingLevel {
             level: nb_lvl,
-            ie_ratio,
-            ii_plus_e_ratio,
-            r2,
+            max_cr,
+            min_density,
             ci,
+            r,
             num_pus,
             pus,
         });
@@ -145,10 +183,10 @@ pub fn levels_to_protein_units(
                 .pus
                 .iter()
                 .enumerate()
-                .map(|(i, &(start, end))| ProteinUnit {
+                .map(|(i, range)| ProteinUnit {
                     id: format!("PU{}", i + 1),
                     chain: chain_id,
-                    segments: vec![(start, end)],
+                    segments: vec![*range],
                     level: level.level,
                 })
                 .collect()
@@ -156,9 +194,118 @@ pub fn levels_to_protein_units(
         .collect()
 }
 
+/// Load legacy peeling outputs into the structured result model.
+pub fn load_legacy_results(
+    peeling_log: &Path,
+    num_path: &Path,
+) -> Result<PeelingResults> {
+    let original_resnums = parse_num_file(num_path)?;
+    let levels = parse_peeling_log(peeling_log, &original_resnums)?;
+
+    Ok(PeelingResults {
+        backend: PeelingBackend::LegacyBinary,
+        original_resnums,
+        levels,
+    })
+}
+
+fn format_metric(value: f64) -> String {
+    let rounded = (value * 100.0).round() / 100.0;
+    let trimmed = format!("{rounded:.2}")
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string();
+
+    if trimmed.contains('.') {
+        trimmed
+    } else {
+        format!("{trimmed}.0")
+    }
+}
+
+#[derive(Serialize)]
+struct PeelingSummaryEntry {
+    boundary: ResidueRange,
+    aul_percent: Option<i32>,
+    z_score: Option<f64>,
+}
+
+#[derive(Serialize)]
+struct PeelingLevelSummary<'a> {
+    level: usize,
+    max_cr: f64,
+    min_density: f64,
+    ci: f64,
+    r: f64,
+    num_pus: usize,
+    pus: Vec<PeelingSummaryEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backend: Option<&'a PeelingBackend>,
+}
+
+#[derive(Serialize)]
+struct PeelingResultsSummary<'a> {
+    backend: PeelingBackend,
+    original_resnums: &'a [i32],
+    levels: Vec<PeelingLevelSummary<'a>>,
+}
+
+fn aul_percent(z_score: f64) -> i32 {
+    if z_score.abs() >= 1.0 {
+        ((1.0 - (1.0 / (z_score * z_score))) * 100.0) as i32
+    } else {
+        0
+    }
+}
+
+fn build_summary<'a>(
+    results: &'a PeelingResults,
+    energies: Option<&std::collections::HashMap<(i32, i32), (Option<f64>, Option<f64>)>>,
+) -> PeelingResultsSummary<'a> {
+    let levels = results
+        .levels
+        .iter()
+        .enumerate()
+        .map(|(index, level)| {
+            let pus = level
+                .pus
+                .iter()
+                .map(|range| {
+                    let (_, z_score) = energies
+                        .and_then(|values| values.get(&(range.start, range.end)).copied())
+                        .unwrap_or((None, None));
+
+                    PeelingSummaryEntry {
+                        boundary: *range,
+                        aul_percent: z_score.map(aul_percent),
+                        z_score,
+                    }
+                })
+                .collect();
+
+            PeelingLevelSummary {
+                level: level.level,
+                max_cr: level.max_cr,
+                min_density: level.min_density,
+                ci: level.ci,
+                r: level.r,
+                num_pus: level.num_pus,
+                pus,
+                backend: (index == 0).then_some(&results.backend),
+            }
+        })
+        .collect();
+
+    PeelingResultsSummary {
+        backend: results.backend,
+        original_resnums: &results.original_resnums,
+        levels,
+    }
+}
+
 /// Write peeling results summary to a text file.
 pub fn write_peeling_summary(
-    levels: &[PeelingLevel],
+    results: &PeelingResults,
     output_path: &Path,
     energies: Option<&std::collections::HashMap<(i32, i32), (Option<f64>, Option<f64>)>>,
 ) -> Result<()> {
@@ -166,47 +313,63 @@ pub fn write_peeling_summary(
     let mut f = fs::File::create(output_path)
         .with_context(|| format!("Cannot create {}", output_path.display()))?;
 
-    for level in levels {
-        // Format CI to match Python's round(x, 2) which drops trailing zeros
-        let ci_rounded = (level.ci * 100.0).round() / 100.0;
-        let ci_str = format!("{:.2}", ci_rounded);
-        let ci_str = ci_str.trim_end_matches('0').trim_end_matches('.').to_string();
-        // If trimming removed everything after decimal, ensure at least one decimal digit
-        let ci_display = if ci_str.contains('.') {
-            ci_str
-        } else {
-            format!("{}.0", ci_str)
-        };
+    writeln!(f, "Peeling backend: {:?}", results.backend)?;
+
+    for level in &results.levels {
         writeln!(
             f,
-            "Peeling level {}\n    Number of Protein Units: {}\n    Compaction Index: {}",
-            level.level, level.num_pus, ci_display
+            "\nPeeling level {}\n  Protein Units : {}\n  Max CR        : {}\n  Min Density   : {}\n  CI            : {}\n  R             : {}\n  Boundaries",
+            level.level,
+            level.num_pus,
+            format_metric(level.max_cr),
+            format_metric(level.min_density),
+            format_metric(level.ci),
+            format_metric(level.r),
         )?;
 
-        for &(start, end) in &level.pus {
+        for (index, range) in level.pus.iter().enumerate() {
             if let Some(energies) = energies {
-                if let Some(&(_, Some(z_score))) = energies.get(&(start, end)) {
-                    let aul = if z_score.abs() >= 1.0 {
-                        ((1.0 - (1.0 / (z_score * z_score))) * 100.0) as i32
-                    } else {
-                        0
-                    };
+                if let Some(&(_, Some(z_score))) = energies.get(&(range.start, range.end)) {
                     writeln!(
                         f,
-                        "    {:>7}: AUL={:3}% Z-score={:.1}",
-                        format!("{}-{}", start, end),
-                        aul,
+                        "    {:>2}. {:>7}  AUL={:3}%  Z-score={:.1}",
+                        index + 1,
+                        format!("{}-{}", range.start, range.end),
+                        aul_percent(z_score),
                         z_score
                     )?;
                 } else {
-                    writeln!(f, "    {:>7}", format!("{}-{}", start, end))?;
+                    writeln!(
+                        f,
+                        "    {:>2}. {:>7}",
+                        index + 1,
+                        format!("{}-{}", range.start, range.end)
+                    )?;
                 }
             } else {
-                writeln!(f, "    {:>7}", format!("{}-{}", start, end))?;
+                writeln!(
+                    f,
+                    "    {:>2}. {:>7}",
+                    index + 1,
+                    format!("{}-{}", range.start, range.end)
+                )?;
             }
         }
     }
 
+    Ok(())
+}
+
+/// Write peeling results summary to JSON.
+pub fn write_peeling_summary_json(
+    results: &PeelingResults,
+    output_path: &Path,
+    energies: Option<&std::collections::HashMap<(i32, i32), (Option<f64>, Option<f64>)>>,
+) -> Result<()> {
+    let summary = build_summary(results, energies);
+    let json = serde_json::to_string_pretty(&summary)?;
+    fs::write(output_path, json)
+        .with_context(|| format!("Cannot create {}", output_path.display()))?;
     Ok(())
 }
 
@@ -230,9 +393,31 @@ mod tests {
 
         assert_eq!(levels.len(), 2);
         assert_eq!(levels[0].level, 1);
+        assert_eq!(levels[0].max_cr, 0.5);
+        assert_eq!(levels[0].min_density, 0.3);
+        assert_eq!(levels[0].ci, 0.95);
+        assert_eq!(levels[0].r, 1.2);
         assert_eq!(levels[0].num_pus, 2);
-        assert_eq!(levels[0].pus, vec![(10, 59), (60, 109)]);
+        assert_eq!(
+            levels[0].pus,
+            vec![ResidueRange::new(10, 59), ResidueRange::new(60, 109)]
+        );
         assert_eq!(levels[1].level, 2);
         assert_eq!(levels[1].num_pus, 3);
+    }
+
+    #[test]
+    fn test_load_legacy_results() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("Peeling.log");
+        let num_path = dir.path().join("test.num");
+
+        fs::write(&log_path, "Max_CR Min_Density CI R Num_PUs PU_Delineations\n0.5 0.3 0.95 1.2 2 1 2 3 4\n").unwrap();
+        fs::write(&num_path, "10 11 12 13").unwrap();
+
+        let results = load_legacy_results(&log_path, &num_path).unwrap();
+        assert_eq!(results.backend, PeelingBackend::LegacyBinary);
+        assert_eq!(results.original_resnums, vec![10, 11, 12, 13]);
+        assert_eq!(results.levels[0].pus, vec![ResidueRange::new(10, 11), ResidueRange::new(12, 13)]);
     }
 }

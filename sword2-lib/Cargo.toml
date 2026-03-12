@@ -19,8 +19,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 pdbtbx = "0.12"
 ndarray = "0.16"
-plotters = { version = "0.3", default-features = false, features = ["svg_backend", "line_series"] }
+plotters = { version = "0.3", default-features = false, features = ["svg_backend", "bitmap_backend", "bitmap_encoder", "ttf", "line_series"] }
 plotters-svg = "0.3"
+plotters-bitmap = "0.3"
 rand = "0.8"
 
 [dev-dependencies]

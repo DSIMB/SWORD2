@@ -117,7 +117,8 @@ fn parse_measure_with_diff(
                 if fields.len() > 5 {
                     let cr: f64 = fields[3].parse().unwrap_or(0.0);
                     let cpd: f64 = fields[5].parse().unwrap_or(0.0);
-                    if distance_model::distance_model(cr, cpd, 1).abs() < max_dist {
+                    // EXPERIMENT: signed like Perl
+                    if distance_model::distance_model(cr, cpd, 1) < max_dist {
                         temp_measure.push(line.clone());
                     }
                 }
@@ -129,6 +130,18 @@ fn parse_measure_with_diff(
         if nd < max_dom {
             max_dom = nd;
             temp_measure.reverse();
+
+            // DEBUG: log temp_measure size at this transition
+            let prev_nd = if !temp_measure.is_empty() { get_num_domains(&temp_measure[0]) } else { 0 };
+            tracing::info!("TRANSITION from nd={} to nd={}: temp_measure has {} entries", prev_nd, nd, temp_measure.len());
+            for (ti, tm) in temp_measure.iter().enumerate() {
+                let tf = get_fields(tm);
+                let del = if tf.len() > 2 { &tf[2] } else { "?" };
+                let cr: f64 = if tf.len() > 3 { tf[3].parse().unwrap_or(0.0) } else { 0.0 };
+                let cpd: f64 = if tf.len() > 5 { tf[5].parse().unwrap_or(0.0) } else { 0.0 };
+                let d = distance_model::distance_model(cr, cpd, 1);
+                tracing::info!("  temp[{}] dist={:.4} abs={:.4} del={}", ti, d, d.abs(), del.trim());
+            }
 
             if temp_measure.len() > 1 && alt_b > 1 {
                 let mut temp_measure2: Vec<String> = Vec::new();
@@ -158,15 +171,19 @@ fn parse_measure_with_diff(
                             let del_str1 = format!("{}{}", pdb_id, del1);
                             let del_str2 = format!("{}{}", pdb_id, del2);
 
-                            let (criterion, _) = compute_jones::compute_jones_with_cache(
+                            let (criterion, pct) = compute_jones::compute_jones_with_cache(
                                 pdb_id,
                                 &del_str1,
                                 &del_str2,
                                 dir_data,
                                 Some(&cached_residue_nums),
                             );
+                            tracing::info!("  Jones[i={},j={}] criterion={} pct={:.1}% del_i={} del_j={}",
+                                i, j, criterion, pct,
+                                fields_i[2].trim(), fields_j[2].trim());
                             if criterion == 1 {
                                 // Too similar — remove
+                                tracing::info!("    REMOVED j={}", j);
                                 temp_measure.remove(j);
                                 continue; // don't increment j
                             }
@@ -179,7 +196,15 @@ fn parse_measure_with_diff(
                     }
                     i += 1;
                 }
-                clean_measure.extend(temp_measure2);
+                clean_measure.extend(temp_measure2.clone());
+
+                // DEBUG: log what survived Jones filtering
+                tracing::info!("  After Jones: temp_measure2 has {} entries", temp_measure2.len());
+                for (ti, tm) in temp_measure2.iter().enumerate() {
+                    let tf = get_fields(tm);
+                    let del = if tf.len() > 2 { &tf[2] } else { "?" };
+                    tracing::info!("    kept[{}] del={}", ti, del.trim());
+                }
             } else if !temp_measure.is_empty() {
                 clean_measure.push(temp_measure[0].clone());
             }
@@ -191,7 +216,8 @@ fn parse_measure_with_diff(
             if fields.len() > 5 {
                 let cr: f64 = fields[3].parse().unwrap_or(0.0);
                 let cpd: f64 = fields[5].parse().unwrap_or(0.0);
-                if distance_model::distance_model(cr, cpd, 1).abs() < max_dist {
+                // EXPERIMENT: signed like Perl
+                if distance_model::distance_model(cr, cpd, 1) < max_dist {
                     temp_measure.push(line.clone());
                 }
             }

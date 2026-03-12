@@ -13,7 +13,7 @@ use clap::{ArgAction, Parser};
 use console::Style;
 use indicatif::{ProgressBar, ProgressStyle};
 
-use sword2_lib::{energy, fetch, output, pdb, peeling, sword};
+use sword2_lib::{energy, fetch, output, pdb, peeling, plot, sword};
 
 /// SWORD2: SWift and Optimized Recognition of protein Domains
 #[derive(Parser, Debug)]
@@ -430,6 +430,18 @@ fn main() -> Result<()> {
     let pdb_no_ext = results_dir.join(&pdb_id_chain);
     std::fs::rename(&pdb_chain_file, &pdb_no_ext)?;
 
+    // Write .num file with sequential 1-based numbering matching the clean PDB.
+    // The Peeling binary uses this to map internal indices to residue numbers.
+    // Must exist before run_pipeline.
+    {
+        let clean_dir = results_dir.join("PDBs_Clean").join(&pdb_id_chain);
+        std::fs::create_dir_all(&clean_dir)?;
+        let num_file = clean_dir.join(format!("{}.num", pdb_id_chain));
+        let n = original_resnums.len();
+        let num_content: Vec<String> = (1..=n).map(|i| i.to_string()).collect();
+        std::fs::write(&num_file, num_content.join(" "))?;
+    }
+
     // Step 4: Run the SWORD pipeline (DSSP is pure Rust, no compilation needed)
     reporter.step("SWORD pipeline");
     tracing::debug!("Launch SWORD pipeline");
@@ -549,24 +561,20 @@ fn main() -> Result<()> {
         .join("Peeling.log");
 
     if peeling_log.exists() {
-        let ori_resnums = if peeling_num.exists() {
-            peeling::parse_num_file(&peeling_num)?
-        } else {
-            Vec::new()
-        };
-
-        if !ori_resnums.is_empty() {
-            let peeling_levels = peeling::parse_peeling_log(&peeling_log, &ori_resnums)?;
+        if peeling_num.exists() {
+            let peeling_results = peeling::load_legacy_results(&peeling_log, &peeling_num)?;
 
             // Calculate peeling energies if enabled — reuse global PU cache + compute missing
             let peeling_energies = if let Some(ref ec) = energy_config {
                 // Collect unique PU ranges not already in the cache
                 let mut missing_ranges: Vec<(i32, i32)> = Vec::new();
                 let mut seen_pus: std::collections::HashSet<(i32, i32)> = std::collections::HashSet::new();
-                for level in &peeling_levels {
-                    for &(start, end) in &level.pus {
-                        if seen_pus.insert((start, end)) && !pu_energy_cache.contains_key(&(start, end)) {
-                            missing_ranges.push((start, end));
+                for level in &peeling_results.levels {
+                    for range in &level.pus {
+                        if seen_pus.insert((range.start, range.end))
+                            && !pu_energy_cache.contains_key(&(range.start, range.end))
+                        {
+                            missing_ranges.push((range.start, range.end));
                         }
                     }
                 }
@@ -578,13 +586,16 @@ fn main() -> Result<()> {
                 };
                 // Build peeling energy map from both caches
                 let mut pe: HashMap<(i32, i32), (Option<f64>, Option<f64>)> = HashMap::new();
-                for level in &peeling_levels {
-                    for &(start, end) in &level.pus {
-                        if pe.contains_key(&(start, end)) {
+                for level in &peeling_results.levels {
+                    for range in &level.pus {
+                        if pe.contains_key(&(range.start, range.end)) {
                             continue;
                         }
-                        if let Some(r) = pu_energy_cache.get(&(start, end)).or_else(|| extra.get(&(start, end))) {
-                            pe.insert((start, end), (r.energy, r.z_score));
+                        if let Some(r) = pu_energy_cache
+                            .get(&(range.start, range.end))
+                            .or_else(|| extra.get(&(range.start, range.end)))
+                        {
+                            pe.insert((range.start, range.end), (r.energy, r.z_score));
                         }
                     }
                 }
@@ -594,8 +605,13 @@ fn main() -> Result<()> {
             };
 
             peeling::write_peeling_summary(
-                &peeling_levels,
+                &peeling_results,
                 &results_dir.join("PEELING_summary.txt"),
+                peeling_energies.as_ref(),
+            )?;
+            peeling::write_peeling_summary_json(
+                &peeling_results,
+                &results_dir.join("PEELING_summary.json"),
                 peeling_energies.as_ref(),
             )?;
             tracing::debug!("Wrote peeling summary");
@@ -604,7 +620,8 @@ fn main() -> Result<()> {
     reporter.step_done("Write results", None);
 
     // Step 10: Generate plots
-    if !cli.disable_plots {
+    if config.generate_plots {
+        reporter.step("Generate plots");
         let contact_matrix_dir = results_dir.join("Contact_Probability_Matrix");
         std::fs::create_dir_all(&contact_matrix_dir)?;
 
@@ -613,9 +630,54 @@ fn main() -> Result<()> {
             .join(&pdb_id_chain)
             .join("file_proba_contact.mat");
 
-        if proba_mat_file.exists() {
-            tracing::debug!("Skipping contact probability matrix plots (use Python version for plots)");
+        // Domain consistency histogram (SVG)
+        let histogram_output = contact_matrix_dir.join("domain_consistency_histogram.svg");
+        let domain_counts = plot::count_domains(&sword_results.domains);
+        if let Err(err) = plot::write_domain_histogram(
+            &domain_counts,
+            &histogram_output.to_string_lossy(),
+        ) {
+            tracing::warn!(error = %err, "Failed to write domain consistency histogram");
+            reporter.warn("Could not generate the domain consistency histogram");
         }
+
+        // 3-level contact probability matrix plots (PNG)
+        if !proba_mat_file.exists() {
+            tracing::warn!(
+                matrix = %proba_mat_file.display(),
+                "Skipping contact probability matrix plots because the matrix file is missing"
+            );
+            reporter.warn("Skipping contact matrix plots because the matrix file is missing");
+        } else {
+            match plot::load_contact_matrix(&proba_mat_file) {
+                Ok(matrix) => {
+                    let pu_colors = plot::assign_pu_colors(&sword_results.domains);
+
+                    for (i, partition) in sword_results.domains.iter().enumerate() {
+                        if let Err(err) = plot::generate_alternative_plots(
+                            &matrix,
+                            i,
+                            partition,
+                            &pu_colors,
+                            &contact_matrix_dir,
+                        ) {
+                            tracing::warn!(
+                                error = %err,
+                                alt = i,
+                                "Failed to write contact probability matrix plots for alternative {}",
+                                i
+                            );
+                        }
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "Failed to load contact probability matrix input");
+                    reporter.warn("Skipping contact matrix plots because the matrix input could not be loaded");
+                }
+            }
+        }
+
+        reporter.step_done("Generate plots", Some("PNG outputs"));
     }
 
     // Step 11: Calculate junction consistencies (pure Rust — no Perl!)
