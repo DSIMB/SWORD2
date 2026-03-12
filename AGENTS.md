@@ -11,7 +11,7 @@ SWORD2 (SWift and Optimized Recognition of protein Domains) is a protein domain 
 cargo build --release
 # Binary output: target/release/sword2
 
-# Build C/C++ dependencies (MyPMFs scoring, Peeling)
+# Build C/C++ dependencies (MyPMFs scoring only — Peeling is now pure Rust)
 bash install.sh
 
 # Run on a PDB id (from repo root)
@@ -38,7 +38,7 @@ There are no unit tests currently (`cargo test` will compile but there are no te
   - `sword/` — Pipeline orchestration (`mod.rs`), PU merging (`compute_measure.rs`), domain selection (`parse_measure.rs`), distance model (`distance_model.rs`), Jones metrics (`compute_jones.rs`), junction analysis (`junctions.rs`)
   - `pdb/` — PDB/mmCIF parsing (`parser.rs`) via `pdbtbx`, type definitions (`types.rs`), PDB writing (`writer.rs`), amino acid definitions (`amino_acids.rs`)
   - `energy/` — Pseudo-energy and Z-score calculation via external `scoring_omp` binary
-  - `peeling/` — Parses output from external `Peeling_omp` binary
+  - `peeling/` — **Pure Rust Peeling implementation** (Gelly et al. 2006). Modules: `algorithm.rs` (iterative hierarchical cutting, rayon-parallelized double cuts), `contact_matrix.rs` (contact probability matrix with 2D prefix sums), `mod.rs` (types, result conversion, legacy file parsing)
   - `dssp/` — **Pure Rust DSSP implementation** (Kabsch & Sander 1983 algorithm). Modules: `backbone.rs` (atom extraction, H synthesis), `hbond.rs` (spatial grid H-bond detection), `bridge.rs` (β-sheet assembly), `helix.rs` (helix/turn assignment), `angles.rs` (backbone geometry), `format.rs` (DSSP output format), `types.rs` (data structures)
   - `fetch.rs` — Downloads structures from PDB, AlphaFold, ESM Atlas
   - `output/` — Writes SWORD2_summary.txt/json results
@@ -46,18 +46,21 @@ There are no unit tests currently (`cargo test` will compile but there are no te
 
 ### External C/C++ Dependencies (in `bin/`)
 
-The Rust code shells out to two compiled C binaries:
-- **`bin/Peeling/Peeling_omp`** — Protein peeling algorithm (OpenMP parallelized)
+The Rust code shells out to one compiled C binary:
 - **`bin/mypmfs-master/scoring_omp`** — Pseudo-energy scoring (OpenMP parallelized)
 
-These are compiled by `install.sh` and invoked via `std::process::Command`.
+This is compiled by `install.sh` and invoked via `std::process::Command`.
 
-DSSP secondary structure assignment is now **pure Rust** with a spatial grid optimization for H-bond detection (O(N·k) vs the original O(N²)).
+Both DSSP and Peeling are now **pure Rust**:
+- DSSP: spatial grid optimization for H-bond detection (O(N·k) vs original O(N²))
+- Peeling: rayon-parallelized double cutting with 2D prefix-sum contact matrix (O(1) rectangle queries)
 
 ### Key Types
 
 - `SwordConfig` / `SwordResults` — Pipeline configuration and results (`sword2-lib/src/sword/mod.rs`)
 - `EnergyConfig` / `EnergyResult` — Energy calculation config and results (`sword2-lib/src/energy/mod.rs`)
+- `PeelingConfig` / `PeelingOutput` — Peeling algorithm config and raw output (`sword2-lib/src/peeling/algorithm.rs`)
+- `ContactMatrix` — Contact probability matrix with prefix sums (`sword2-lib/src/peeling/contact_matrix.rs`)
 - `PeelingLevel` / `ProteinUnit` — Peeling decomposition results (`sword2-lib/src/peeling/mod.rs`)
 - `Partitioning` — Domain assignment output (`sword2-lib/src/output/mod.rs`)
 - PDB types: `Structure`, `Model`, `Chain`, `Residue`, `Atom` (`sword2-lib/src/pdb/types.rs`)
@@ -65,7 +68,7 @@ DSSP secondary structure assignment is now **pure Rust** with a spatial grid opt
 
 ### Pipeline Flow
 
-1. Fetch/load structure → 2. Parse PDB/mmCIF → 3. Clean chain (remove non-standard residues, renumber from 1) → 4. Run DSSP (pure Rust) → 5. Run Peeling (external) → 6. ComputeMeasure (merge PUs, pure Rust) → 7. ParseMeasure + distance model (select domains, pure Rust) → 8. Calculate pseudo-energies (external scoring_omp) → 9. Write results (JSON + text) → 10. Junction consistency analysis → 11. Cleanup
+1. Fetch/load structure → 2. Parse PDB/mmCIF → 3. Clean chain (remove non-standard residues, renumber from 1) → 4. Run DSSP (pure Rust) → 5. Run Peeling (pure Rust, in-memory) → 6. ComputeMeasure (merge PUs, in-memory from peeling) → 7. ParseMeasure + distance model (select domains, pure Rust) → 8. Calculate pseudo-energies (external scoring_omp) → 9. Write results (JSON + text) → 10. Junction consistency analysis → 11. Cleanup
 
 ### Important Notes
 

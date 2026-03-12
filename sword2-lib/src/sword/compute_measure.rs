@@ -63,9 +63,6 @@ pub fn compute_measure(
     file_pu: &Path,
     _cutoff_pdp: f64,
 ) -> Vec<MeasureLine> {
-    let max_number_results: usize = 500;
-    let cutoff_size_domain: usize = 30;
-
     // 1) Read PU delineation
     let pu_content = fs::read_to_string(file_pu).unwrap_or_default();
     let mut hash_pu: BTreeMap<i32, (i32, i32, i32)> = BTreeMap::new(); // start -> (id, start, end)
@@ -121,8 +118,68 @@ pub fn compute_measure(
 
     let pu_sizes: Vec<f64> = pu_list.iter().map(|p| p.size as f64).collect();
 
+    compute_measure_core(tab_matrix, pu_sizes, pu_start_end, total_size)
+}
+
+/// Run ComputeMeasure from in-memory peeling data (no file I/O).
+///
+/// Takes PU contact entries (x, y, value) and PU delineation entries (id, start, end)
+/// directly from the native peeling algorithm output.
+pub fn compute_measure_from_data(
+    pu_contacts: &[(usize, usize, f64)],
+    pu_delineation: &[(usize, usize, usize)],
+) -> Vec<MeasureLine> {
+    if pu_delineation.is_empty() {
+        return Vec::new();
+    }
+
+    // Build the same internal structures as the file-based function
+    let mut hash_pu: BTreeMap<i32, (i32, i32, i32)> = BTreeMap::new();
+    for &(id, start, end) in pu_delineation {
+        hash_pu.insert(start as i32, (id as i32, start as i32, end as i32));
+    }
+
+    let mut pu_list: Vec<PuInfo> = Vec::new();
+    let mut id_to_idx: BTreeMap<i32, usize> = BTreeMap::new();
+    let mut pu_start_end: BTreeMap<usize, (i32, i32)> = BTreeMap::new();
+    let mut total_size: usize = 0;
+
+    for (pu_idx, (_start, (id_pu, s, e))) in hash_pu.iter().enumerate() {
+        let size = (e - s + 1) as usize;
+        total_size += size;
+        id_to_idx.insert(*id_pu, pu_idx);
+        pu_start_end.insert(pu_idx + 1, (*s, *e));
+        pu_list.push(PuInfo { size: size as i32 });
+    }
+
+    let n_pus = pu_list.len();
+    let mut tab_matrix: Vec<Vec<f64>> = vec![vec![0.0; n_pus]; n_pus];
+
+    for &(x, y, value) in pu_contacts {
+        let x_i32 = x as i32;
+        let y_i32 = y as i32;
+        if let (Some(&a), Some(&b)) = (id_to_idx.get(&x_i32), id_to_idx.get(&y_i32)) {
+            tab_matrix[a][b] = value;
+        }
+    }
+
+    let pu_sizes: Vec<f64> = pu_list.iter().map(|p| p.size as f64).collect();
+    compute_measure_core(tab_matrix, pu_sizes, pu_start_end, total_size)
+}
+
+/// Core merging algorithm shared by file-based and in-memory entry points.
+fn compute_measure_core(
+    tab_matrix: Vec<Vec<f64>>,
+    pu_sizes: Vec<f64>,
+    pu_start_end: BTreeMap<usize, (i32, i32)>,
+    total_size: usize,
+) -> Vec<MeasureLine> {
+    let max_number_results: usize = 500;
+    let cutoff_size_domain: usize = 30;
+    let n_pus = pu_sizes.len();
+
     // 3) Initial domain assignment: each PU is its own domain
-    let initial_domains: Vec<String> = (1..=pu_list.len())
+    let initial_domains: Vec<String> = (1..=n_pus)
         .map(|i| i.to_string())
         .collect();
 
@@ -144,7 +201,7 @@ pub fn compute_measure(
 
     // 4) Iterative merging
     let mut all_tab_domains: Vec<Vec<String>> = vec![initial_domains];
-    let mut number_domains = pu_list.len();
+    let mut number_domains = n_pus;
 
     while number_domains > 0 {
         // Remove duplicates

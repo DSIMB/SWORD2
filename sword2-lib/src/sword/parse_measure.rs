@@ -131,18 +131,6 @@ fn parse_measure_with_diff(
             max_dom = nd;
             temp_measure.reverse();
 
-            // DEBUG: log temp_measure size at this transition
-            let prev_nd = if !temp_measure.is_empty() { get_num_domains(&temp_measure[0]) } else { 0 };
-            tracing::info!("TRANSITION from nd={} to nd={}: temp_measure has {} entries", prev_nd, nd, temp_measure.len());
-            for (ti, tm) in temp_measure.iter().enumerate() {
-                let tf = get_fields(tm);
-                let del = if tf.len() > 2 { &tf[2] } else { "?" };
-                let cr: f64 = if tf.len() > 3 { tf[3].parse().unwrap_or(0.0) } else { 0.0 };
-                let cpd: f64 = if tf.len() > 5 { tf[5].parse().unwrap_or(0.0) } else { 0.0 };
-                let d = distance_model::distance_model(cr, cpd, 1);
-                tracing::info!("  temp[{}] dist={:.4} abs={:.4} del={}", ti, d, d.abs(), del.trim());
-            }
-
             if temp_measure.len() > 1 && alt_b > 1 {
                 let mut temp_measure2: Vec<String> = Vec::new();
                 let mut i = 0;
@@ -197,14 +185,7 @@ fn parse_measure_with_diff(
                     i += 1;
                 }
                 clean_measure.extend(temp_measure2.clone());
-
-                // DEBUG: log what survived Jones filtering
-                tracing::info!("  After Jones: temp_measure2 has {} entries", temp_measure2.len());
-                for (ti, tm) in temp_measure2.iter().enumerate() {
-                    let tf = get_fields(tm);
-                    let del = if tf.len() > 2 { &tf[2] } else { "?" };
-                    tracing::info!("    kept[{}] del={}", ti, del.trim());
-                }
+                
             } else if !temp_measure.is_empty() {
                 clean_measure.push(temp_measure[0].clone());
             }

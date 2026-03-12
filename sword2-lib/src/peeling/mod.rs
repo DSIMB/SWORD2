@@ -1,13 +1,20 @@
 //! Protein peeling algorithm for hierarchical domain decomposition.
 //!
-//! This module parses the Peeling.log output from the SWORD binary
-//! and the .num file mapping renumbered residues to original numbers.
+//! This module implements and orchestrates the Protein Peeling algorithm
+//! (Gelly et al., 2006) for iterative domain decomposition. The native
+//! Rust implementation replaces the external `Peeling_omp` C binary.
+
+pub mod algorithm;
+pub mod contact_matrix;
 
 use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+
+pub use algorithm::{PeelingConfig, PeelingOutput, run_peeling};
+pub use contact_matrix::ContactMatrix;
 
 /// The backend that produced peeling results.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -371,6 +378,47 @@ pub fn write_peeling_summary_json(
     fs::write(output_path, json)
         .with_context(|| format!("Cannot create {}", output_path.display()))?;
     Ok(())
+}
+
+/// Convert native peeling output into the structured `PeelingResults` model.
+///
+/// The `PeelingOutput` from the native algorithm uses 0-based indexing internally.
+/// The `true_nums` field maps those indices to DSSP residue numbers (which are
+/// 1-based sequential for the cleaned chain). We use those as our "original" numbers.
+pub fn native_peeling_to_results(output: &PeelingOutput) -> PeelingResults {
+    let levels = output
+        .iterations
+        .iter()
+        .enumerate()
+        .map(|(i, iter)| {
+            let mut pus: Vec<ResidueRange> = iter
+                .pu_boundaries
+                .iter()
+                .map(|pu| {
+                    let start = output.true_nums[pu[0]];
+                    let end = output.true_nums[pu[1]];
+                    ResidueRange::new(start, end)
+                })
+                .collect();
+            pus.sort_by_key(|r| r.start);
+
+            PeelingLevel {
+                level: i + 1,
+                max_cr: iter.max_cr,
+                min_density: iter.min_density,
+                ci: iter.ci,
+                r: iter.r,
+                num_pus: iter.num_pus,
+                pus,
+            }
+        })
+        .collect();
+
+    PeelingResults {
+        backend: PeelingBackend::NativeRust,
+        original_resnums: output.true_nums.clone(),
+        levels,
+    }
 }
 
 #[cfg(test)]

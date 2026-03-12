@@ -1,14 +1,13 @@
 //! SWORD algorithm orchestration.
 //!
 //! This module coordinates the full SWORD2 pipeline entirely in Rust:
-//! 1. DSSP secondary structure assignment (via dsspcmbi C binary)
-//! 2. Protein Peeling (via Peeling_omp C binary)
+//! 1. DSSP secondary structure assignment (pure Rust)
+//! 2. Protein Peeling (pure Rust)
 //! 3. ComputeMeasure (PU merging — pure Rust)
 //! 4. ParseMeasure + prediction model (domain selection — pure Rust)
 //! 5. Quality scoring and display (pure Rust)
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
@@ -29,8 +28,6 @@ pub mod parse_measure;
 /// Configuration for a SWORD2 run.
 #[derive(Debug, Clone)]
 pub struct SwordConfig {
-    /// Path to the Peeling_omp binary.
-    pub peeling_bin: String,
     /// Whether to compute energies.
     pub compute_energies: bool,
     /// Whether to generate plots.
@@ -46,7 +43,6 @@ pub struct SwordConfig {
 impl Default for SwordConfig {
     fn default() -> Self {
         Self {
-            peeling_bin: "Peeling_omp".to_string(),
             compute_energies: true,
             generate_plots: true,
             num_threads: num_cpus::get(),
@@ -115,32 +111,41 @@ pub fn run_pipeline(
         crate::dssp::run_dssp(&pdb_file_dst, &dssp_file, &s2d_file, pdb_name)?;
     }
 
-    // Step 2: Run Peeling
-    let pu_delineation = clean_dir.join("file_pu_delineation.mtx");
-    if !pu_delineation.exists() {
+    // Step 2: Run Peeling (native Rust)
+    let pu_delineation_file = clean_dir.join("file_pu_delineation.mtx");
+    let peeling_output = if !pu_delineation_file.exists() {
         tracing::debug!("Running Peeling on {}", pdb_file_dst.display());
         let peeling_dir = clean_dir.join("Peeling");
         std::fs::create_dir_all(&peeling_dir)?;
 
-        let peeling_opts = format!(
-            "-r 98 -s 8 -l 30 -m 0 -0 6.0 -t 1.5 -o 0 -g 0 -c 0 -n 30 -O {} -C {}",
-            clean_dir.display(),
-            config.num_threads,
-        );
+        // Extract CA coordinates from the clean PDB
+        let pdb_struct = crate::pdb::parse_pdb(&pdb_file_dst)
+            .with_context(|| format!("Failed to parse clean PDB: {}", pdb_file_dst.display()))?;
+        let ca_coords: Vec<[f64; 3]> = pdb_struct
+            .first_model()
+            .map(|m| {
+                m.chains
+                    .iter()
+                    .flat_map(|c| c.residues.iter())
+                    .filter_map(|r| r.get_ca())
+                    .map(|a| [a.coord.x, a.coord.y, a.coord.z])
+                    .collect()
+            })
+            .unwrap_or_default();
 
-        let peeling_output = Command::new(&config.peeling_bin)
-            .arg("-p")
-            .arg(&pdb_file_dst)
-            .arg("-d")
-            .arg(&dssp_file)
-            .args(peeling_opts.split_whitespace())
-            .output()
-            .with_context(|| format!("Failed to run Peeling: {}", config.peeling_bin))?;
+        let peeling_config = crate::peeling::PeelingConfig::default();
+        let output = crate::peeling::run_peeling(&ca_coords, &dssp_file, &peeling_config)?;
 
-        // Save peeling log
-        let peeling_log = String::from_utf8_lossy(&peeling_output.stdout);
-        std::fs::write(peeling_dir.join("Peeling.log"), peeling_log.as_ref())?;
-    }
+        // Write files for downstream compatibility (plots, debugging)
+        output.write_peeling_log(&peeling_dir.join("Peeling.log"))?;
+        output.write_pu_contact_matrix(&clean_dir.join("file_matrix_pu_contact.mtx"))?;
+        output.write_pu_delineation(&pu_delineation_file)?;
+        output.contact_matrix.write_matrix_file(&clean_dir.join("file_proba_contact.mat"))?;
+
+        Some(output)
+    } else {
+        None
+    };
 
     // Step 3: Prepare .num file (residue number mapping)
     // The .num file should already exist from main.rs clean_chain_for_sword
@@ -173,8 +178,8 @@ pub fn run_pipeline(
         .collect();
 
     // Step 4: Compute measures and reconstruct domains
-    let contact_matrix = clean_dir.join("file_matrix_pu_contact.mtx");
-    if !pu_delineation.exists() {
+    let has_peeling = peeling_output.is_some() || pu_delineation_file.exists();
+    if !has_peeling {
         // No peeling result → single domain
         tracing::debug!("No peeling for chain, treating as single domain");
         let first = tab_num.first().copied().unwrap_or(1);
@@ -205,13 +210,21 @@ pub fn run_pipeline(
         _ => (3, 1),
     };
 
-    // Run ComputeMeasure
+    // Run ComputeMeasure (in-memory if peeling output available, file-based if cached)
     tracing::debug!("Computing criteria for PUs merging");
-    let measure_lines = compute_measure::compute_measure(
-        &contact_matrix,
-        &pu_delineation,
-        0.0001,
-    );
+    let measure_lines = if let Some(ref po) = peeling_output {
+        compute_measure::compute_measure_from_data(
+            &po.final_pu_contacts,
+            &po.final_pu_delineation,
+        )
+    } else {
+        let contact_matrix_file = clean_dir.join("file_matrix_pu_contact.mtx");
+        compute_measure::compute_measure(
+            &contact_matrix_file,
+            &pu_delineation_file,
+            0.0001,
+        )
+    };
 
     let measure_strings: Vec<String> = measure_lines.iter().map(|ml| ml.to_line()).collect();
 

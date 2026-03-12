@@ -342,9 +342,6 @@ fn main() -> Result<()> {
 
     let bin_dir = base_dir.join("bin");
 
-    // Resolve path to Peeling C binary
-    let peeling_bin = bin_dir.join("Peeling/Peeling_omp");
-
     // Ensure output directory exists
     let output_dir = std::fs::canonicalize(&cli.output_dir).unwrap_or_else(|_| {
         std::fs::create_dir_all(&cli.output_dir).ok();
@@ -446,7 +443,6 @@ fn main() -> Result<()> {
     reporter.step("SWORD pipeline");
     tracing::debug!("Launch SWORD pipeline");
     let config = sword::SwordConfig {
-        peeling_bin: peeling_bin.to_string_lossy().to_string(),
         compute_energies: !cli.disable_energies,
         generate_plots: !cli.disable_plots,
         num_threads,
