@@ -342,7 +342,7 @@ fn main() -> Result<()> {
 
     let bin_dir = base_dir.join("bin");
 
-    // Resolve path to Peeling C binary (DSSP is now pure Rust)
+    // Resolve path to Peeling C binary
     let peeling_bin = bin_dir.join("Peeling/Peeling_omp");
 
     // Ensure output directory exists
