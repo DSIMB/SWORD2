@@ -1,6 +1,6 @@
 [package]
-name = "sword2"
-version = "2.0.0"
+name = "sword"
+version = "2.1.0"
 edition = "2021"
 description = "SWORD2: SWift and Optimized Recognition of protein Domains"
 
