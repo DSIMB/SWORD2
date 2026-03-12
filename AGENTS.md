@@ -33,7 +33,7 @@ There are no unit tests currently (`cargo test` will compile but there are no te
 
 ### Workspace Structure
 
-- **`sword2/`** — Binary crate. CLI entry point (`main.rs`) using clap. Orchestrates the pipeline: input resolution → PDB parsing → chain cleaning → DSSP (pure Rust) → SWORD pipeline → energy calculation → output writing → peeling → plots → junctions → cleanup.
+- **`sword2-cli/`** — Binary crate. CLI entry point (`main.rs`) using clap. Orchestrates the pipeline: input resolution → PDB parsing → chain cleaning → DSSP (pure Rust) → SWORD pipeline → energy calculation → output writing → peeling → plots → junctions → cleanup.
 - **`sword2-lib/`** — Library crate. All core logic, organized as modules:
   - `sword/` — Pipeline orchestration (`mod.rs`), PU merging (`compute_measure.rs`), domain selection (`parse_measure.rs`), distance model (`distance_model.rs`), Jones metrics (`compute_jones.rs`), junction analysis (`junctions.rs`)
   - `pdb/` — PDB/mmCIF parsing (`parser.rs`) via `pdbtbx`, type definitions (`types.rs`), PDB writing (`writer.rs`), amino acid definitions (`amino_acids.rs`)

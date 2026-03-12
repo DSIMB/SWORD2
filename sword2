@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+RELEASE_BIN="$ROOT_DIR/target/release/sword2"
+DEBUG_BIN="$ROOT_DIR/target/debug/sword2"
+
+if [[ -x "$RELEASE_BIN" ]]; then
+    exec "$RELEASE_BIN" "$@"
+fi
+
+if [[ -x "$DEBUG_BIN" ]]; then
+    exec "$DEBUG_BIN" "$@"
+fi
+
+cat <<'EOF' >&2
+SWORD2 is not built yet.
+
+Build it first with one of:
+  cargo build --release
+  cargo build
+
+Then run:
+  ./sword2 --help
+EOF
+exit 1

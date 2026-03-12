@@ -8,7 +8,7 @@ WORKDIR /app
 # Copy the rust source code
 COPY Cargo.toml Cargo.lock ./
 COPY sword2-lib/ sword2-lib/
-COPY sword2/ sword2/
+COPY sword2-cli/ sword2-cli/
 COPY src/ src/
 
 # Build the release binary
