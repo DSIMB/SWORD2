@@ -9,12 +9,16 @@ import yaml
 
 @dataclass
 class EmbeddingSource:
-    """A single PLM embedding source."""
+    """A single PLM embedding source.
+
+    Each source is a directory of safetensors files (one per protein).
+    Each safetensors file contains a single tensor keyed by the protein ID,
+    with shape (L, embed_dim).
+    """
 
     name: str = "esm2_650M"
     embed_dim: int = 1280
-    path: str = "data/embeddings/esm2_650M"  # directory of .pt files keyed by protein ID
-    file_ext: str = ".pt"  # .pt or .npy
+    path: str = "data/embeddings/esm2_650M"  # directory of .safetensors files
 
 
 @dataclass
@@ -22,7 +26,7 @@ class ModelConfig:
     # Embedding inputs (list of PLM sources to concatenate)
     embedding_sources: list[dict] = field(
         default_factory=lambda: [
-            {"name": "esm2_650M", "embed_dim": 1280, "path": "data/embeddings/esm2_650M", "file_ext": ".pt"},
+            {"name": "esm2_650M", "embed_dim": 1280, "path": "data/embeddings/esm2_650M"},
         ]
     )
 
@@ -46,6 +50,7 @@ class ModelConfig:
     # Auxiliary predictions
     predict_num_domains: bool = True
     predict_boundaries: bool = True
+    predict_contact_map: bool = True
     max_num_domains: int = 20
 
     @property
@@ -94,6 +99,7 @@ class TrainConfig:
     confidence_weight: float = 0.1
     num_domains_weight: float = 0.1
     boundary_weight: float = 0.5
+    contact_map_weight: float = 0.5
 
     # Training
     fp16: bool = True

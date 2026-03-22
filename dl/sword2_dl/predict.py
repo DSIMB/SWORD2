@@ -1,8 +1,8 @@
 """
 Inference script for DomainPartitionNet.
 
-Takes pre-computed embeddings (or a protein sequence with on-the-fly encoding)
-and predicts alternative domain partitionings.
+Takes pre-computed embeddings from safetensors files and predicts alternative
+domain partitionings, plus a contact map for visualization.
 """
 
 import json
@@ -13,6 +13,7 @@ from typing import Optional
 
 import numpy as np
 import torch
+from safetensors.torch import load_file as load_safetensors
 
 from .config import Config, ModelConfig, EmbeddingSource
 from .model import DomainPartitionNet
@@ -47,16 +48,16 @@ def load_embeddings(
     protein_id: str,
     embedding_sources: list[EmbeddingSource],
 ) -> torch.Tensor:
-    """Load and concatenate pre-computed embeddings for a protein."""
+    """Load and concatenate pre-computed embeddings from safetensors files."""
     embeddings = []
     for source in embedding_sources:
-        path = Path(source.path) / f"{protein_id}{source.file_ext}"
-        if source.file_ext == ".pt":
-            emb = torch.load(path, map_location="cpu", weights_only=True)
-        elif source.file_ext == ".npy":
-            emb = torch.from_numpy(np.load(path))
+        path = Path(source.path) / f"{protein_id}.safetensors"
+        tensors = load_safetensors(str(path))
+
+        if protein_id in tensors:
+            emb = tensors[protein_id]
         else:
-            raise ValueError(f"Unsupported format: {source.file_ext}")
+            emb = next(iter(tensors.values()))
 
         emb = emb.float()
         if emb.dim() == 3:
@@ -72,8 +73,8 @@ def predict_from_embeddings(
     device: torch.device | None = None,
     min_confidence: float = 0.1,
     min_domain_size: int = 20,
-) -> list[dict]:
-    """Predict domain partitionings from pre-computed embeddings.
+) -> tuple[list[dict], Optional[np.ndarray]]:
+    """Predict domain partitionings and contact map from pre-computed embeddings.
 
     Args:
         model: Trained DomainPartitionNet.
@@ -83,7 +84,7 @@ def predict_from_embeddings(
         min_domain_size: Minimum domain size in residues.
 
     Returns:
-        List of partitioning dicts sorted by confidence.
+        Tuple of (partitionings list, contact_map array or None).
     """
     if device is None:
         device = next(model.parameters()).device
@@ -105,18 +106,30 @@ def predict_from_embeddings(
     if "boundary_logits" in outputs:
         single_outputs["boundary_logits"] = outputs["boundary_logits"][0]
 
-    return predict_partitionings(
+    partitionings = predict_partitionings(
         single_outputs,
         seq_len=seq_len,
         min_confidence=min_confidence,
         min_domain_size=min_domain_size,
     )
 
+    # Extract contact map
+    contact_map = None
+    if "contact_map_logits" in outputs:
+        contact_map = (
+            torch.sigmoid(outputs["contact_map_logits"][0, :seq_len, :seq_len])
+            .cpu()
+            .numpy()
+        )
+
+    return partitionings, contact_map
+
 
 def format_output(
     protein_id: str,
     seq_len: int,
     partitionings: list[dict],
+    contact_map: Optional[np.ndarray] = None,
 ) -> dict:
     """Format predictions in SWORD2-compatible JSON output."""
     output = {
@@ -144,6 +157,9 @@ def format_output(
 
         output[key] = partition_data
 
+    if contact_map is not None:
+        output["has_contact_map"] = True
+
     return output
 
 
@@ -151,6 +167,7 @@ def format_text_output(
     protein_id: str,
     seq_len: int,
     partitionings: list[dict],
+    contact_map: Optional[np.ndarray] = None,
 ) -> str:
     """Format predictions as human-readable text (SWORD2-style)."""
     lines = [
@@ -158,6 +175,7 @@ def format_text_output(
         f"Protein: {protein_id}",
         f"Sequence length: {seq_len}",
         f"Number of alternative partitionings: {len(partitionings)}",
+        f"Contact map: {'yes' if contact_map is not None else 'no'}",
         "",
     ]
 
@@ -198,11 +216,15 @@ def main():
     )
     parser.add_argument(
         "--embedding-file", type=str, default=None,
-        help="Direct path to a single embedding .pt/.npy file (overrides --protein-id lookup)",
+        help="Direct path to a single .safetensors embedding file",
     )
     parser.add_argument(
         "--output", type=str, default=None,
         help="Output file path (default: stdout)",
+    )
+    parser.add_argument(
+        "--contact-map-dir", type=str, default=None,
+        help="Directory to save predicted contact maps as .npy files",
     )
     parser.add_argument(
         "--format", choices=["json", "text"], default="text",
@@ -245,6 +267,10 @@ def main():
     logger.info(f"Loading model from {args.checkpoint}")
     model = load_model(args.checkpoint, config.model, device)
 
+    # Create contact map output dir
+    if args.contact_map_dir:
+        Path(args.contact_map_dir).mkdir(parents=True, exist_ok=True)
+
     # Collect protein IDs
     if args.embedding_file:
         protein_ids = [("direct", args.embedding_file)]
@@ -260,10 +286,8 @@ def main():
     for pid, emb_file in protein_ids:
         # Load embeddings
         if emb_file:
-            if emb_file.endswith(".npy"):
-                emb = torch.from_numpy(np.load(emb_file)).float()
-            else:
-                emb = torch.load(emb_file, map_location="cpu", weights_only=True).float()
+            tensors = load_safetensors(emb_file)
+            emb = next(iter(tensors.values())).float()
             if emb.dim() == 3:
                 emb = emb.squeeze(0)
         else:
@@ -271,16 +295,20 @@ def main():
 
         seq_len = emb.shape[0]
 
-        partitionings = predict_from_embeddings(
+        partitionings, contact_map = predict_from_embeddings(
             model, emb, device=device,
             min_confidence=args.min_confidence,
             min_domain_size=args.min_domain_size,
         )
 
+        # Save contact map
+        if contact_map is not None and args.contact_map_dir:
+            np.save(Path(args.contact_map_dir) / f"{pid}.npy", contact_map)
+
         if args.format == "json":
-            all_results.append(format_output(pid, seq_len, partitionings))
+            all_results.append(format_output(pid, seq_len, partitionings, contact_map))
         else:
-            all_results.append(format_text_output(pid, seq_len, partitionings))
+            all_results.append(format_text_output(pid, seq_len, partitionings, contact_map))
 
     # Output
     output_file = open(args.output, "w") if args.output else sys.stdout

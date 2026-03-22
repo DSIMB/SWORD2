@@ -138,7 +138,8 @@ def run_sword2_on_sequence(
             return None
 
         # Find and parse the JSON output
-        return parse_sword2_output(protein_id, sequence, result_dir)
+        result = parse_sword2_output(protein_id, sequence, result_dir)
+        return result
 
     except subprocess.TimeoutExpired:
         logger.debug(f"SWORD2 timed out for {protein_id}")
@@ -147,10 +148,36 @@ def run_sword2_on_sequence(
         logger.debug(f"Error processing {protein_id}: {e}")
         return None
     finally:
-        # Clean up intermediate files to save disk space
-        intermediate = os.path.join(result_dir, "intermediate")
-        if os.path.exists(intermediate):
-            shutil.rmtree(intermediate, ignore_errors=True)
+        # Clean up result directory after parsing to save disk space
+        if os.path.exists(result_dir):
+            shutil.rmtree(result_dir, ignore_errors=True)
+
+
+def parse_contact_matrix(result_dir: str) -> Optional[list[list[int]]]:
+    """Parse SWORD2 contact matrix into a list of contacting residue pairs.
+
+    Reads the contact_matrix.mat file produced by SWORD2's peeling step.
+    Returns a list of [i, j] pairs (0-indexed) where C-alpha distance < 8A.
+    """
+    mat_files = list(Path(result_dir).rglob("contact_matrix.mat"))
+    if not mat_files:
+        return None
+
+    contacts = []
+    try:
+        with open(mat_files[0]) as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) >= 3:
+                    i = int(parts[0]) - 1  # convert to 0-indexed
+                    j = int(parts[1]) - 1
+                    val = float(parts[2])
+                    if val > 0 and i != j:
+                        contacts.append([i, j])
+    except (ValueError, IndexError):
+        return None
+
+    return contacts if contacts else None
 
 
 def parse_sword2_output(
@@ -206,11 +233,18 @@ def parse_sword2_output(
     if not partitionings:
         return None
 
-    return {
+    result = {
         "id": protein_id,
         "sequence": sequence,
         "partitionings": partitionings,
     }
+
+    # Parse contact map from SWORD2's contact matrix output
+    contacts = parse_contact_matrix(result_dir)
+    if contacts:
+        result["contact_map"] = contacts
+
+    return result
 
 
 def process_batch(

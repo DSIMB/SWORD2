@@ -145,12 +145,14 @@ class PartitioningLoss(nn.Module):
             outputs: Model outputs dict with keys:
                 - co_membership: (B, K, L, L)
                 - confidence: (B, K)
+                - contact_map_logits: (B, L, L) optional
                 - num_domains_logits: (B, K, max_domains) optional
                 - boundary_logits: (B, K, L) optional
             targets: List of B target dicts, each with:
                 - partitionings: list of domain assignments
                   (each is list of domains, each domain is list of (start,end) segments)
                 - seq_len: int
+                - contact_map: (L, L) optional ground truth contact matrix
 
         Returns:
             Dict of loss components and total loss.
@@ -163,11 +165,22 @@ class PartitioningLoss(nn.Module):
         total_conf_loss = torch.tensor(0.0, device=device)
         total_num_dom_loss = torch.tensor(0.0, device=device)
         total_boundary_loss = torch.tensor(0.0, device=device)
+        total_contact_loss = torch.tensor(0.0, device=device)
         num_matches = 0
+        num_contact_samples = 0
 
         for b in range(B):
             seq_len = targets[b]["seq_len"]
             partitionings = targets[b]["partitionings"]
+
+            # Contact map loss (shared, independent of partitioning matching)
+            if "contact_map_logits" in outputs and "contact_map" in targets[b]:
+                gt_contact = targets[b]["contact_map"].to(device)
+                pred_contact = outputs["contact_map_logits"][b, :seq_len, :seq_len]
+                total_contact_loss = total_contact_loss + F.binary_cross_entropy_with_logits(
+                    pred_contact, gt_contact[:seq_len, :seq_len]
+                )
+                num_contact_samples += 1
 
             if not partitionings:
                 continue
@@ -243,6 +256,8 @@ class PartitioningLoss(nn.Module):
             total_conf_loss = total_conf_loss / (B * K)
             total_num_dom_loss = total_num_dom_loss / num_matches
             total_boundary_loss = total_boundary_loss / num_matches
+        if num_contact_samples > 0:
+            total_contact_loss = total_contact_loss / num_contact_samples
 
         # Weighted sum
         cfg = self.config
@@ -251,6 +266,7 @@ class PartitioningLoss(nn.Module):
             + cfg.confidence_weight * total_conf_loss
             + cfg.num_domains_weight * total_num_dom_loss
             + cfg.boundary_weight * total_boundary_loss
+            + cfg.contact_map_weight * total_contact_loss
         )
 
         return {
@@ -259,4 +275,5 @@ class PartitioningLoss(nn.Module):
             "confidence_loss": total_conf_loss,
             "num_domains_loss": total_num_dom_loss,
             "boundary_loss": total_boundary_loss,
+            "contact_map_loss": total_contact_loss,
         }

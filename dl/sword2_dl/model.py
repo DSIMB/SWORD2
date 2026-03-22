@@ -6,11 +6,13 @@ Architecture (no PLM backbone — uses pre-computed frozen embeddings):
 2. Single representation projection + transformer refinement
 3. Pair representation via outer sum + dilated residual 2D convolutions
 4. K partitioning heads predict co-membership matrices + confidence scores
-5. Auxiliary heads predict boundary probabilities and number of domains
+5. Shared contact map head predicts residue-residue contacts (for visualization)
+6. Auxiliary heads predict boundary probabilities and number of domains
 
 The model outputs K alternative domain partitionings, each represented as
 a symmetric L x L co-membership matrix where entry (i,j) indicates the
-probability that residues i and j belong to the same domain.
+probability that residues i and j belong to the same domain, plus a shared
+contact map prediction.
 
 By consuming frozen embeddings instead of running a PLM backbone:
 - All trainable parameters are in the lightweight head (~5-15M vs 650M+)
@@ -237,6 +239,41 @@ class PartitioningHead(nn.Module):
         return out
 
 
+class ContactMapHead(nn.Module):
+    """Shared contact map prediction head.
+
+    Predicts a symmetric L x L binary contact map from the pair representation.
+    This is shared across all partitioning heads (contacts are a structural
+    property independent of domain assignment).
+
+    Useful for:
+    - Visualization: users can view predicted contacts overlaid with domains
+    - Auxiliary training signal: contact prediction regularizes the pair module
+    - Structural validation: predicted contacts should be consistent with domains
+    """
+
+    def __init__(self, config: ModelConfig):
+        super().__init__()
+        self.contact_head = nn.Sequential(
+            nn.Conv2d(config.pair_dim, config.head_hidden_dim, 1),
+            nn.GELU(),
+            nn.Conv2d(config.head_hidden_dim, config.head_hidden_dim, 3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(config.head_hidden_dim, 1, 1),
+        )
+
+    def forward(self, pair: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            pair: (B, pair_dim, L, L)
+        Returns:
+            contact_logits: (B, L, L) symmetric contact map logits
+        """
+        contact = self.contact_head(pair).squeeze(1)  # (B, L, L)
+        contact = (contact + contact.transpose(-2, -1)) / 2  # symmetrize
+        return contact
+
+
 class DomainPartitionNet(nn.Module):
     """Lightweight model for protein domain partitioning from pre-computed embeddings.
 
@@ -281,6 +318,10 @@ class DomainPartitionNet(nn.Module):
             [PartitioningHead(config) for _ in range(config.num_partitioning_slots)]
         )
 
+        # Shared contact map head
+        if config.predict_contact_map:
+            self.contact_map_head = ContactMapHead(config)
+
     def forward(
         self,
         embeddings: torch.Tensor,
@@ -296,6 +337,7 @@ class DomainPartitionNet(nn.Module):
             Dictionary with:
                 - co_membership: (B, K, L, L) co-membership logits
                 - confidence: (B, K) confidence scores per slot
+                - contact_map_logits: (B, L, L) contact map logits (if enabled)
                 - num_domains_logits: (B, K, max_domains) if enabled
                 - boundary_logits: (B, K, L) if enabled
         """
@@ -337,5 +379,9 @@ class DomainPartitionNet(nn.Module):
             outputs["num_domains_logits"] = torch.stack(all_num_dom, dim=1)
         if all_bound:
             outputs["boundary_logits"] = torch.stack(all_bound, dim=1)
+
+        # 5. Shared contact map prediction
+        if hasattr(self, "contact_map_head"):
+            outputs["contact_map_logits"] = self.contact_map_head(pair)  # (B, L, L)
 
         return outputs

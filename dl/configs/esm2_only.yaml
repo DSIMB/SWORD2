@@ -4,7 +4,6 @@ model:
     - name: "esm2_650M"
       embed_dim: 1280
       path: "data/embeddings/esm2_650M"
-      file_ext: ".pt"
 
   pair_dim: 128
   pair_num_blocks: 8
@@ -17,6 +16,7 @@ model:
   single_dropout: 0.1
   num_partitioning_slots: 10
   head_hidden_dim: 64
+  predict_contact_map: true
 
 data:
   max_seq_len: 1024

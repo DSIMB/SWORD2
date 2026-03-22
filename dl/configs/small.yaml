@@ -4,7 +4,6 @@ model:
     - name: "esm2_650M"
       embed_dim: 1280
       path: "data/embeddings/esm2_650M"
-      file_ext: ".pt"
 
   pair_dim: 64
   pair_num_blocks: 4
@@ -19,6 +18,7 @@ model:
   head_hidden_dim: 32
   predict_num_domains: true
   predict_boundaries: true
+  predict_contact_map: true
   max_num_domains: 20
 
 data:

@@ -1,8 +1,8 @@
 """
 Dataset and DataLoader for SWORD2-DL training.
 
-Loads pre-computed PLM embeddings from disk and pairs them with SWORD2
-ground truth partitionings. Supports multiple embedding sources that
+Loads pre-computed PLM embeddings from safetensors files and pairs them with
+SWORD2 ground truth partitionings. Supports multiple embedding sources that
 get concatenated per residue.
 
 Expected directory layout:
@@ -12,15 +12,15 @@ Expected directory layout:
     │   ├── val.json
     │   └── test.json
     └── embeddings/
-        ├── esm2_650M/          # one directory per PLM
-        │   ├── P12345.pt       # (L, 1280) tensor per protein
-        │   ├── P67890.pt
+        ├── esm2_650M/                  # one directory per PLM
+        │   ├── P12345.safetensors      # key="P12345", value=(L, 1280)
+        │   ├── P67890.safetensors
         │   └── ...
         ├── ankh2_large/
-        │   ├── P12345.pt       # (L, 1536) tensor
+        │   ├── P12345.safetensors      # key="P12345", value=(L, 1536)
         │   └── ...
         └── esmc_600M/
-            ├── P12345.pt       # (L, D) tensor
+            ├── P12345.safetensors      # key="P12345", value=(L, D)
             └── ...
 """
 
@@ -28,8 +28,8 @@ import json
 import logging
 from pathlib import Path
 
-import numpy as np
 import torch
+from safetensors.torch import load_file as load_safetensors
 from torch.utils.data import Dataset, DataLoader
 
 from .config import EmbeddingSource
@@ -54,7 +54,8 @@ class Sword2Dataset(Dataset):
                 ]
             },
             ...
-        ]
+        ],
+        "contact_map": [[0,5], [0,6], ...]  // optional: list of contacting residue pairs
     }
     """
 
@@ -85,7 +86,6 @@ class Sword2Dataset(Dataset):
             seq_len = len(s["sequence"])
             if not (self.min_seq_len <= seq_len <= self.max_seq_len):
                 continue
-            # Check that embeddings exist for at least the first source
             if not self._embeddings_exist(s["id"]):
                 continue
             self.samples.append(s)
@@ -113,24 +113,27 @@ class Sword2Dataset(Dataset):
         return samples
 
     def _embeddings_exist(self, protein_id: str) -> bool:
-        """Check if embeddings exist for all sources."""
+        """Check if safetensors embedding files exist for all sources."""
         for source in self.embedding_sources:
-            path = Path(source.path) / f"{protein_id}{source.file_ext}"
+            path = Path(source.path) / f"{protein_id}.safetensors"
             if not path.exists():
                 return False
         return True
 
     def _load_embedding(self, protein_id: str, source: EmbeddingSource) -> torch.Tensor:
-        """Load a single PLM embedding for a protein."""
-        path = Path(source.path) / f"{protein_id}{source.file_ext}"
-        if source.file_ext == ".pt":
-            emb = torch.load(path, map_location="cpu", weights_only=True)
-        elif source.file_ext == ".npy":
-            emb = torch.from_numpy(np.load(path))
-        else:
-            raise ValueError(f"Unsupported embedding format: {source.file_ext}")
+        """Load a single PLM embedding from a safetensors file.
 
-        # Ensure float32 and 2D (L, D)
+        Each safetensors file contains one tensor keyed by the protein ID.
+        """
+        path = Path(source.path) / f"{protein_id}.safetensors"
+        tensors = load_safetensors(path)
+
+        if protein_id in tensors:
+            emb = tensors[protein_id]
+        else:
+            # Fallback: use the first (and presumably only) key
+            emb = next(iter(tensors.values()))
+
         emb = emb.float()
         if emb.dim() == 3:
             emb = emb.squeeze(0)  # remove batch dim if present
@@ -148,11 +151,10 @@ class Sword2Dataset(Dataset):
         embeddings = []
         for source in self.embedding_sources:
             emb = self._load_embedding(protein_id, source)
-            # Truncate to sequence length if needed (some PLMs add special tokens)
+            # Truncate to sequence length if needed
             if emb.shape[0] > seq_len:
                 emb = emb[:seq_len]
             elif emb.shape[0] < seq_len:
-                # Pad if embedding is shorter (shouldn't happen normally)
                 pad = torch.zeros(seq_len - emb.shape[0], emb.shape[1])
                 emb = torch.cat([emb, pad], dim=0)
             embeddings.append(emb)
@@ -169,12 +171,20 @@ class Sword2Dataset(Dataset):
                 domains.append(segments)
             partitionings.append(domains)
 
-        return {
+        # Parse contact map (list of [i, j] pairs → sparse representation)
+        contact_pairs = sample.get("contact_map", None)
+
+        result = {
             "id": protein_id,
             "embeddings": embeddings,  # (L, D_total)
             "seq_len": seq_len,
             "partitionings": partitionings,
         }
+
+        if contact_pairs is not None:
+            result["contact_pairs"] = contact_pairs
+
+        return result
 
 
 def collate_fn(batch: list[dict]) -> dict:
@@ -200,13 +210,22 @@ def collate_fn(batch: list[dict]) -> dict:
         embeddings[i, :L] = item["embeddings"]
         mask[i, :L] = True
 
-        targets.append(
-            {
-                "id": item["id"],
-                "seq_len": L,
-                "partitionings": item["partitionings"],
-            }
-        )
+        target = {
+            "id": item["id"],
+            "seq_len": L,
+            "partitionings": item["partitionings"],
+        }
+
+        # Build contact map matrix if contact pairs are available
+        if "contact_pairs" in item:
+            contact_map = torch.zeros(max_len, max_len)
+            for ci, cj in item["contact_pairs"]:
+                if ci < L and cj < L:
+                    contact_map[ci, cj] = 1.0
+                    contact_map[cj, ci] = 1.0
+            target["contact_map"] = contact_map
+
+        targets.append(target)
 
     return {
         "embeddings": embeddings,
