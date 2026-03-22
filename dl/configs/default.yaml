@@ -1,0 +1,51 @@
+model:
+  esm_model: "esm2_t33_650M_UR50D"
+  esm_embed_dim: 1280
+  freeze_esm_layers: 30
+  pair_dim: 128
+  pair_num_blocks: 8
+  pair_kernel_size: 3
+  pair_dilation_cycle: [1, 2, 4, 8]
+  pair_dropout: 0.1
+  single_dim: 256
+  single_num_layers: 4
+  single_num_heads: 8
+  single_dropout: 0.1
+  num_partitioning_slots: 10
+  head_hidden_dim: 64
+  predict_num_domains: true
+  predict_boundaries: true
+  max_num_domains: 20
+
+data:
+  sword2_binary: "./target/release/sword2"
+  swissprot_fasta: "data/swissprot.fasta"
+  sword2_output_dir: "data/sword2_results"
+  processed_data_dir: "data/processed"
+  max_seq_len: 1024
+  min_seq_len: 30
+  min_num_partitionings: 1
+  train_split: 0.9
+  val_split: 0.05
+  batch_size: 4
+  num_workers: 4
+  pin_memory: true
+
+train:
+  learning_rate: 1.0e-4
+  esm_learning_rate: 1.0e-5
+  weight_decay: 0.01
+  warmup_steps: 1000
+  max_steps: 200000
+  gradient_clip: 1.0
+  co_membership_weight: 1.0
+  confidence_weight: 0.1
+  num_domains_weight: 0.1
+  boundary_weight: 0.5
+  fp16: true
+  gradient_accumulation: 4
+  eval_every: 1000
+  save_every: 5000
+  log_every: 50
+  output_dir: "checkpoints"
+  wandb_project: "sword2-dl"

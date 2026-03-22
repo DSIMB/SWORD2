@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sword2-dl"
+version = "0.1.0"
+description = "Deep learning model for protein domain partitioning from sequence"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+
+dependencies = [
+    "torch>=2.0",
+    "fair-esm>=2.0",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "scikit-learn>=1.2",
+    "pyyaml>=6.0",
+    "tqdm>=4.65",
+    "wandb>=0.15",
+    "biopython>=1.81",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "black>=23.0",
+    "ruff>=0.1",
+]
+
+[project.scripts]
+sword2-dl-train = "sword2_dl.train:main"
+sword2-dl-predict = "sword2_dl.predict:main"
+sword2-dl-generate = "sword2_dl.generate_data:main"
+
+[tool.setuptools.packages.find]
+include = ["sword2_dl*"]
