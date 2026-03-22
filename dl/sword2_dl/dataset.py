@@ -1,10 +1,27 @@
 """
 Dataset and DataLoader for SWORD2-DL training.
 
-Reads pre-processed SWORD2 results and converts them to training tensors.
-Each sample contains:
-- Protein sequence (tokenized by ESM-2)
-- Multiple ground truth partitionings (as domain segment lists)
+Loads pre-computed PLM embeddings from disk and pairs them with SWORD2
+ground truth partitionings. Supports multiple embedding sources that
+get concatenated per residue.
+
+Expected directory layout:
+    data/
+    ├── processed/
+    │   ├── train.json          # manifest with sequences + partitionings
+    │   ├── val.json
+    │   └── test.json
+    └── embeddings/
+        ├── esm2_650M/          # one directory per PLM
+        │   ├── P12345.pt       # (L, 1280) tensor per protein
+        │   ├── P67890.pt
+        │   └── ...
+        ├── ankh2_large/
+        │   ├── P12345.pt       # (L, 1536) tensor
+        │   └── ...
+        └── esmc_600M/
+            ├── P12345.pt       # (L, D) tensor
+            └── ...
 """
 
 import json
@@ -15,13 +32,15 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 
+from .config import EmbeddingSource
+
 logger = logging.getLogger(__name__)
 
 
 class Sword2Dataset(Dataset):
-    """Dataset of protein sequences with SWORD2 domain partitionings.
+    """Dataset of pre-computed PLM embeddings with SWORD2 domain partitionings.
 
-    Each sample is stored as a JSON file with structure:
+    Each sample in the manifest JSON has structure:
     {
         "id": "P12345",
         "sequence": "MVLSPADKTN...",
@@ -30,11 +49,11 @@ class Sword2Dataset(Dataset):
                 "num_domains": 2,
                 "quality": 5,
                 "domains": [
-                    {"segments": [[0, 99], [200, 250]]},  // discontinuous domain
-                    {"segments": [[100, 199]]}             // continuous domain
+                    {"segments": [[0, 99], [200, 250]]},
+                    {"segments": [[100, 199]]}
                 ]
             },
-            ...  // alternative partitionings
+            ...
         ]
     }
     """
@@ -42,26 +61,39 @@ class Sword2Dataset(Dataset):
     def __init__(
         self,
         data_dir: str | Path,
-        esm_alphabet=None,
+        embedding_sources: list[EmbeddingSource],
         max_seq_len: int = 1024,
         min_seq_len: int = 30,
         split: str = "train",
     ):
         self.data_dir = Path(data_dir)
+        self.embedding_sources = embedding_sources
         self.max_seq_len = max_seq_len
         self.min_seq_len = min_seq_len
-        self.esm_alphabet = esm_alphabet
 
         # Load manifest
         manifest_file = self.data_dir / f"{split}.json"
         if manifest_file.exists():
             with open(manifest_file) as f:
-                self.samples = json.load(f)
+                all_samples = json.load(f)
         else:
-            # Scan directory for individual files
-            self.samples = self._scan_directory(split)
+            all_samples = self._scan_directory(split)
 
-        logger.info(f"Loaded {len(self.samples)} samples for {split} split")
+        # Filter by sequence length and embedding availability
+        self.samples = []
+        for s in all_samples:
+            seq_len = len(s["sequence"])
+            if not (self.min_seq_len <= seq_len <= self.max_seq_len):
+                continue
+            # Check that embeddings exist for at least the first source
+            if not self._embeddings_exist(s["id"]):
+                continue
+            self.samples.append(s)
+
+        logger.info(
+            f"Loaded {len(self.samples)}/{len(all_samples)} samples for {split} "
+            f"(filtered by length [{min_seq_len}, {max_seq_len}] and embedding availability)"
+        )
 
     def _scan_directory(self, split: str) -> list[dict]:
         """Scan directory for sample files."""
@@ -75,32 +107,58 @@ class Sword2Dataset(Dataset):
             try:
                 with open(f) as fh:
                     data = json.load(fh)
-                seq_len = len(data["sequence"])
-                if self.min_seq_len <= seq_len <= self.max_seq_len:
-                    data["_path"] = str(f)
-                    samples.append(data)
+                samples.append(data)
             except (json.JSONDecodeError, KeyError) as e:
                 logger.warning(f"Skipping {f}: {e}")
-
         return samples
+
+    def _embeddings_exist(self, protein_id: str) -> bool:
+        """Check if embeddings exist for all sources."""
+        for source in self.embedding_sources:
+            path = Path(source.path) / f"{protein_id}{source.file_ext}"
+            if not path.exists():
+                return False
+        return True
+
+    def _load_embedding(self, protein_id: str, source: EmbeddingSource) -> torch.Tensor:
+        """Load a single PLM embedding for a protein."""
+        path = Path(source.path) / f"{protein_id}{source.file_ext}"
+        if source.file_ext == ".pt":
+            emb = torch.load(path, map_location="cpu", weights_only=True)
+        elif source.file_ext == ".npy":
+            emb = torch.from_numpy(np.load(path))
+        else:
+            raise ValueError(f"Unsupported embedding format: {source.file_ext}")
+
+        # Ensure float32 and 2D (L, D)
+        emb = emb.float()
+        if emb.dim() == 3:
+            emb = emb.squeeze(0)  # remove batch dim if present
+        return emb
 
     def __len__(self) -> int:
         return len(self.samples)
 
     def __getitem__(self, idx: int) -> dict:
         sample = self.samples[idx]
+        protein_id = sample["id"]
+        seq_len = len(sample["sequence"])
 
-        sequence = sample["sequence"]
-        seq_len = len(sequence)
+        # Load and concatenate embeddings from all PLM sources
+        embeddings = []
+        for source in self.embedding_sources:
+            emb = self._load_embedding(protein_id, source)
+            # Truncate to sequence length if needed (some PLMs add special tokens)
+            if emb.shape[0] > seq_len:
+                emb = emb[:seq_len]
+            elif emb.shape[0] < seq_len:
+                # Pad if embedding is shorter (shouldn't happen normally)
+                pad = torch.zeros(seq_len - emb.shape[0], emb.shape[1])
+                emb = torch.cat([emb, pad], dim=0)
+            embeddings.append(emb)
 
-        # Tokenize with ESM-2 alphabet
-        if self.esm_alphabet is not None:
-            batch_converter = self.esm_alphabet.get_batch_converter()
-            _, _, tokens = batch_converter([(sample["id"], sequence)])
-            tokens = tokens.squeeze(0)  # (L+2,) includes BOS/EOS
-        else:
-            # Dummy tokens for testing without ESM
-            tokens = torch.zeros(seq_len + 2, dtype=torch.long)
+        # Concatenate along feature dimension: (L, D1+D2+...+Dn)
+        embeddings = torch.cat(embeddings, dim=-1)
 
         # Parse partitionings
         partitionings = []
@@ -112,38 +170,34 @@ class Sword2Dataset(Dataset):
             partitionings.append(domains)
 
         return {
-            "id": sample["id"],
-            "tokens": tokens,
+            "id": protein_id,
+            "embeddings": embeddings,  # (L, D_total)
             "seq_len": seq_len,
             "partitionings": partitionings,
         }
 
 
 def collate_fn(batch: list[dict]) -> dict:
-    """Custom collation: pad tokens to max length in batch.
+    """Custom collation: pad embeddings to max length in batch.
 
     Returns:
         Dictionary with:
-            - tokens: (B, max_len+2) padded token tensor
+            - embeddings: (B, max_len, D) padded embedding tensor
             - mask: (B, max_len) boolean mask
             - targets: list of target dicts for loss computation
     """
     max_len = max(item["seq_len"] for item in batch)
     B = len(batch)
+    embed_dim = batch[0]["embeddings"].shape[-1]
 
-    # Pad tokens
-    tokens = torch.zeros(B, max_len + 2, dtype=torch.long)  # +2 for BOS/EOS
+    embeddings = torch.zeros(B, max_len, embed_dim)
     mask = torch.zeros(B, max_len, dtype=torch.bool)
 
     targets = []
 
     for i, item in enumerate(batch):
         L = item["seq_len"]
-        tok = item["tokens"]
-        # Copy tokens: BOS + sequence + EOS + padding
-        tokens[i, : len(tok)] = tok
-        # Set padding token to 1 (ESM-2 padding token index)
-        tokens[i, len(tok) :] = 1
+        embeddings[i, :L] = item["embeddings"]
         mask[i, :L] = True
 
         targets.append(
@@ -155,7 +209,7 @@ def collate_fn(batch: list[dict]) -> dict:
         )
 
     return {
-        "tokens": tokens,
+        "embeddings": embeddings,
         "mask": mask,
         "targets": targets,
     }
@@ -163,10 +217,10 @@ def collate_fn(batch: list[dict]) -> dict:
 
 def create_dataloaders(
     data_dir: str | Path,
-    esm_alphabet=None,
+    embedding_sources: list[EmbeddingSource],
     max_seq_len: int = 1024,
     min_seq_len: int = 30,
-    batch_size: int = 4,
+    batch_size: int = 8,
     num_workers: int = 4,
     pin_memory: bool = True,
 ) -> dict[str, DataLoader]:
@@ -176,7 +230,7 @@ def create_dataloaders(
     for split in ["train", "val", "test"]:
         dataset = Sword2Dataset(
             data_dir=data_dir,
-            esm_alphabet=esm_alphabet,
+            embedding_sources=embedding_sources,
             max_seq_len=max_seq_len,
             min_seq_len=min_seq_len,
             split=split,

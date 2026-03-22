@@ -1,7 +1,19 @@
+# Default config: concatenate all 3 PLM embeddings
 model:
-  esm_model: "esm2_t33_650M_UR50D"
-  esm_embed_dim: 1280
-  freeze_esm_layers: 30
+  embedding_sources:
+    - name: "esm2_650M"
+      embed_dim: 1280
+      path: "data/embeddings/esm2_650M"
+      file_ext: ".pt"
+    - name: "ankh2_large"
+      embed_dim: 1536
+      path: "data/embeddings/ankh2_large"
+      file_ext: ".pt"
+    - name: "esmc_600M"
+      embed_dim: 1152
+      path: "data/embeddings/esmc_600M"
+      file_ext: ".pt"
+
   pair_dim: 128
   pair_num_blocks: 8
   pair_kernel_size: 3
@@ -27,13 +39,12 @@ data:
   min_num_partitionings: 1
   train_split: 0.9
   val_split: 0.05
-  batch_size: 4
+  batch_size: 8
   num_workers: 4
   pin_memory: true
 
 train:
-  learning_rate: 1.0e-4
-  esm_learning_rate: 1.0e-5
+  learning_rate: 3.0e-4
   weight_decay: 0.01
   warmup_steps: 1000
   max_steps: 200000

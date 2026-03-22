@@ -5,14 +5,13 @@ Features:
 - Mixed precision training (fp16)
 - Gradient accumulation
 - Cosine LR schedule with linear warmup
-- Differential learning rates (lower for ESM-2 backbone)
 - W&B logging
 - Periodic evaluation and checkpointing
 """
 
 import logging
+import math
 import os
-import time
 from pathlib import Path
 
 import torch
@@ -22,8 +21,8 @@ from torch.cuda.amp import GradScaler, autocast
 from .config import Config
 from .dataset import create_dataloaders
 from .losses import PartitioningLoss
-from .model import DomainPartitionNet
 from .metrics import compute_metrics
+from .model import DomainPartitionNet
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +34,6 @@ def get_cosine_schedule_with_warmup(
     min_lr_ratio: float = 0.01,
 ):
     """Cosine annealing with linear warmup."""
-    import math
 
     def lr_lambda(step):
         if step < warmup_steps:
@@ -64,26 +62,23 @@ def evaluate(
         if n_batches >= max_batches:
             break
 
-        tokens = batch["tokens"].to(device)
+        embeddings = batch["embeddings"].to(device)
         mask = batch["mask"].to(device)
         targets = batch["targets"]
 
         with autocast(dtype=torch.float16):
-            outputs = model(tokens, mask)
+            outputs = model(embeddings, mask)
             losses = criterion(outputs, targets)
 
         for k, v in losses.items():
             total_losses[k] = total_losses.get(k, 0.0) + v.item()
 
-        # Compute metrics
         batch_metrics = compute_metrics(outputs, targets)
         all_metrics.append(batch_metrics)
         n_batches += 1
 
-    # Average
     avg_losses = {k: v / max(1, n_batches) for k, v in total_losses.items()}
 
-    # Aggregate metrics
     if all_metrics:
         avg_metrics = {}
         for key in all_metrics[0]:
@@ -101,18 +96,17 @@ def train(config: Config) -> None:
 
     # Create model
     model = DomainPartitionNet(config.model)
-    model.load_esm()
     model = model.to(device)
 
-    # Count parameters
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f"Parameters: {total_params:,} total, {trainable_params:,} trainable")
 
     # Create dataloaders
+    embedding_sources = config.model.get_embedding_sources()
     loaders = create_dataloaders(
         data_dir=config.data.processed_data_dir,
-        esm_alphabet=model.esm_alphabet,
+        embedding_sources=embedding_sources,
         max_seq_len=config.data.max_seq_len,
         min_seq_len=config.data.min_seq_len,
         batch_size=config.data.batch_size,
@@ -129,12 +123,9 @@ def train(config: Config) -> None:
     # Loss, optimizer, scheduler
     criterion = PartitioningLoss(config.train)
 
-    param_groups = model.get_param_groups(
-        esm_lr=config.train.esm_learning_rate,
-        head_lr=config.train.learning_rate,
-    )
     optimizer = torch.optim.AdamW(
-        param_groups,
+        model.parameters(),
+        lr=config.train.learning_rate,
         weight_decay=config.train.weight_decay,
     )
     scheduler = get_cosine_schedule_with_warmup(
@@ -144,6 +135,7 @@ def train(config: Config) -> None:
     scaler = GradScaler() if config.train.fp16 else None
 
     # W&B
+    use_wandb = False
     try:
         import wandb
 
@@ -159,7 +151,6 @@ def train(config: Config) -> None:
         use_wandb = True
     except ImportError:
         logger.info("wandb not available, logging to console only")
-        use_wandb = False
 
     # Resume from checkpoint
     global_step = 0
@@ -189,20 +180,20 @@ def train(config: Config) -> None:
             if global_step >= config.train.max_steps:
                 break
 
-            tokens = batch["tokens"].to(device)
+            embeddings = batch["embeddings"].to(device)
             mask = batch["mask"].to(device)
             targets = batch["targets"]
 
             # Forward
             if config.train.fp16:
                 with autocast(dtype=torch.float16):
-                    outputs = model(tokens, mask)
+                    outputs = model(embeddings, mask)
                     losses = criterion(outputs, targets)
                     loss = losses["loss"] / config.train.gradient_accumulation
 
                 scaler.scale(loss).backward()
             else:
-                outputs = model(tokens, mask)
+                outputs = model(embeddings, mask)
                 losses = criterion(outputs, targets)
                 loss = losses["loss"] / config.train.gradient_accumulation
                 loss.backward()
@@ -265,25 +256,15 @@ def train(config: Config) -> None:
                 if val_metrics["loss"] < best_val_loss:
                     best_val_loss = val_metrics["loss"]
                     save_checkpoint(
-                        model,
-                        optimizer,
-                        scheduler,
-                        scaler,
-                        global_step,
-                        config.train.output_dir,
-                        "best",
+                        model, optimizer, scheduler, scaler,
+                        global_step, config.train.output_dir, "best",
                     )
 
             # Checkpointing
             if global_step % config.train.save_every == 0:
                 save_checkpoint(
-                    model,
-                    optimizer,
-                    scheduler,
-                    scaler,
-                    global_step,
-                    config.train.output_dir,
-                    f"step_{global_step}",
+                    model, optimizer, scheduler, scaler,
+                    global_step, config.train.output_dir, f"step_{global_step}",
                 )
 
     # Final save
@@ -296,9 +277,7 @@ def train(config: Config) -> None:
         wandb.finish()
 
 
-def save_checkpoint(
-    model, optimizer, scheduler, scaler, global_step, output_dir, name
-):
+def save_checkpoint(model, optimizer, scheduler, scaler, global_step, output_dir, name):
     """Save training checkpoint."""
     path = os.path.join(output_dir, f"checkpoint_{name}.pt")
     state = {
@@ -318,12 +297,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="Train DomainPartitionNet")
-    parser.add_argument(
-        "--config",
-        type=str,
-        default=None,
-        help="Path to config YAML file",
-    )
+    parser.add_argument("--config", type=str, default=None, help="Path to config YAML file")
     parser.add_argument("--resume", type=str, default=None, help="Checkpoint to resume from")
     args = parser.parse_args()
 

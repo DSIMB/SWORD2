@@ -1,9 +1,9 @@
 """
-DomainPartitionNet: Deep learning model for protein domain partitioning.
+DomainPartitionNet: Lightweight model for protein domain partitioning.
 
-Architecture:
-1. ESM-2 backbone encodes sequence into per-residue embeddings
-2. Single representation refinement via transformer layers
+Architecture (no PLM backbone — uses pre-computed frozen embeddings):
+1. Pre-computed PLM embeddings (one or more, concatenated) as input
+2. Single representation projection + transformer refinement
 3. Pair representation via outer sum + dilated residual 2D convolutions
 4. K partitioning heads predict co-membership matrices + confidence scores
 5. Auxiliary heads predict boundary probabilities and number of domains
@@ -11,14 +11,18 @@ Architecture:
 The model outputs K alternative domain partitionings, each represented as
 a symmetric L x L co-membership matrix where entry (i,j) indicates the
 probability that residues i and j belong to the same domain.
+
+By consuming frozen embeddings instead of running a PLM backbone:
+- All trainable parameters are in the lightweight head (~5-15M vs 650M+)
+- Multiple PLM embeddings can be concatenated for richer features
+- Training requires only 8-16 GB GPU memory
+- Embedding computation is a one-time cost, amortized over all experiments
 """
 
-import math
 from typing import Optional
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from .config import ModelConfig
 
@@ -234,24 +238,23 @@ class PartitioningHead(nn.Module):
 
 
 class DomainPartitionNet(nn.Module):
-    """Main model for protein domain partitioning from sequence.
+    """Lightweight model for protein domain partitioning from pre-computed embeddings.
 
-    Uses ESM-2 as backbone encoder with a pair representation module
-    and K partitioning heads for predicting alternative domain assignments.
+    Takes concatenated PLM embeddings as input (no backbone needed).
+    All ~5-15M trainable parameters are in the projection, transformer,
+    pair module, and partitioning heads.
     """
 
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
 
-        # ESM-2 backbone (loaded separately to allow flexible model selection)
-        self.esm_model = None  # set by load_esm()
-        self.esm_alphabet = None
+        total_embed_dim = config.total_embed_dim
 
-        # Project ESM embeddings to single representation
+        # Project concatenated PLM embeddings to single representation
         self.single_proj = nn.Sequential(
-            nn.LayerNorm(config.esm_embed_dim),
-            nn.Linear(config.esm_embed_dim, config.single_dim),
+            nn.LayerNorm(total_embed_dim),
+            nn.Linear(total_embed_dim, config.single_dim),
             nn.GELU(),
             nn.Linear(config.single_dim, config.single_dim),
         )
@@ -278,83 +281,29 @@ class DomainPartitionNet(nn.Module):
             [PartitioningHead(config) for _ in range(config.num_partitioning_slots)]
         )
 
-    def load_esm(self) -> None:
-        """Load ESM-2 pretrained model and freeze specified layers."""
-        import esm
-
-        model_name = self.config.esm_model
-        if model_name == "esm2_t33_650M_UR50D":
-            self.esm_model, self.esm_alphabet = esm.pretrained.esm2_t33_650M_UR50D()
-        elif model_name == "esm2_t12_35M_UR50D":
-            self.esm_model, self.esm_alphabet = esm.pretrained.esm2_t12_35M_UR50D()
-        elif model_name == "esm2_t6_8M_UR50D":
-            self.esm_model, self.esm_alphabet = esm.pretrained.esm2_t6_8M_UR50D()
-        elif model_name == "esm2_t36_3B_UR50D":
-            self.esm_model, self.esm_alphabet = esm.pretrained.esm2_t36_3B_UR50D()
-        else:
-            raise ValueError(f"Unknown ESM model: {model_name}")
-
-        # Freeze early layers
-        for param in self.esm_model.parameters():
-            param.requires_grad = False
-
-        num_layers = len(self.esm_model.layers)
-        for i in range(max(0, self.config.freeze_esm_layers), num_layers):
-            for param in self.esm_model.layers[i].parameters():
-                param.requires_grad = True
-
-        # Always fine-tune the final layer norm
-        if hasattr(self.esm_model, "emb_layer_norm_after"):
-            for param in self.esm_model.emb_layer_norm_after.parameters():
-                param.requires_grad = True
-
-    def encode_sequence(
-        self, tokens: torch.Tensor, mask: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
-        """Encode tokenized sequence through ESM-2.
-
-        Args:
-            tokens: (B, L+2) ESM-2 tokenized input (with BOS/EOS)
-            mask: (B, L) boolean mask for valid residues
-        Returns:
-            embeddings: (B, L, esm_embed_dim) per-residue embeddings
-        """
-        results = self.esm_model(tokens, repr_layers=[self.esm_model.num_layers])
-        # Extract last layer, remove BOS/EOS tokens
-        embeddings = results["representations"][self.esm_model.num_layers]
-        embeddings = embeddings[:, 1:-1, :]  # remove BOS and EOS
-        return embeddings
-
     def forward(
         self,
-        tokens: torch.Tensor,
+        embeddings: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
     ) -> dict[str, torch.Tensor]:
         """Forward pass.
 
         Args:
-            tokens: (B, L+2) ESM-2 tokenized sequences
+            embeddings: (B, L, D) concatenated pre-computed PLM embeddings
             mask: (B, L) boolean mask, True = valid residue
 
         Returns:
             Dictionary with:
-                - co_membership: (B, K, L, L) co-membership probabilities
+                - co_membership: (B, K, L, L) co-membership logits
                 - confidence: (B, K) confidence scores per slot
                 - num_domains_logits: (B, K, max_domains) if enabled
                 - boundary_logits: (B, K, L) if enabled
         """
-        B = tokens.shape[0]
+        # 1. Project to single representation
+        single = self.single_proj(embeddings)  # (B, L, single_dim)
 
-        # 1. ESM-2 encoding
-        esm_embed = self.encode_sequence(tokens, mask)  # (B, L, esm_embed_dim)
-        L = esm_embed.shape[1]
-
-        # 2. Project to single representation
-        single = self.single_proj(esm_embed)  # (B, L, single_dim)
-
-        # 3. Refine single representation
+        # 2. Refine single representation
         if mask is not None:
-            # Create attention mask for transformer
             src_key_padding_mask = ~mask  # True = padding
         else:
             src_key_padding_mask = None
@@ -362,10 +311,10 @@ class DomainPartitionNet(nn.Module):
             single, src_key_padding_mask=src_key_padding_mask
         )  # (B, L, single_dim)
 
-        # 4. Build pair representation
+        # 3. Build pair representation
         pair = self.pair_module(single, mask)  # (B, pair_dim, L, L)
 
-        # 5. Apply K partitioning heads
+        # 4. Apply K partitioning heads
         all_co_mem = []
         all_conf = []
         all_num_dom = []
@@ -385,26 +334,8 @@ class DomainPartitionNet(nn.Module):
             "confidence": torch.stack(all_conf, dim=1),  # (B, K)
         }
         if all_num_dom:
-            outputs["num_domains_logits"] = torch.stack(all_num_dom, dim=1)  # (B, K, max_dom)
+            outputs["num_domains_logits"] = torch.stack(all_num_dom, dim=1)
         if all_bound:
-            outputs["boundary_logits"] = torch.stack(all_bound, dim=1)  # (B, K, L)
+            outputs["boundary_logits"] = torch.stack(all_bound, dim=1)
 
         return outputs
-
-    def get_param_groups(self, esm_lr: float, head_lr: float) -> list[dict]:
-        """Get parameter groups with different learning rates."""
-        esm_params = []
-        head_params = []
-
-        for name, param in self.named_parameters():
-            if not param.requires_grad:
-                continue
-            if name.startswith("esm_model"):
-                esm_params.append(param)
-            else:
-                head_params.append(param)
-
-        return [
-            {"params": esm_params, "lr": esm_lr},
-            {"params": head_params, "lr": head_lr},
-        ]

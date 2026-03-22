@@ -1,0 +1,29 @@
+# ESM-2 only config for ablation
+model:
+  embedding_sources:
+    - name: "esm2_650M"
+      embed_dim: 1280
+      path: "data/embeddings/esm2_650M"
+      file_ext: ".pt"
+
+  pair_dim: 128
+  pair_num_blocks: 8
+  pair_kernel_size: 3
+  pair_dilation_cycle: [1, 2, 4, 8]
+  pair_dropout: 0.1
+  single_dim: 256
+  single_num_layers: 4
+  single_num_heads: 8
+  single_dropout: 0.1
+  num_partitioning_slots: 10
+  head_hidden_dim: 64
+
+data:
+  max_seq_len: 1024
+  batch_size: 8
+
+train:
+  learning_rate: 3.0e-4
+  max_steps: 200000
+  wandb_project: "sword2-dl"
+  wandb_run_name: "esm2-only"

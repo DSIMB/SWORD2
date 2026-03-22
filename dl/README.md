@@ -1,34 +1,55 @@
 # SWORD2-DL: Deep Learning Protein Domain Partitioning from Sequence
 
-A deep learning model that predicts **alternative protein domain partitionings** directly from amino acid sequence, trained on SWORD2 structural annotations.
+A lightweight deep learning model that predicts **alternative protein domain partitionings** from pre-computed protein language model (PLM) embeddings, trained on SWORD2 structural annotations.
 
 ## Key Features
 
-- **Sequence-only input**: No 3D structure required (uses ESM-2 protein language model)
-- **Multiple partitionings**: Predicts K alternative domain assignments with confidence scores, just like SWORD2
-- **Discontinuous domains**: Naturally handles domains composed of non-contiguous sequence segments via pairwise co-membership prediction
-- **Fast inference**: ~100ms per protein on GPU vs seconds for structure-based SWORD2
+- **Pre-computed embeddings as input**: No PLM backbone in the model — uses frozen ESM-2, Ankh2, ESMC embeddings loaded from disk
+- **Multi-PLM ensembling**: Concatenate embeddings from multiple PLMs for richer per-residue features
+- **Lightweight trainable head**: ~5-15M parameters (vs 650M+ with a PLM backbone), trainable on a single 16GB GPU
+- **Multiple partitionings**: Predicts K alternative domain assignments with confidence scores
+- **Discontinuous domains**: Pairwise co-membership prediction naturally handles non-contiguous domains
+- **Fast training**: No backprop through PLM backbone — embedding loading is the only I/O cost
 
 ## Architecture
 
-**DomainPartitionNet** consists of:
-
-1. **ESM-2 backbone**: Pretrained protein language model encodes sequence into per-residue embeddings (1280-dim)
-2. **Single representation refinement**: Transformer layers with relative position encoding
-3. **Pair module**: Outer sum + dilated residual 2D convolutions with row/column attention (inspired by AlphaFold2's Evoformer)
-4. **K partitioning heads**: Each predicts:
-   - L x L co-membership probability matrix (residues i,j in same domain?)
-   - Confidence score for this partitioning
-   - Number of domains (auxiliary)
-   - Per-residue boundary probabilities (auxiliary)
-
-**Training** uses Hungarian matching to assign predicted slots to ground truth partitionings, with:
-- Binary cross-entropy on co-membership matrices
-- Confidence calibration loss
-- Focal loss on boundary prediction
-- Cross-entropy on domain count
-
-**Post-processing** extracts domains via spectral clustering on each co-membership matrix, with deduplication of near-identical partitionings.
+```
+Pre-computed PLM embeddings (L, D1+D2+D3)
+  e.g. ESM-2(1280) + Ankh2(1536) + ESMC(1152) = 3968-dim per residue
+       │
+       ▼
+┌──────────────────┐
+│  Linear Proj     │  LayerNorm → Linear(3968→256) → GELU → Linear(256→256)
+│  (frozen PLMs    │
+│   → single dim)  │
+└──────┬───────────┘
+       │ (B, L, 256)
+       ▼
+┌──────────────────┐
+│  Transformer     │  4-layer encoder, 8 heads, pre-norm
+│  Refinement      │  Learns task-specific residue interactions
+└──────┬───────────┘
+       │ single: (B, L, 256)
+       ▼
+┌──────────────────────────────────────┐
+│           Pair Module                │
+│  • Outer sum → (L, L, 128)          │
+│  • + Relative position encoding     │
+│  • Row & column attention            │
+│  • 8 dilated 2D conv residual blocks │
+│  • Symmetrize                        │
+└──────┬───────────────────────────────┘
+       │ pair: (B, 128, L, L)
+       ▼
+┌──────────────────────────────────────┐
+│      K=10 Partitioning Heads         │
+│  Each outputs:                       │
+│  • L×L co-membership logits          │
+│  • Confidence score [0, 1]           │
+│  • Domain count (1-20 classes)       │
+│  • Per-residue boundary logits       │
+└──────────────────────────────────────┘
+```
 
 ## Quick Start
 
@@ -36,92 +57,116 @@ A deep learning model that predicts **alternative protein domain partitionings**
 
 ```bash
 cd dl
-pip install -e ".[dev]"
+pip install -e .
 ```
 
-### 2. Generate Training Data
+### 2. Prepare Embeddings
 
-First build the SWORD2 Rust binary:
-```bash
-cd ..
-cargo build --release
-bash install.sh
-cd dl
+You need pre-computed per-residue PLM embeddings stored as individual `.pt` or `.npy` files, one per protein:
+
+```
+data/embeddings/
+├── esm2_650M/
+│   ├── P12345.pt    # shape: (L, 1280)
+│   ├── P67890.pt
+│   └── ...
+├── ankh2_large/
+│   ├── P12345.pt    # shape: (L, 1536)
+│   └── ...
+└── esmc_600M/
+    ├── P12345.pt    # shape: (L, 1152)
+    └── ...
 ```
 
-Generate training data from SwissProt:
+### 3. Generate Training Labels
+
+Build SWORD2 and run it on SwissProt to generate ground truth partitionings:
+
 ```bash
-# Download SwissProt and run SWORD2 on all proteins
+# Build SWORD2
+cd .. && cargo build --release && bash install.sh && cd dl
+
+# Generate labels (run SWORD2 on SwissProt proteins)
 sword2-dl-generate --download --num-workers 16
 
-# Or process a subset for testing
+# Or a subset for testing
 sword2-dl-generate --download --max-proteins 1000 --num-workers 8
 ```
 
-### 3. Train
+### 4. Train
 
 ```bash
-# Full model (requires ~40GB GPU)
+# All 3 PLMs concatenated (default — recommended)
 sword2-dl-train --config configs/default.yaml
 
-# Small model for development (requires ~8GB GPU)
+# ESM-2 only (for ablation)
+sword2-dl-train --config configs/esm2_only.yaml
+
+# Small model for development
 sword2-dl-train --config configs/small.yaml
 ```
 
-### 4. Predict
+### 5. Predict
 
 ```bash
-# Single sequence
+# From pre-computed embeddings (by protein ID — looks up in configured paths)
 sword2-dl-predict --checkpoint checkpoints/checkpoint_best.pt \
-    --sequence "MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMFLSFPTTKTYFPHFDLSH"
+    --protein-id P12345 --config configs/default.yaml
 
-# FASTA file
+# From a direct embedding file
 sword2-dl-predict --checkpoint checkpoints/checkpoint_best.pt \
-    --fasta proteins.fasta --output results.json --format json
+    --embedding-file my_protein.pt
+
+# Batch prediction
+sword2-dl-predict --checkpoint checkpoints/checkpoint_best.pt \
+    --protein-ids protein_list.txt --output results.json --format json
 ```
 
 ## Training Data
 
-Training data is generated by running SWORD2 on the SwissProt database (~570K proteins). Each protein produces:
+Training labels are generated by running SWORD2 on the SwissProt database (~570K proteins). Each protein produces:
 - **Optimal partition**: The best domain assignment
 - **Alternative partitions**: 1-15 alternative assignments with quality scores
 
-This gives the model diverse supervision for learning to predict multiple plausible domain decompositions.
+The model learns from all partitionings simultaneously via Hungarian matching.
+
+## Why Pre-computed Embeddings?
+
+| Aspect | PLM as backbone | Pre-computed embeddings |
+|--------|----------------|----------------------|
+| GPU memory | 40+ GB (backprop through 650M params) | 8-16 GB (only head params) |
+| Training speed | ~1 protein/sec | ~50+ proteins/sec |
+| Multi-PLM | One at a time | Concatenate all freely |
+| Iteration speed | Slow (retrain everything) | Fast (only retrain head) |
+| Embedding cost | Every epoch | One-time, reusable |
+
+Since PLM representations already encode rich structural information, the marginal gain from fine-tuning the backbone is small compared to the practical benefits of frozen embeddings.
 
 ## Project Structure
 
 ```
 dl/
-├── pyproject.toml           # Package config and dependencies
+├── pyproject.toml
 ├── configs/
-│   ├── default.yaml         # Full model config (ESM-2 650M)
-│   └── small.yaml           # Small model config (ESM-2 8M, for dev)
+│   ├── default.yaml         # 3 PLMs concatenated
+│   ├── esm2_only.yaml       # ESM-2 only (ablation)
+│   └── small.yaml           # Small model (development)
 └── sword2_dl/
-    ├── __init__.py
-    ├── config.py             # Configuration dataclasses
-    ├── model.py              # DomainPartitionNet architecture
+    ├── config.py             # Configuration (embedding sources, model, training)
+    ├── model.py              # DomainPartitionNet (lightweight, no PLM backbone)
     ├── losses.py             # Hungarian matching + multi-task losses
-    ├── metrics.py            # Evaluation metrics (overlap IoU, boundary F1)
+    ├── metrics.py            # Overlap IoU, boundary F1, co-membership AUC
     ├── postprocess.py        # Spectral clustering + deduplication
-    ├── dataset.py            # Dataset and DataLoader
-    ├── generate_data.py      # SWORD2 data generation pipeline
-    ├── train.py              # Training loop
-    └── predict.py            # Inference script
+    ├── dataset.py            # Loads pre-computed embeddings + SWORD2 labels
+    ├── generate_data.py      # Run SWORD2 on SwissProt for labels
+    ├── train.py              # Training loop (fp16, grad accum, cosine LR)
+    └── predict.py            # Inference from embeddings
 ```
-
-## Why This Approach?
-
-| Challenge | Solution |
-|-----------|----------|
-| Multiple valid partitionings | K prediction slots + Hungarian matching (inspired by DETR) |
-| Discontinuous domains | Pairwise co-membership matrix (not sequential labeling) |
-| Sequence-only input | ESM-2 captures structural information from evolution |
-| Variable-length proteins | Padded batching + masking |
-| Class imbalance (boundaries) | Focal loss for boundary prediction |
 
 ## Requirements
 
 - Python >= 3.10
 - PyTorch >= 2.0
-- NVIDIA GPU with >= 8GB VRAM (small model) or >= 40GB (full model)
-- SWORD2 Rust binary (for data generation only)
+- GPU with >= 8 GB VRAM (small model) or >= 16 GB (full model with 3 PLMs)
+- Pre-computed PLM embeddings for SwissProt
+- SWORD2 Rust binary (for label generation only)

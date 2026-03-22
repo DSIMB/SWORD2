@@ -12,7 +12,6 @@ license = {text = "MIT"}
 
 dependencies = [
     "torch>=2.0",
-    "fair-esm>=2.0",
     "numpy>=1.24",
     "scipy>=1.10",
     "scikit-learn>=1.2",
@@ -27,6 +26,10 @@ dev = [
     "pytest>=7.0",
     "black>=23.0",
     "ruff>=0.1",
+]
+# Only needed for on-the-fly embedding computation (not required for training)
+esm = [
+    "fair-esm>=2.0",
 ]
 
 [project.scripts]

@@ -8,11 +8,23 @@ import yaml
 
 
 @dataclass
+class EmbeddingSource:
+    """A single PLM embedding source."""
+
+    name: str = "esm2_650M"
+    embed_dim: int = 1280
+    path: str = "data/embeddings/esm2_650M"  # directory of .pt files keyed by protein ID
+    file_ext: str = ".pt"  # .pt or .npy
+
+
+@dataclass
 class ModelConfig:
-    # ESM-2 backbone
-    esm_model: str = "esm2_t33_650M_UR50D"
-    esm_embed_dim: int = 1280
-    freeze_esm_layers: int = 30  # freeze first N layers, fine-tune the rest
+    # Embedding inputs (list of PLM sources to concatenate)
+    embedding_sources: list[dict] = field(
+        default_factory=lambda: [
+            {"name": "esm2_650M", "embed_dim": 1280, "path": "data/embeddings/esm2_650M", "file_ext": ".pt"},
+        ]
+    )
 
     # Pair module
     pair_dim: int = 128
@@ -36,6 +48,15 @@ class ModelConfig:
     predict_boundaries: bool = True
     max_num_domains: int = 20
 
+    @property
+    def total_embed_dim(self) -> int:
+        """Sum of all embedding source dimensions."""
+        return sum(s["embed_dim"] for s in self.embedding_sources)
+
+    def get_embedding_sources(self) -> list[EmbeddingSource]:
+        """Parse embedding source dicts into EmbeddingSource objects."""
+        return [EmbeddingSource(**s) for s in self.embedding_sources]
+
 
 @dataclass
 class DataConfig:
@@ -54,7 +75,7 @@ class DataConfig:
     # test_split = 1 - train_split - val_split
 
     # Dataloader
-    batch_size: int = 4
+    batch_size: int = 8
     num_workers: int = 4
     pin_memory: bool = True
 
@@ -62,8 +83,7 @@ class DataConfig:
 @dataclass
 class TrainConfig:
     # Optimizer
-    learning_rate: float = 1e-4
-    esm_learning_rate: float = 1e-5  # lower LR for pretrained backbone
+    learning_rate: float = 3e-4
     weight_decay: float = 0.01
     warmup_steps: int = 1000
     max_steps: int = 200_000

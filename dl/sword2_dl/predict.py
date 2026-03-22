@@ -1,18 +1,20 @@
 """
 Inference script for DomainPartitionNet.
 
-Takes a protein sequence (or FASTA file) and predicts alternative domain
-partitionings. Outputs results in SWORD2-compatible format.
+Takes pre-computed embeddings (or a protein sequence with on-the-fly encoding)
+and predicts alternative domain partitionings.
 """
 
 import json
 import logging
 import sys
 from pathlib import Path
+from typing import Optional
 
+import numpy as np
 import torch
 
-from .config import Config, ModelConfig
+from .config import Config, ModelConfig, EmbeddingSource
 from .model import DomainPartitionNet
 from .postprocess import predict_partitionings
 
@@ -32,7 +34,6 @@ def load_model(
         config = ModelConfig()
 
     model = DomainPartitionNet(config)
-    model.load_esm()
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(checkpoint["model"])
@@ -42,18 +43,41 @@ def load_model(
     return model
 
 
-def predict_sequence(
+def load_embeddings(
+    protein_id: str,
+    embedding_sources: list[EmbeddingSource],
+) -> torch.Tensor:
+    """Load and concatenate pre-computed embeddings for a protein."""
+    embeddings = []
+    for source in embedding_sources:
+        path = Path(source.path) / f"{protein_id}{source.file_ext}"
+        if source.file_ext == ".pt":
+            emb = torch.load(path, map_location="cpu", weights_only=True)
+        elif source.file_ext == ".npy":
+            emb = torch.from_numpy(np.load(path))
+        else:
+            raise ValueError(f"Unsupported format: {source.file_ext}")
+
+        emb = emb.float()
+        if emb.dim() == 3:
+            emb = emb.squeeze(0)
+        embeddings.append(emb)
+
+    return torch.cat(embeddings, dim=-1)  # (L, D_total)
+
+
+def predict_from_embeddings(
     model: DomainPartitionNet,
-    sequence: str,
+    embeddings: torch.Tensor,
     device: torch.device | None = None,
     min_confidence: float = 0.1,
     min_domain_size: int = 20,
 ) -> list[dict]:
-    """Predict domain partitionings for a single sequence.
+    """Predict domain partitionings from pre-computed embeddings.
 
     Args:
         model: Trained DomainPartitionNet.
-        sequence: Amino acid sequence string.
+        embeddings: (L, D) concatenated PLM embeddings.
         device: Target device.
         min_confidence: Minimum confidence to report.
         min_domain_size: Minimum domain size in residues.
@@ -64,48 +88,40 @@ def predict_sequence(
     if device is None:
         device = next(model.parameters()).device
 
-    # Tokenize
-    batch_converter = model.esm_alphabet.get_batch_converter()
-    _, _, tokens = batch_converter([("query", sequence)])
-    tokens = tokens.to(device)
-
-    seq_len = len(sequence)
+    seq_len = embeddings.shape[0]
+    embeddings = embeddings.unsqueeze(0).to(device)  # (1, L, D)
     mask = torch.ones(1, seq_len, dtype=torch.bool, device=device)
 
-    # Forward pass
     with torch.no_grad(), torch.cuda.amp.autocast(dtype=torch.float16):
-        outputs = model(tokens, mask)
+        outputs = model(embeddings, mask)
 
     # Extract single-sample outputs
     single_outputs = {
-        "co_membership": outputs["co_membership"][0],  # (K, L, L)
-        "confidence": outputs["confidence"][0],  # (K,)
+        "co_membership": outputs["co_membership"][0],
+        "confidence": outputs["confidence"][0],
     }
     if "num_domains_logits" in outputs:
         single_outputs["num_domains_logits"] = outputs["num_domains_logits"][0]
     if "boundary_logits" in outputs:
         single_outputs["boundary_logits"] = outputs["boundary_logits"][0]
 
-    # Post-process
-    partitionings = predict_partitionings(
+    return predict_partitionings(
         single_outputs,
         seq_len=seq_len,
         min_confidence=min_confidence,
         min_domain_size=min_domain_size,
     )
 
-    return partitionings
-
 
 def format_output(
     protein_id: str,
-    sequence: str,
+    seq_len: int,
     partitionings: list[dict],
 ) -> dict:
     """Format predictions in SWORD2-compatible JSON output."""
     output = {
         "id": protein_id,
-        "sequence_length": len(sequence),
+        "sequence_length": seq_len,
         "method": "SWORD2-DL",
     }
 
@@ -120,10 +136,7 @@ def format_output(
 
         for d_idx, domain_segments in enumerate(part["domains"]):
             domain_key = f"Domain {d_idx + 1}"
-            # Format segments as "start-end" strings (1-indexed for compatibility)
-            segment_strs = [
-                f"{s + 1}-{e + 1}" for s, e in domain_segments
-            ]
+            segment_strs = [f"{s + 1}-{e + 1}" for s, e in domain_segments]
             partition_data["Domains"][domain_key] = {
                 "segments": segment_strs,
                 "residue_count": sum(e - s + 1 for s, e in domain_segments),
@@ -136,14 +149,14 @@ def format_output(
 
 def format_text_output(
     protein_id: str,
-    sequence: str,
+    seq_len: int,
     partitionings: list[dict],
 ) -> str:
     """Format predictions as human-readable text (SWORD2-style)."""
     lines = [
-        f"SWORD2-DL Domain Prediction",
+        "SWORD2-DL Domain Prediction",
         f"Protein: {protein_id}",
-        f"Sequence length: {len(sequence)}",
+        f"Sequence length: {seq_len}",
         f"Number of alternative partitionings: {len(partitionings)}",
         "",
     ]
@@ -166,100 +179,61 @@ def format_text_output(
     return "\n".join(lines)
 
 
-def parse_fasta(fasta_path: str) -> list[tuple[str, str]]:
-    """Parse FASTA file into list of (id, sequence) tuples."""
-    sequences = []
-    current_id = None
-    current_seq = []
-
-    with open(fasta_path) as f:
-        for line in f:
-            line = line.strip()
-            if line.startswith(">"):
-                if current_id is not None:
-                    sequences.append((current_id, "".join(current_seq)))
-                current_id = line[1:].split()[0]
-                current_seq = []
-            elif line:
-                current_seq.append(line)
-
-    if current_id is not None:
-        sequences.append((current_id, "".join(current_seq)))
-
-    return sequences
-
-
 def main():
     """Entry point for prediction."""
     import argparse
 
     parser = argparse.ArgumentParser(description="Predict protein domains with SWORD2-DL")
     parser.add_argument(
-        "--checkpoint",
-        type=str,
-        required=True,
+        "--checkpoint", type=str, required=True,
         help="Path to model checkpoint",
     )
     parser.add_argument(
-        "--sequence",
-        type=str,
-        default=None,
-        help="Single amino acid sequence",
+        "--protein-id", type=str, default=None,
+        help="Protein ID (used to look up pre-computed embeddings)",
     )
     parser.add_argument(
-        "--fasta",
-        type=str,
-        default=None,
-        help="Path to FASTA file",
+        "--protein-ids", type=str, default=None,
+        help="File with one protein ID per line",
     )
     parser.add_argument(
-        "--output",
-        type=str,
-        default=None,
+        "--embedding-file", type=str, default=None,
+        help="Direct path to a single embedding .pt/.npy file (overrides --protein-id lookup)",
+    )
+    parser.add_argument(
+        "--output", type=str, default=None,
         help="Output file path (default: stdout)",
     )
     parser.add_argument(
-        "--format",
-        choices=["json", "text"],
-        default="text",
+        "--format", choices=["json", "text"], default="text",
         help="Output format",
     )
     parser.add_argument(
-        "--config",
-        type=str,
-        default=None,
+        "--config", type=str, default=None,
         help="Path to config YAML",
     )
     parser.add_argument(
-        "--min-confidence",
-        type=float,
-        default=0.1,
+        "--min-confidence", type=float, default=0.1,
         help="Minimum confidence threshold",
     )
     parser.add_argument(
-        "--min-domain-size",
-        type=int,
-        default=20,
+        "--min-domain-size", type=int, default=20,
         help="Minimum domain size in residues",
     )
     parser.add_argument(
-        "--device",
-        type=str,
-        default=None,
+        "--device", type=str, default=None,
         help="Device (cuda/cpu)",
     )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
 
-    if args.sequence is None and args.fasta is None:
-        parser.error("Must provide --sequence or --fasta")
+    if args.protein_id is None and args.protein_ids is None and args.embedding_file is None:
+        parser.error("Must provide --protein-id, --protein-ids, or --embedding-file")
 
     # Load config
-    if args.config:
-        config = Config.from_yaml(args.config)
-    else:
-        config = Config()
+    config = Config.from_yaml(args.config) if args.config else Config()
+    embedding_sources = config.model.get_embedding_sources()
 
     # Device
     if args.device:
@@ -271,37 +245,51 @@ def main():
     logger.info(f"Loading model from {args.checkpoint}")
     model = load_model(args.checkpoint, config.model, device)
 
-    # Get sequences
-    if args.sequence:
-        sequences = [("query", args.sequence)]
+    # Collect protein IDs
+    if args.embedding_file:
+        protein_ids = [("direct", args.embedding_file)]
+    elif args.protein_ids:
+        with open(args.protein_ids) as f:
+            protein_ids = [(pid.strip(), None) for pid in f if pid.strip()]
     else:
-        sequences = parse_fasta(args.fasta)
+        protein_ids = [(args.protein_id, None)]
 
-    logger.info(f"Predicting domains for {len(sequences)} sequence(s)")
+    logger.info(f"Predicting domains for {len(protein_ids)} protein(s)")
 
-    # Predict
     all_results = []
-    for prot_id, seq in sequences:
-        partitionings = predict_sequence(
-            model,
-            seq,
-            device=device,
+    for pid, emb_file in protein_ids:
+        # Load embeddings
+        if emb_file:
+            if emb_file.endswith(".npy"):
+                emb = torch.from_numpy(np.load(emb_file)).float()
+            else:
+                emb = torch.load(emb_file, map_location="cpu", weights_only=True).float()
+            if emb.dim() == 3:
+                emb = emb.squeeze(0)
+        else:
+            emb = load_embeddings(pid, embedding_sources)
+
+        seq_len = emb.shape[0]
+
+        partitionings = predict_from_embeddings(
+            model, emb, device=device,
             min_confidence=args.min_confidence,
             min_domain_size=args.min_domain_size,
         )
 
         if args.format == "json":
-            result = format_output(prot_id, seq, partitionings)
-            all_results.append(result)
+            all_results.append(format_output(pid, seq_len, partitionings))
         else:
-            text = format_text_output(prot_id, seq, partitionings)
-            all_results.append(text)
+            all_results.append(format_text_output(pid, seq_len, partitionings))
 
     # Output
     output_file = open(args.output, "w") if args.output else sys.stdout
 
     if args.format == "json":
-        json.dump(all_results if len(all_results) > 1 else all_results[0], output_file, indent=2)
+        json.dump(
+            all_results if len(all_results) > 1 else all_results[0],
+            output_file, indent=2,
+        )
     else:
         for text in all_results:
             output_file.write(text + "\n")

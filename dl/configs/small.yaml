@@ -1,8 +1,11 @@
-# Small model config for testing and development
+# Small config: single PLM for fast development
 model:
-  esm_model: "esm2_t6_8M_UR50D"
-  esm_embed_dim: 320
-  freeze_esm_layers: 4
+  embedding_sources:
+    - name: "esm2_650M"
+      embed_dim: 1280
+      path: "data/embeddings/esm2_650M"
+      file_ext: ".pt"
+
   pair_dim: 64
   pair_num_blocks: 4
   pair_kernel_size: 3
@@ -21,12 +24,11 @@ model:
 data:
   max_seq_len: 512
   min_seq_len: 30
-  batch_size: 8
+  batch_size: 16
   num_workers: 2
 
 train:
   learning_rate: 3.0e-4
-  esm_learning_rate: 3.0e-5
   warmup_steps: 200
   max_steps: 20000
   gradient_accumulation: 2
