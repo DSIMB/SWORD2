@@ -53,6 +53,18 @@ class ModelConfig:
     predict_contact_map: bool = True
     max_num_domains: int = 20
 
+    # Triangle updates (AlphaFold2-inspired)
+    num_triangle_blocks: int = 2
+
+    # Multi-scale pair processing
+    use_multiscale: bool = True
+    num_scales: int = 2
+
+    # Slot attention
+    use_slot_attention: bool = True
+    slot_dim: int = 128
+    slot_iters: int = 3
+
     @property
     def total_embed_dim(self) -> int:
         """Sum of all embedding source dimensions."""

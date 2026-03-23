@@ -20,6 +20,11 @@ model:
   predict_boundaries: true
   predict_contact_map: true
   max_num_domains: 20
+  num_triangle_blocks: 1
+  use_multiscale: false
+  use_slot_attention: true
+  slot_dim: 64
+  slot_iters: 2
 
 data:
   max_seq_len: 512
