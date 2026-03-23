@@ -16,7 +16,7 @@ import os
 import re
 import shutil
 import subprocess
-import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Optional
@@ -25,6 +25,9 @@ import numpy as np
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
+
+RESULTS_SUBDIR = "results"
+FAILURES_LOG = "failures.jsonl"
 
 
 def download_swissprot(output_path: str) -> str:
@@ -98,6 +101,55 @@ def parse_fasta(fasta_path: str) -> list[dict]:
     return sequences
 
 
+def save_result_atomic(result: dict, results_dir: str) -> None:
+    """Write a protein result JSON atomically via temp file + os.replace()."""
+    os.makedirs(results_dir, exist_ok=True)
+    protein_id = result["id"]
+    final_path = os.path.join(results_dir, f"{protein_id}.json")
+    tmp_path = os.path.join(results_dir, f".{protein_id}.json.tmp")
+    with open(tmp_path, "w") as f:
+        json.dump(result, f)
+    os.replace(tmp_path, final_path)
+
+
+def log_failure(protein_id: str, reason: str, output_dir: str) -> None:
+    """Append a failure entry to the JSONL log."""
+    log_path = os.path.join(output_dir, FAILURES_LOG)
+    entry = json.dumps({
+        "id": protein_id,
+        "reason": reason,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+    with open(log_path, "a") as f:
+        f.write(entry + "\n")
+
+
+def get_completed_ids(output_dir: str) -> set[str]:
+    """Return IDs of proteins that have a completed result JSON."""
+    results_dir = os.path.join(output_dir, RESULTS_SUBDIR)
+    if not os.path.isdir(results_dir):
+        return set()
+    return {
+        p.stem for p in Path(results_dir).glob("*.json")
+        if not p.name.startswith(".")
+    }
+
+
+def cleanup_incomplete_runs(output_dir: str, protein_ids: set[str]) -> int:
+    """Remove intermediate dirs for proteins that lack a result JSON.
+
+    These are from interrupted SWORD2 runs. Returns count of cleaned dirs.
+    """
+    completed = get_completed_ids(output_dir)
+    cleaned = 0
+    for pid in protein_ids:
+        intermediate_dir = os.path.join(output_dir, pid)
+        if os.path.isdir(intermediate_dir) and pid not in completed:
+            shutil.rmtree(intermediate_dir, ignore_errors=True)
+            cleaned += 1
+    return cleaned
+
+
 def run_sword2_on_sequence(
     protein_id: str,
     sequence: str,
@@ -105,20 +157,30 @@ def run_sword2_on_sequence(
     base_dir: str,
     output_dir: str,
     timeout: int = 120,
+    pdb_dir: Optional[str] = None,
 ) -> Optional[dict]:
     """Run SWORD2 on a single protein sequence.
 
-    Creates a temporary PDB-like file from AlphaFold or runs with UniProt ID.
+    Uses a local PDB file if pdb_dir is provided and the file exists,
+    otherwise fetches from AlphaFold via UniProt ID.
 
     Returns parsed result dict or None on failure.
     """
     result_dir = os.path.join(output_dir, protein_id)
 
+    results_dir = os.path.join(output_dir, RESULTS_SUBDIR)
+
     try:
-        # Run SWORD2 with UniProt ID (fetches from AlphaFold)
+        # Prefer local PDB file over network fetch
+        if pdb_dir:
+            local_pdb = os.path.join(pdb_dir, f"AF-{protein_id}-F1-model_v4.pdb")
+            input_args = ["-i", local_pdb] if os.path.exists(local_pdb) else ["-u", protein_id]
+        else:
+            input_args = ["-u", protein_id]
+
         cmd = [
             sword2_binary,
-            "-u", protein_id,
+            *input_args,
             "-o", result_dir,
             "-e",  # disable energies for speed
             "-l",  # disable plots for speed
@@ -134,23 +196,28 @@ def run_sword2_on_sequence(
         )
 
         if proc.returncode != 0:
-            logger.debug(f"SWORD2 failed for {protein_id}: {proc.stderr[:200]}")
+            reason = f"nonzero exit {proc.returncode}: {proc.stderr[:200]}"
+            logger.debug(f"SWORD2 failed for {protein_id}: {reason}")
+            log_failure(protein_id, reason, output_dir)
             return None
 
         # Find and parse the JSON output
         result = parse_sword2_output(protein_id, sequence, result_dir)
+        if result is None:
+            log_failure(protein_id, "no parseable partitionings in SWORD2 output", output_dir)
+            return None
+
+        save_result_atomic(result, results_dir)
         return result
 
     except subprocess.TimeoutExpired:
         logger.debug(f"SWORD2 timed out for {protein_id}")
+        log_failure(protein_id, f"timeout after {timeout}s", output_dir)
         return None
     except Exception as e:
         logger.debug(f"Error processing {protein_id}: {e}")
+        log_failure(protein_id, str(e), output_dir)
         return None
-    finally:
-        # Clean up result directory after parsing to save disk space
-        if os.path.exists(result_dir):
-            shutil.rmtree(result_dir, ignore_errors=True)
 
 
 def parse_contact_matrix(result_dir: str) -> Optional[list[list[int]]]:
@@ -184,8 +251,8 @@ def parse_sword2_output(
     protein_id: str, sequence: str, result_dir: str
 ) -> Optional[dict]:
     """Parse SWORD2 JSON output into training format."""
-    # Find the summary JSON
-    json_files = list(Path(result_dir).rglob("summary.json"))
+    # Find the summary JSON (SWORD2 names it SWORD2_summary.json)
+    json_files = list(Path(result_dir).rglob("SWORD2_summary.json"))
     if not json_files:
         return None
 
@@ -254,13 +321,31 @@ def process_batch(
     output_dir: str,
     num_workers: int = 4,
     timeout: int = 120,
+    pdb_dir: Optional[str] = None,
 ) -> list[dict]:
-    """Process a batch of proteins in parallel."""
+    """Process a batch of proteins in parallel with resume support."""
+    # Resume: skip already-completed proteins
+    completed = get_completed_ids(output_dir)
+    remaining = [p for p in proteins if p["id"] not in completed]
+
+    # Clean up incomplete runs (interrupted mid-SWORD2)
+    remaining_ids = {p["id"] for p in remaining}
+    n_incomplete = cleanup_incomplete_runs(output_dir, remaining_ids)
+
+    logger.info(
+        f"Resuming: {len(completed)} done, {n_incomplete} incomplete (will retry), "
+        f"{len(remaining)} remaining"
+    )
+
+    if not remaining:
+        logger.info("All proteins already processed")
+        return []
+
     results = []
 
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
         futures = {}
-        for prot in proteins:
+        for prot in remaining:
             future = executor.submit(
                 run_sword2_on_sequence,
                 prot["id"],
@@ -269,6 +354,7 @@ def process_batch(
                 base_dir,
                 output_dir,
                 timeout,
+                pdb_dir,
             )
             futures[future] = prot["id"]
 
@@ -286,12 +372,24 @@ def process_batch(
 
 
 def split_and_save(
-    results: list[dict],
+    results_dir: str,
     output_dir: str,
     train_ratio: float = 0.9,
     val_ratio: float = 0.05,
 ) -> None:
-    """Split results into train/val/test and save."""
+    """Load per-protein results from disk, split into train/val/test, and save."""
+    # Load all results from per-protein JSONs (sorted for deterministic ordering)
+    results = []
+    for json_file in sorted(Path(results_dir).glob("*.json")):
+        with open(json_file) as f:
+            results.append(json.load(f))
+
+    if not results:
+        logger.warning("No results to split")
+        return
+
+    logger.info(f"Loaded {len(results)} results for splitting")
+
     np.random.seed(42)
     indices = np.random.permutation(len(results))
 
@@ -328,7 +426,7 @@ def main():
     """Main data generation pipeline."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="Generate SWORD2-DL training data")
+    parser = argparse.ArgumentParser(description="Generate SWORD3 training data")
     parser.add_argument(
         "--swissprot-fasta",
         default="data/swissprot.fasta",
@@ -363,19 +461,19 @@ def main():
     parser.add_argument(
         "--min-seq-len",
         type=int,
-        default=30,
+        default=15,
         help="Minimum sequence length",
     )
     parser.add_argument(
         "--max-seq-len",
         type=int,
-        default=1500,
+        default=2048,
         help="Maximum sequence length",
     )
     parser.add_argument(
         "--num-workers",
         type=int,
-        default=8,
+        default=40,
         help="Number of parallel workers",
     )
     parser.add_argument(
@@ -388,6 +486,21 @@ def main():
         "--download",
         action="store_true",
         help="Download SwissProt if not present",
+    )
+    parser.add_argument(
+        "--pdb-dir",
+        default=None,
+        help="Directory containing local AlphaFold PDB files (AF-{id}-F1-model_v4.pdb). Uses local files instead of downloading.",
+    )
+    parser.add_argument(
+        "--skip-split",
+        action="store_true",
+        help="Skip the final train/val/test split (just run SWORD2 processing)",
+    )
+    parser.add_argument(
+        "--rerun-failures",
+        action="store_true",
+        help="Re-process proteins that previously failed",
     )
     args = parser.parse_args()
 
@@ -415,8 +528,22 @@ def main():
         proteins = proteins[: args.max_proteins]
         logger.info(f"Using first {len(proteins)} proteins")
 
-    # Step 3: Run SWORD2
-    os.makedirs(args.output_dir, exist_ok=True)
+    # Step 3: Set up output directories
+    results_dir = os.path.join(args.output_dir, RESULTS_SUBDIR)
+    os.makedirs(results_dir, exist_ok=True)
+
+    # Clean up stale temp files from interrupted atomic writes
+    for tmp in Path(results_dir).glob(".*.json.tmp"):
+        tmp.unlink()
+
+    # Clear failures log if re-running failures
+    if args.rerun_failures:
+        failures_path = os.path.join(args.output_dir, FAILURES_LOG)
+        if os.path.exists(failures_path):
+            logger.info("Re-running failures: clearing failures log")
+            os.remove(failures_path)
+
+    # Step 4: Run SWORD2 (with resume support)
     results = process_batch(
         proteins,
         sword2_binary=args.sword2_binary,
@@ -424,12 +551,21 @@ def main():
         output_dir=args.output_dir,
         num_workers=args.num_workers,
         timeout=args.timeout,
+        pdb_dir=args.pdb_dir,
     )
-    logger.info(f"Successfully processed {len(results)}/{len(proteins)} proteins")
 
-    # Step 4: Split and save
-    os.makedirs(args.processed_dir, exist_ok=True)
-    split_and_save(results, args.processed_dir)
+    total_on_disk = len(list(Path(results_dir).glob("*.json")))
+    logger.info(
+        f"This run: {len(results)} new results. "
+        f"Total on disk: {total_on_disk}/{len(proteins)} proteins"
+    )
+
+    # Step 5: Split and save
+    if args.skip_split:
+        logger.info("Skipping split (--skip-split)")
+    else:
+        os.makedirs(args.processed_dir, exist_ok=True)
+        split_and_save(results_dir, args.processed_dir)
 
     logger.info("Data generation complete!")
 
