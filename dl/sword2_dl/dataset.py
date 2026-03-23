@@ -26,6 +26,7 @@ Expected directory layout:
 
 import json
 import logging
+import random
 from pathlib import Path
 
 import torch
@@ -66,11 +67,24 @@ class Sword2Dataset(Dataset):
         max_seq_len: int = 1024,
         min_seq_len: int = 30,
         split: str = "train",
+        augment: bool | None = None,
+        crop_prob: float = 0.3,
+        crop_min_ratio: float = 0.5,
+        embedding_dropout_prob: float = 0.1,
+        noise_std: float = 0.01,
+        mask_prob: float = 0.05,
     ):
         self.data_dir = Path(data_dir)
         self.embedding_sources = embedding_sources
         self.max_seq_len = max_seq_len
         self.min_seq_len = min_seq_len
+        self.split = split
+        self.augment = augment if augment is not None else (split == "train")
+        self.crop_prob = crop_prob
+        self.crop_min_ratio = crop_min_ratio
+        self.embedding_dropout_prob = embedding_dropout_prob
+        self.noise_std = noise_std
+        self.mask_prob = mask_prob
 
         # Load manifest
         manifest_file = self.data_dir / f"{split}.json"
@@ -142,6 +156,80 @@ class Sword2Dataset(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
+    def _augment_crop(
+        self, embeddings: torch.Tensor, partitionings: list, contact_pairs: list | None, seq_len: int,
+    ) -> tuple[torch.Tensor, list, list | None, int]:
+        """Random subsequence crop with domain boundary adjustment."""
+        if seq_len < self.min_seq_len * 2:
+            return embeddings, partitionings, contact_pairs, seq_len
+
+        crop_len = random.randint(
+            max(self.min_seq_len, int(seq_len * self.crop_min_ratio)),
+            seq_len,
+        )
+        start = random.randint(0, seq_len - crop_len)
+        end = start + crop_len
+
+        # Crop embeddings
+        embeddings = embeddings[start:end]
+
+        # Adjust partitioning boundaries
+        new_partitionings = []
+        for part in partitionings:
+            new_domains = []
+            for domain_segments in part:
+                new_segments = []
+                for seg_start, seg_end in domain_segments:
+                    # Clip to crop window
+                    ns = max(seg_start, start) - start
+                    ne = min(seg_end, end - 1) - start
+                    if ne >= ns:
+                        new_segments.append((ns, ne))
+                if new_segments:
+                    new_domains.append(new_segments)
+            if new_domains:
+                new_partitionings.append(new_domains)
+
+        # Adjust contact pairs
+        new_contacts = None
+        if contact_pairs is not None:
+            new_contacts = []
+            for ci, cj in contact_pairs:
+                if start <= ci < end and start <= cj < end:
+                    new_contacts.append([ci - start, cj - start])
+            if not new_contacts:
+                new_contacts = None
+
+        return embeddings, new_partitionings, new_contacts, crop_len
+
+    def _augment_embedding_dropout(self, embeddings: torch.Tensor) -> torch.Tensor:
+        """Randomly zero out one PLM embedding channel."""
+        if len(self.embedding_sources) <= 1:
+            return embeddings
+
+        # Pick a random source to zero out
+        offset = 0
+        source_idx = random.randint(0, len(self.embedding_sources) - 1)
+        for i, source in enumerate(self.embedding_sources):
+            if i == source_idx:
+                embeddings[:, offset:offset + source.embed_dim] = 0.0
+                break
+            offset += source.embed_dim
+
+        return embeddings
+
+    def _augment_noise(self, embeddings: torch.Tensor) -> torch.Tensor:
+        """Add Gaussian noise to embeddings."""
+        noise = torch.randn_like(embeddings) * self.noise_std
+        return embeddings + noise
+
+    def _augment_mask(self, embeddings: torch.Tensor) -> torch.Tensor:
+        """Randomly mask residue positions."""
+        L = embeddings.shape[0]
+        mask = torch.rand(L) > self.mask_prob
+        embeddings = embeddings * mask.unsqueeze(1).float()
+        return embeddings
+
     def __getitem__(self, idx: int) -> dict:
         sample = self.samples[idx]
         protein_id = sample["id"]
@@ -173,6 +261,17 @@ class Sword2Dataset(Dataset):
 
         # Parse contact map (list of [i, j] pairs → sparse representation)
         contact_pairs = sample.get("contact_map", None)
+
+        # Apply augmentation (training only)
+        if self.augment:
+            if random.random() < self.crop_prob:
+                embeddings, partitionings, contact_pairs, seq_len = (
+                    self._augment_crop(embeddings, partitionings, contact_pairs, seq_len)
+                )
+            if random.random() < self.embedding_dropout_prob:
+                embeddings = self._augment_embedding_dropout(embeddings)
+            embeddings = self._augment_noise(embeddings)
+            embeddings = self._augment_mask(embeddings)
 
         result = {
             "id": protein_id,

@@ -100,6 +100,12 @@ class TrainConfig:
     num_domains_weight: float = 0.1
     boundary_weight: float = 0.5
     contact_map_weight: float = 0.5
+    dice_weight: float = 0.5  # weight of Dice loss vs BCE in co-membership loss
+    boundary_smooth_width: int = 2  # label smoothing width for boundary targets
+
+    # EMA
+    use_ema: bool = True
+    ema_decay: float = 0.999
 
     # Training
     fp16: bool = True

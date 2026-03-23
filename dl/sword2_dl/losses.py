@@ -109,15 +109,49 @@ class PartitioningLoss(nn.Module):
     """Combined loss for multi-partitioning domain prediction.
 
     Components:
-    1. Co-membership BCE: matched prediction vs ground truth
-    2. Confidence calibration: matched slots should have high confidence
+    1. Co-membership BCE + Dice: matched prediction vs ground truth
+    2. Confidence calibration: quality-aware (uses prediction IoU as target)
     3. Number of domains: cross-entropy on domain count
-    4. Boundary prediction: focal loss on boundary positions
+    4. Boundary prediction: focal loss with label smoothing
     """
 
     def __init__(self, config: TrainConfig):
         super().__init__()
         self.config = config
+        self.dice_weight = getattr(config, "dice_weight", 0.5)
+        self.boundary_smooth_width = getattr(config, "boundary_smooth_width", 2)
+
+    @staticmethod
+    def dice_loss(
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        smooth: float = 1.0,
+    ) -> torch.Tensor:
+        """Dice loss for co-membership matrices."""
+        probs = torch.sigmoid(logits)
+        # Use upper triangle only (symmetric matrix)
+        L = logits.shape[-1]
+        mask = torch.triu(torch.ones(L, L, device=logits.device), diagonal=1)
+        probs_flat = (probs * mask).reshape(-1)
+        targets_flat = (targets * mask).reshape(-1)
+        intersection = (probs_flat * targets_flat).sum()
+        union = probs_flat.sum() + targets_flat.sum()
+        return 1.0 - (2.0 * intersection + smooth) / (union + smooth)
+
+    def smooth_boundary_targets(
+        self, boundaries: torch.Tensor, width: int = 2
+    ) -> torch.Tensor:
+        """Apply label smoothing to boundary targets over +/- width residues."""
+        if width <= 0:
+            return boundaries
+        smoothed = boundaries.clone()
+        L = boundaries.shape[0]
+        for offset in range(1, width + 1):
+            decay = 0.5 ** offset
+            if offset < L:
+                smoothed[offset:] += boundaries[:-offset] * decay
+                smoothed[:-offset] += boundaries[offset:] * decay
+        return smoothed.clamp(0, 1)
 
     def focal_loss(
         self,
@@ -212,16 +246,24 @@ class PartitioningLoss(nn.Module):
             for pred_idx, gt_idx in matches:
                 matched_indices.add(pred_idx)
 
-                # Co-membership BCE
-                co_mem_loss = F.binary_cross_entropy_with_logits(
+                # Co-membership BCE + Dice
+                bce_loss = F.binary_cross_entropy_with_logits(
                     pred_co_mem[pred_idx], gt_co_mems[gt_idx]
                 )
+                dice = self.dice_loss(pred_co_mem[pred_idx], gt_co_mems[gt_idx])
+                co_mem_loss = (1.0 - self.dice_weight) * bce_loss + self.dice_weight * dice
                 total_co_mem_loss = total_co_mem_loss + co_mem_loss
 
-                # Confidence: matched slots should be confident
+                # Quality-aware confidence: use prediction IoU as target
+                with torch.no_grad():
+                    pred_binary = (torch.sigmoid(pred_co_mem[pred_idx]) > 0.5).float()
+                    gt = gt_co_mems[gt_idx]
+                    intersection = (pred_binary * gt).sum()
+                    union = pred_binary.sum() + gt.sum() - intersection
+                    iou = intersection / (union + 1e-8)
+                    conf_target = iou.clamp(0, 1).unsqueeze(0)
                 total_conf_matched_loss = total_conf_matched_loss + F.binary_cross_entropy(
-                    pred_conf[pred_idx].unsqueeze(0),
-                    torch.ones(1, device=device),
+                    pred_conf[pred_idx].unsqueeze(0), conf_target,
                 )
 
                 # Number of domains
@@ -235,11 +277,14 @@ class PartitioningLoss(nn.Module):
                         nd_logits.unsqueeze(0), nd_target.unsqueeze(0)
                     )
 
-                # Boundary prediction
+                # Boundary prediction with label smoothing
                 if "boundary_logits" in outputs:
                     bd_logits = outputs["boundary_logits"][b, pred_idx, :seq_len]
+                    smoothed_targets = self.smooth_boundary_targets(
+                        gt_boundaries[gt_idx], self.boundary_smooth_width
+                    )
                     total_boundary_loss = total_boundary_loss + self.focal_loss(
-                        bd_logits, gt_boundaries[gt_idx]
+                        bd_logits, smoothed_targets
                     )
 
                 num_matches += 1

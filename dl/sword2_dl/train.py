@@ -9,6 +9,7 @@ Features:
 - Periodic evaluation and checkpointing
 """
 
+import copy
 import logging
 import math
 import os
@@ -25,6 +26,54 @@ from .metrics import compute_metrics
 from .model import DomainPartitionNet
 
 logger = logging.getLogger(__name__)
+
+
+class EMA:
+    """Exponential Moving Average of model parameters.
+
+    Maintains a shadow copy of model parameters that is updated with
+    exponential decay at each training step. The EMA parameters
+    typically yield better evaluation performance.
+    """
+
+    def __init__(self, model: nn.Module, decay: float = 0.999):
+        self.decay = decay
+        self.shadow = {
+            name: param.clone().detach()
+            for name, param in model.named_parameters()
+            if param.requires_grad
+        }
+        self.backup = {}
+
+    @torch.no_grad()
+    def update(self, model: nn.Module) -> None:
+        for name, param in model.named_parameters():
+            if param.requires_grad and name in self.shadow:
+                self.shadow[name].mul_(self.decay).add_(
+                    param.data, alpha=1.0 - self.decay
+                )
+
+    def apply_shadow(self, model: nn.Module) -> None:
+        """Replace model parameters with EMA shadow (for evaluation)."""
+        self.backup = {}
+        for name, param in model.named_parameters():
+            if param.requires_grad and name in self.shadow:
+                self.backup[name] = param.data.clone()
+                param.data.copy_(self.shadow[name])
+
+    def restore(self, model: nn.Module) -> None:
+        """Restore original model parameters (after evaluation)."""
+        for name, param in model.named_parameters():
+            if name in self.backup:
+                param.data.copy_(self.backup[name])
+        self.backup = {}
+
+    def state_dict(self) -> dict:
+        return {"decay": self.decay, "shadow": self.shadow}
+
+    def load_state_dict(self, state: dict) -> None:
+        self.decay = state["decay"]
+        self.shadow = state["shadow"]
 
 
 def get_cosine_schedule_with_warmup(
@@ -134,6 +183,12 @@ def train(config: Config) -> None:
 
     scaler = GradScaler() if config.train.fp16 else None
 
+    # EMA
+    ema = None
+    if config.train.use_ema:
+        ema = EMA(model, decay=config.train.ema_decay)
+        logger.info(f"EMA enabled with decay={config.train.ema_decay}")
+
     # W&B
     use_wandb = False
     try:
@@ -162,6 +217,8 @@ def train(config: Config) -> None:
         global_step = checkpoint["global_step"]
         if scaler and "scaler" in checkpoint:
             scaler.load_state_dict(checkpoint["scaler"])
+        if ema is not None and "ema" in checkpoint:
+            ema.load_state_dict(checkpoint["ema"])
         logger.info(f"Resumed from step {global_step}")
 
     # Training loop
@@ -217,6 +274,10 @@ def train(config: Config) -> None:
 
                 optimizer.zero_grad()
 
+                # Update EMA after each optimizer step
+                if ema is not None:
+                    ema.update(model)
+
             # Step scheduler every micro-batch (total_steps=max_steps counts micro-batches)
             scheduler.step()
 
@@ -243,9 +304,13 @@ def train(config: Config) -> None:
                     wandb.log(log_dict, step=global_step)
                 running_loss = 0.0
 
-            # Evaluation
+            # Evaluation (use EMA weights if available)
             if val_loader and global_step % config.train.eval_every == 0:
+                if ema is not None:
+                    ema.apply_shadow(model)
                 val_metrics = evaluate(model, val_loader, criterion, device)
+                if ema is not None:
+                    ema.restore(model)
                 logger.info(
                     f"Step {global_step} | val_loss={val_metrics['loss']:.4f}"
                 )
@@ -260,6 +325,7 @@ def train(config: Config) -> None:
                     save_checkpoint(
                         model, optimizer, scheduler, scaler,
                         global_step, config.train.output_dir, "best",
+                        ema=ema,
                     )
 
             # Checkpointing
@@ -267,11 +333,13 @@ def train(config: Config) -> None:
                 save_checkpoint(
                     model, optimizer, scheduler, scaler,
                     global_step, config.train.output_dir, f"step_{global_step}",
+                    ema=ema,
                 )
 
     # Final save
     save_checkpoint(
-        model, optimizer, scheduler, scaler, global_step, config.train.output_dir, "final"
+        model, optimizer, scheduler, scaler, global_step, config.train.output_dir, "final",
+        ema=ema,
     )
     logger.info(f"Training complete at step {global_step}")
 
@@ -279,7 +347,7 @@ def train(config: Config) -> None:
         wandb.finish()
 
 
-def save_checkpoint(model, optimizer, scheduler, scaler, global_step, output_dir, name):
+def save_checkpoint(model, optimizer, scheduler, scaler, global_step, output_dir, name, ema=None):
     """Save training checkpoint."""
     path = os.path.join(output_dir, f"checkpoint_{name}.pt")
     state = {
@@ -290,6 +358,8 @@ def save_checkpoint(model, optimizer, scheduler, scaler, global_step, output_dir
     }
     if scaler:
         state["scaler"] = scaler.state_dict()
+    if ema is not None:
+        state["ema"] = ema.state_dict()
     torch.save(state, path)
     logger.info(f"Saved checkpoint to {path}")
 
