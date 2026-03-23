@@ -10,3 +10,4 @@ bin/mypmfs-master/scoring_omp
 bin/Peeling/Peeling_omp
 results*/
 target/
+data/
