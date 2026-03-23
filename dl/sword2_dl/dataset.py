@@ -1,5 +1,5 @@
 """
-Dataset and DataLoader for SWORD2-DL training.
+Dataset and DataLoader for SWORD3 training.
 
 Loads pre-computed PLM embeddings from safetensors files and pairs them with
 SWORD2 ground truth partitionings. Supports multiple embedding sources that

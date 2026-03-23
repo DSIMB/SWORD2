@@ -135,7 +135,7 @@ def format_output(
     output = {
         "id": protein_id,
         "sequence_length": seq_len,
-        "method": "SWORD2-DL",
+        "method": "SWORD3",
     }
 
     for i, part in enumerate(partitionings):
@@ -171,7 +171,7 @@ def format_text_output(
 ) -> str:
     """Format predictions as human-readable text (SWORD2-style)."""
     lines = [
-        "SWORD2-DL Domain Prediction",
+        "SWORD3 Domain Prediction",
         f"Protein: {protein_id}",
         f"Sequence length: {seq_len}",
         f"Number of alternative partitionings: {len(partitionings)}",
@@ -201,7 +201,7 @@ def main():
     """Entry point for prediction."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="Predict protein domains with SWORD2-DL")
+    parser = argparse.ArgumentParser(description="Predict protein domains with SWORD3")
     parser.add_argument(
         "--checkpoint", type=str, required=True,
         help="Path to model checkpoint",

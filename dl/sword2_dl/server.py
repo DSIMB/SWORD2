@@ -1,5 +1,5 @@
 """
-Web server for SWORD2-DL predictions.
+Web server for SWORD3 predictions.
 
 Provides a REST API and simple HTML visualization for protein domain
 partitioning from sequence.
@@ -44,7 +44,7 @@ def create_app(checkpoint_path: str, config_path: str | None = None):
     logger.info("Model loaded successfully")
 
     app = FastAPI(
-        title="SWORD2-DL",
+        title="SWORD3",
         description="Protein domain partitioning from sequence",
         version="1.0.0",
     )
@@ -76,7 +76,7 @@ def create_app(checkpoint_path: str, config_path: str | None = None):
 
     @app.get("/health")
     async def health():
-        return {"status": "ok", "model": "sword2-dl"}
+        return {"status": "ok", "model": "sword3"}
 
     @app.post("/predict", response_model=PredictionResponse)
     async def predict(request: PredictionRequest):
@@ -148,7 +148,7 @@ def _get_html_interface() -> str:
     return """<!DOCTYPE html>
 <html>
 <head>
-    <title>SWORD2-DL: Protein Domain Prediction</title>
+    <title>SWORD3: Protein Domain Prediction</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: -apple-system, sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; background: #f5f5f5; }
@@ -172,7 +172,7 @@ def _get_html_interface() -> str:
     </style>
 </head>
 <body>
-    <h1>SWORD2-DL</h1>
+    <h1>SWORD3</h1>
     <p class="subtitle">Predict protein domain partitionings from sequence</p>
 
     <div class="input-section">
@@ -276,7 +276,7 @@ def main():
     """CLI entry point for web server."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="SWORD2-DL Web Server")
+    parser = argparse.ArgumentParser(description="SWORD3 Web Server")
     parser.add_argument("--checkpoint", required=True, help="Model checkpoint")
     parser.add_argument("--config", default=None, help="Config YAML")
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind")

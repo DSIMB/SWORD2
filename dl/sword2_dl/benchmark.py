@@ -1,5 +1,5 @@
 """
-Benchmark evaluation pipeline for SWORD2-DL.
+Benchmark evaluation pipeline for SWORD3.
 
 Evaluates on standard benchmarks (CATH-663, CASP targets) and compares
 with published results from ChainSaw, Merizo, UniDoc, etc.
@@ -319,7 +319,7 @@ def print_benchmark_report(analysis: dict) -> str:
     """Format benchmark analysis as a human-readable report."""
     lines = []
     lines.append("=" * 70)
-    lines.append("SWORD2-DL Benchmark Report")
+    lines.append("SWORD3 Benchmark Report")
     lines.append("=" * 70)
 
     ov = analysis.get("overall", {})
@@ -365,7 +365,7 @@ def main():
     """CLI entry point for benchmarking."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="Benchmark SWORD2-DL")
+    parser = argparse.ArgumentParser(description="Benchmark SWORD3")
     parser.add_argument("--checkpoint", required=True, help="Model checkpoint")
     parser.add_argument("--config", default=None, help="Config YAML")
     parser.add_argument("--cath-file", required=True, help="CATH domain list")

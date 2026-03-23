@@ -25,5 +25,5 @@ data:
 train:
   learning_rate: 3.0e-4
   max_steps: 200000
-  wandb_project: "sword2-dl"
+  wandb_project: "sword3"
   wandb_run_name: "esm2-only"

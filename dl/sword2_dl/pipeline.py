@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 def compute_embeddings_esm2(
     sequences: dict[str, str],
-    model_name: str = "esm2_t33_650M_UR50D",
+    model_name: str = "esm2_t36_3B_UR50D",
     device: torch.device | None = None,
     batch_size: int = 4,
 ) -> dict[str, torch.Tensor]:
@@ -257,7 +257,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="SWORD2-DL: Predict protein domain partitionings from sequence"
+        description="SWORD3: Predict protein domain partitionings from sequence"
     )
     input_group = parser.add_mutually_exclusive_group(required=True)
     input_group.add_argument("--sequence", type=str, help="Raw protein sequence")

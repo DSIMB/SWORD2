@@ -1,4 +1,4 @@
-# SWORD2-DL: Deep Learning Protein Domain Partitioning from Sequence
+# SWORD3: Deep Learning Protein Domain Partitioning from Sequence
 
 A lightweight deep learning model that predicts **alternative protein domain partitionings** from pre-computed protein language model (PLM) embeddings, trained on SWORD2 structural annotations.
 
@@ -87,38 +87,38 @@ Build SWORD2 and run it on SwissProt to generate ground truth partitionings:
 cd .. && cargo build --release && bash install.sh && cd dl
 
 # Generate labels (run SWORD2 on SwissProt proteins)
-sword2-dl-generate --download --num-workers 16
+sword3-generate --download --num-workers 16
 
 # Or a subset for testing
-sword2-dl-generate --download --max-proteins 1000 --num-workers 8
+sword3-generate --download --max-proteins 1000 --num-workers 8
 ```
 
 ### 4. Train
 
 ```bash
 # All 3 PLMs concatenated (default — recommended)
-sword2-dl-train --config configs/default.yaml
+sword3-train --config configs/default.yaml
 
 # ESM-2 only (for ablation)
-sword2-dl-train --config configs/esm2_only.yaml
+sword3-train --config configs/esm2_only.yaml
 
 # Small model for development
-sword2-dl-train --config configs/small.yaml
+sword3-train --config configs/small.yaml
 ```
 
 ### 5. Predict
 
 ```bash
 # From pre-computed embeddings (by protein ID — looks up in configured paths)
-sword2-dl-predict --checkpoint checkpoints/checkpoint_best.pt \
+sword3-predict --checkpoint checkpoints/checkpoint_best.pt \
     --protein-id P12345 --config configs/default.yaml
 
 # From a direct embedding file
-sword2-dl-predict --checkpoint checkpoints/checkpoint_best.pt \
+sword3-predict --checkpoint checkpoints/checkpoint_best.pt \
     --embedding-file my_protein.pt
 
 # Batch prediction
-sword2-dl-predict --checkpoint checkpoints/checkpoint_best.pt \
+sword3-predict --checkpoint checkpoints/checkpoint_best.pt \
     --protein-ids protein_list.txt --output results.json --format json
 ```
 

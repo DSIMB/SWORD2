@@ -1,7 +1,7 @@
 """
 DomainPartitionNet: Lightweight model for protein domain partitioning.
 
-Architecture (no PLM backbone — uses pre-computed frozen embeddings):
+Architecture:
 1. Pre-computed PLM embeddings (one or more, concatenated) as input
 2. Sinusoidal absolute position encoding + single representation transformer
 3. Pair representation via outer sum + triangle updates + dilated 2D convolutions
@@ -652,7 +652,7 @@ class SlotPartitioningHead(nn.Module):
 class DomainPartitionNet(nn.Module):
     """Lightweight model for protein domain partitioning from pre-computed embeddings.
 
-    Takes concatenated PLM embeddings as input (no backbone needed).
+    Takes concatenated PLM embeddings as input.
     Uses slot attention for diverse partitioning prediction and triangle
     updates for pairwise consistency.
     """

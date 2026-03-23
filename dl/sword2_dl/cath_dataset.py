@@ -2,7 +2,7 @@
 CATH domain annotation parser and dataset generator.
 
 Downloads CATH domain annotations and converts them to the same training
-format used by SWORD2-DL, enabling training on gold-standard domain labels.
+format used by SWORD3, enabling training on gold-standard domain labels.
 
 CATH domain list format (cath-domain-list-v4_4_0.txt):
     Each line: DOMAIN_ID CLASS ARCH TOPOL HOMOL SEG_COUNT SEGMENTS
@@ -159,7 +159,7 @@ def cath_to_training_format(
     sequence: str,
     protein_id: str,
 ) -> Optional[dict]:
-    """Convert CATH domain annotations for a chain to SWORD2-DL training format.
+    """Convert CATH domain annotations for a chain to SWORD3 training format.
 
     CATH provides a single domain assignment (one partitioning).
     We create a single partitioning entry.
@@ -211,7 +211,7 @@ def generate_cath_dataset(
     min_seq_len: int = 30,
     max_seq_len: int = 1500,
 ) -> None:
-    """Generate SWORD2-DL training data from CATH annotations.
+    """Generate SWORD3 training data from CATH annotations.
 
     Args:
         cath_file: Path to CATH domain list file.
@@ -304,7 +304,7 @@ def main():
     """CLI entry point for CATH dataset generation."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="Generate CATH training data for SWORD2-DL")
+    parser = argparse.ArgumentParser(description="Generate CATH training data for SWORD3")
     parser.add_argument("--cath-file", required=True, help="CATH domain list file")
     parser.add_argument("--sequences", required=True, help="FASTA file or directory with sequences")
     parser.add_argument("--output-dir", default="data/processed_cath", help="Output directory")

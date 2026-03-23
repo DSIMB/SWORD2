@@ -1,4 +1,4 @@
-"""Configuration dataclasses for SWORD2-DL."""
+"""Configuration dataclasses for SWORD3."""
 
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -79,8 +79,10 @@ class ModelConfig:
 class DataConfig:
     # SWORD2 data generation
     sword2_binary: str = "./target/release/sword2"
-    swissprot_fasta: str = "data/swissprot.fasta"
-    sword2_output_dir: str = "data/sword2_results"
+    swissprot_fasta: str = (
+        "/home/chili/cretin/PROJECTS/embeddings-compression/DATA/swissprot_dataset/all_filt_len_2048.fasta"
+    )
+    sword2_output_dir: str = "data/sword2_swissprot_results"
     processed_data_dir: str = "data/processed"
 
     # Dataset
@@ -131,7 +133,7 @@ class TrainConfig:
     resume_from: Optional[str] = None
 
     # W&B
-    wandb_project: str = "sword2-dl"
+    wandb_project: str = "sword3"
     wandb_run_name: Optional[str] = None
 
 

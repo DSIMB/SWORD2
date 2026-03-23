@@ -2,14 +2,11 @@
 model:
   embedding_sources:
     - name: "esm2_650M"
-      embed_dim: 1280
-      path: "data/embeddings/esm2_650M"
+      embed_dim: 2560
+      path: "/dsimb/iceberg/cretin/DATABASES/SWISSPROT/esm2_t36_3b_ur50d"
     - name: "ankh2_large"
       embed_dim: 1536
-      path: "data/embeddings/ankh2_large"
-    - name: "esmc_600M"
-      embed_dim: 1152
-      path: "data/embeddings/esmc_600M"
+      path: "/dsimb/iceberg/cretin/DATABASES/SWISSPROT/ankh_large"
 
   pair_dim: 128
   pair_num_blocks: 8
@@ -34,12 +31,12 @@ model:
   slot_iters: 3
 
 data:
-  sword2_binary: "./target/release/sword2"
-  swissprot_fasta: "data/swissprot.fasta"
-  sword2_output_dir: "data/sword2_results"
-  processed_data_dir: "data/processed"
+  sword2_binary: "/home/chili/cretin/PROJECTS/SWORD2/target/release/sword2"
+  swissprot_fasta: "/home/chili/cretin/PROJECTS/embeddings-compression/DATA/swissprot_dataset/all_filt_len_2048.fasta"
+  sword2_output_dir: "/home/chili/cretin/PROJECTS/SWORD2/data/sword2_results"
+  processed_data_dir: "/home/chili/cretin/PROJECTS/SWORD2/data/processed"
   max_seq_len: 1024
-  min_seq_len: 30
+  min_seq_len: 15
   min_num_partitionings: 1
   train_split: 0.9
   val_split: 0.05
@@ -68,4 +65,4 @@ train:
   save_every: 5000
   log_every: 50
   output_dir: "checkpoints"
-  wandb_project: "sword2-dl"
+  wandb_project: "sword3"
