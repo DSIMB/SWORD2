@@ -1,12 +1,10 @@
 # Default config: concatenate all 3 PLM embeddings
 model:
   embedding_sources:
-    - name: "esm2_650M"
+    - name: "esm2_t36_3b_ur50d"
       embed_dim: 2560
       path: "/dsimb/iceberg/cretin/DATABASES/SWISSPROT/esm2_t36_3b_ur50d"
-    - name: "ankh2_large"
-      embed_dim: 1536
-      path: "/dsimb/iceberg/cretin/DATABASES/SWISSPROT/ankh_large"
+      filename_template: "{id}_esm2_t36_3b_ur50d_embedding.safetensors"
 
   pair_dim: 128
   pair_num_blocks: 8

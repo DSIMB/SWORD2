@@ -166,6 +166,9 @@ def train(config: Config) -> None:
     if "train" not in loaders:
         raise RuntimeError("No training data found!")
 
+    dataset_sizes = {split: len(loader.dataset) for split, loader in loaders.items()}
+    logger.info(f"Dataset sizes: {dataset_sizes}")
+
     train_loader = loaders["train"]
     val_loader = loaders.get("val")
 
@@ -203,6 +206,13 @@ def train(config: Config) -> None:
                 "train": config.train.__dict__,
             },
         )
+        wandb.config.update({
+            "total_params": total_params,
+            "trainable_params": trainable_params,
+            "device": str(device),
+            "dataset_sizes": dataset_sizes,
+        })
+        wandb.watch(model, log="all", log_freq=config.train.log_every)
         use_wandb = True
     except ImportError:
         logger.info("wandb not available, logging to console only")
@@ -229,6 +239,7 @@ def train(config: Config) -> None:
     epoch = 0
     running_loss = 0.0
     best_val_loss = float("inf")
+    grad_norm = 0.0
 
     while global_step < config.train.max_steps:
         epoch += 1
@@ -262,7 +273,7 @@ def train(config: Config) -> None:
                 if config.train.fp16:
                     scaler.unscale_(optimizer)
 
-                nn.utils.clip_grad_norm_(
+                grad_norm = nn.utils.clip_grad_norm_(
                     model.parameters(), config.train.gradient_clip
                 )
 
@@ -292,7 +303,11 @@ def train(config: Config) -> None:
                     "train/lr": lr,
                     "train/step": global_step,
                     "train/epoch": epoch,
+                    "train/grad_norm": grad_norm.item() if torch.is_tensor(grad_norm) else grad_norm,
                 }
+                if torch.cuda.is_available():
+                    log_dict["system/gpu_memory_mb"] = torch.cuda.max_memory_allocated() / (1024 * 1024)
+                    log_dict["system/gpu_memory_reserved_mb"] = torch.cuda.max_memory_reserved() / (1024 * 1024)
                 for k, v in losses.items():
                     if k != "loss":
                         log_dict[f"train/{k}"] = v.item()
@@ -322,6 +337,9 @@ def train(config: Config) -> None:
 
                 if val_metrics["loss"] < best_val_loss:
                     best_val_loss = val_metrics["loss"]
+                    if use_wandb:
+                        wandb.run.summary["best_val_loss"] = best_val_loss
+                        wandb.run.summary["best_val_step"] = global_step
                     save_checkpoint(
                         model, optimizer, scheduler, scaler,
                         global_step, config.train.output_dir, "best",

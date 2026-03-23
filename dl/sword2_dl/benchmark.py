@@ -167,7 +167,8 @@ def run_benchmark(
         embeddings = []
         skip = False
         for source in embedding_sources:
-            path = Path(source.path) / f"{protein_id}.safetensors"
+            filename = source.filename_template.format(id=protein_id)
+            path = Path(source.path) / filename
             if not path.exists():
                 skip = True
                 break

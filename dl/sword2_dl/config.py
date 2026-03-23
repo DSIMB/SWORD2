@@ -16,9 +16,10 @@ class EmbeddingSource:
     with shape (L, embed_dim).
     """
 
-    name: str = "esm2_650M"
-    embed_dim: int = 1280
-    path: str = "data/embeddings/esm2_650M"  # directory of .safetensors files
+    name: str = "esm2_t36_3b_ur50d"
+    embed_dim: int = 2560
+    path: str = "/dsimb/iceberg/cretin/DATABASES/SWISSPROT/esm2_t36_3b_ur50d"
+    filename_template: str = "{id}.safetensors"  # supports e.g. "{id}_esm2_t36_3b_ur50d_embedding.safetensors"
 
 
 @dataclass
@@ -26,7 +27,7 @@ class ModelConfig:
     # Embedding inputs (list of PLM sources to concatenate)
     embedding_sources: list[dict] = field(
         default_factory=lambda: [
-            {"name": "esm2_650M", "embed_dim": 1280, "path": "data/embeddings/esm2_650M"},
+            {"name": "esm2_t36_3b_ur50d", "embed_dim": 2560, "path": "/dsimb/iceberg/cretin/DATABASES/SWISSPROT/esm2_t36_3b_ur50d", "filename_template": "{id}_esm2_t36_3b_ur50d_embedding.safetensors"},
         ]
     )
 

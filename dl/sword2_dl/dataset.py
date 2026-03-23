@@ -12,15 +12,9 @@ Expected directory layout:
     │   ├── val.json
     │   └── test.json
     └── embeddings/
-        ├── esm2_650M/                  # one directory per PLM
-        │   ├── P12345.safetensors      # key="P12345", value=(L, 1280)
-        │   ├── P67890.safetensors
-        │   └── ...
-        ├── ankh2_large/
-        │   ├── P12345.safetensors      # key="P12345", value=(L, 1536)
-        │   └── ...
-        └── esmc_600M/
-            ├── P12345.safetensors      # key="P12345", value=(L, D)
+        └── esm2_t36_3b_ur50d/          # one directory per PLM
+            ├── P12345_esm2_t36_3b_ur50d_embedding.safetensors  # (L, 2560)
+            ├── P67890_esm2_t36_3b_ur50d_embedding.safetensors
             └── ...
 """
 
@@ -129,7 +123,8 @@ class Sword2Dataset(Dataset):
     def _embeddings_exist(self, protein_id: str) -> bool:
         """Check if safetensors embedding files exist for all sources."""
         for source in self.embedding_sources:
-            path = Path(source.path) / f"{protein_id}.safetensors"
+            filename = source.filename_template.format(id=protein_id)
+            path = Path(source.path) / filename
             if not path.exists():
                 return False
         return True
@@ -139,7 +134,8 @@ class Sword2Dataset(Dataset):
 
         Each safetensors file contains one tensor keyed by the protein ID.
         """
-        path = Path(source.path) / f"{protein_id}.safetensors"
+        filename = source.filename_template.format(id=protein_id)
+        path = Path(source.path) / filename
         tensors = load_safetensors(path)
 
         if protein_id in tensors:

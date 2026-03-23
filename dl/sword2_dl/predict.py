@@ -51,7 +51,8 @@ def load_embeddings(
     """Load and concatenate pre-computed embeddings from safetensors files."""
     embeddings = []
     for source in embedding_sources:
-        path = Path(source.path) / f"{protein_id}.safetensors"
+        filename = source.filename_template.format(id=protein_id)
+        path = Path(source.path) / filename
         tensors = load_safetensors(str(path))
 
         if protein_id in tensors:
