@@ -32,11 +32,19 @@ dev = [
 esm = [
     "fair-esm>=2.0",
 ]
+# Web server dependencies
+server = [
+    "fastapi>=0.100",
+    "uvicorn>=0.22",
+]
 
 [project.scripts]
 sword2-dl-train = "sword2_dl.train:main"
 sword2-dl-predict = "sword2_dl.predict:main"
 sword2-dl-generate = "sword2_dl.generate_data:main"
+sword2-dl-pipeline = "sword2_dl.pipeline:main"
+sword2-dl-benchmark = "sword2_dl.benchmark:main"
+sword2-dl-server = "sword2_dl.server:main"
 
 [tool.setuptools.packages.find]
 include = ["sword2_dl*"]
