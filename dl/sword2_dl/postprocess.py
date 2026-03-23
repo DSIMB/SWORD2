@@ -54,9 +54,9 @@ def extract_partitioning(
     # Spectral clustering
     # Ensure matrix is valid for clustering
     affinity = np.clip(co_membership, 0, 1)
-    np.fill_diagonal(affinity, 1.0)
 
-    # Make sure affinity is symmetric
+    # Make sure affinity is symmetric (don't override diagonal —
+    # let the model's predicted self-similarity be used directly)
     affinity = (affinity + affinity.T) / 2
 
     try:
@@ -97,7 +97,6 @@ def estimate_num_domains(co_membership: np.ndarray, max_domains: int) -> int:
         return 1
 
     affinity = np.clip(co_membership, 0, 1)
-    np.fill_diagonal(affinity, 1.0)
     affinity = (affinity + affinity.T) / 2
 
     # Compute normalized Laplacian eigenvalues

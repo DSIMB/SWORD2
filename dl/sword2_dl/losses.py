@@ -162,11 +162,13 @@ class PartitioningLoss(nn.Module):
         device = outputs["co_membership"].device
 
         total_co_mem_loss = torch.tensor(0.0, device=device)
-        total_conf_loss = torch.tensor(0.0, device=device)
+        total_conf_matched_loss = torch.tensor(0.0, device=device)
+        total_conf_unmatched_loss = torch.tensor(0.0, device=device)
         total_num_dom_loss = torch.tensor(0.0, device=device)
         total_boundary_loss = torch.tensor(0.0, device=device)
         total_contact_loss = torch.tensor(0.0, device=device)
         num_matches = 0
+        num_unmatched = 0
         num_contact_samples = 0
 
         for b in range(B):
@@ -217,7 +219,7 @@ class PartitioningLoss(nn.Module):
                 total_co_mem_loss = total_co_mem_loss + co_mem_loss
 
                 # Confidence: matched slots should be confident
-                total_conf_loss = total_conf_loss + F.binary_cross_entropy(
+                total_conf_matched_loss = total_conf_matched_loss + F.binary_cross_entropy(
                     pred_conf[pred_idx].unsqueeze(0),
                     torch.ones(1, device=device),
                 )
@@ -245,19 +247,25 @@ class PartitioningLoss(nn.Module):
             # Unmatched slots: should have low confidence
             for k in range(K):
                 if k not in matched_indices:
-                    total_conf_loss = total_conf_loss + F.binary_cross_entropy(
+                    total_conf_unmatched_loss = total_conf_unmatched_loss + F.binary_cross_entropy(
                         pred_conf[k].unsqueeze(0),
                         torch.zeros(1, device=device),
                     )
+                    num_unmatched += 1
 
-        # Average over matches
+        # Average over matches (consistent normalization)
         if num_matches > 0:
             total_co_mem_loss = total_co_mem_loss / num_matches
-            total_conf_loss = total_conf_loss / (B * K)
+            total_conf_matched_loss = total_conf_matched_loss / num_matches
             total_num_dom_loss = total_num_dom_loss / num_matches
             total_boundary_loss = total_boundary_loss / num_matches
+        if num_unmatched > 0:
+            total_conf_unmatched_loss = total_conf_unmatched_loss / num_unmatched
         if num_contact_samples > 0:
             total_contact_loss = total_contact_loss / num_contact_samples
+
+        # Combined confidence loss (equal weight to matched and unmatched)
+        total_conf_loss = (total_conf_matched_loss + total_conf_unmatched_loss) / 2
 
         # Weighted sum
         cfg = self.config

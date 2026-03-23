@@ -198,7 +198,7 @@ def train(config: Config) -> None:
                 loss = losses["loss"] / config.train.gradient_accumulation
                 loss.backward()
 
-            running_loss += losses["loss"].item()
+            running_loss += loss.item()  # Use scaled loss (divided by grad accum)
 
             # Gradient accumulation step
             if (global_step + 1) % config.train.gradient_accumulation == 0:
@@ -215,8 +215,10 @@ def train(config: Config) -> None:
                 else:
                     optimizer.step()
 
-                scheduler.step()
                 optimizer.zero_grad()
+
+            # Step scheduler every micro-batch (total_steps=max_steps counts micro-batches)
+            scheduler.step()
 
             global_step += 1
 
