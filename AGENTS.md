@@ -1,5 +1,9 @@
 This file provides guidance to Agents when working with code in this repository.
 
+## Project Context
+
+This project primarily involves Rust development (with some Python). When porting Python to Rust, prefer using existing Rust ecosystem crates rather than direct 1:1 translation of Python logic.
+
 ## Project Overview
 
 SWORD2 (SWift and Optimized Recognition of protein Domains) is a protein domain partitioning tool implemented as a Rust workspace. It produces multiple alternative domain assignments for a given protein structure via hierarchical clustering of Protein Units (PUs).
@@ -75,3 +79,11 @@ Both DSSP and Peeling are now **pure Rust**:
 - The binary auto-detects `bin/` directory relative to its location; use `--base-dir` when running from a non-standard location.
 - Parallelism uses rayon for Rust-side work and OpenMP in the C binaries; controlled via `-x`/`--cpu` flag.
 - Logging via `tracing`; default level is `info` for the `sword2` target. Control with `RUST_LOG` env var.
+
+## Workflow Guidelines
+
+When working on long tasks (porting, migration, research), break work into smaller committed checkpoints so progress isn't lost to rate limits.
+
+## Testing
+
+Always run `cargo check` and `cargo test` after modifying Rust files before considering a task complete.
