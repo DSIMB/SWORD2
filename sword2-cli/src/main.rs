@@ -351,7 +351,7 @@ fn main() -> Result<()> {
 
     // Step 1: Obtain the structure file
     reporter.step("Fetch structure");
-    let (input_path, pdb_id_base) = resolve_input(&cli, &output_dir)?;
+    let (input_path, pdb_id_base, is_fetched) = resolve_input(&cli, &output_dir)?;
     reporter.step_done("Fetch structure", None);
 
     // Step 2: Parse the structure
@@ -399,6 +399,11 @@ fn main() -> Result<()> {
     let results_dir = output_dir.join(&pdb_id_chain);
     std::fs::create_dir_all(&results_dir)?;
 
+    // Delete downloaded PDB from output root (it was only needed for parsing)
+    if is_fetched {
+        let _ = std::fs::remove_file(&input_path);
+    }
+
     tracing::debug!(">>> {} ({} residues)", pdb_id_chain, chain.len());
     tracing::debug!(">>> Using {} cpus", num_threads);
 
@@ -419,21 +424,16 @@ fn main() -> Result<()> {
     // Print header now that we know all details
     reporter.begin(&pdb_id_chain, chain_id, prot_len, num_threads);
 
-    // Write clean PDB file
-    let pdb_chain_file = results_dir.join(format!("{}.pdb", pdb_id_chain));
-    pdb::write_pdb(&cleaned_chain, &pdb_chain_file)?;
-
-    // Remove the .pdb extension for SWORD (SWORD expects file without extension)
-    let pdb_no_ext = results_dir.join(&pdb_id_chain);
-    std::fs::rename(&pdb_chain_file, &pdb_no_ext)?;
+    // Write clean PDB as input.pdb
+    let input_pdb = results_dir.join("input.pdb");
+    pdb::write_pdb(&cleaned_chain, &input_pdb)?;
 
     // Write .num file with sequential 1-based numbering matching the clean PDB.
-    // The Peeling binary uses this to map internal indices to residue numbers.
     // Must exist before run_pipeline.
     {
-        let clean_dir = results_dir.join("PDBs_Clean").join(&pdb_id_chain);
-        std::fs::create_dir_all(&clean_dir)?;
-        let num_file = clean_dir.join(format!("{}.num", pdb_id_chain));
+        let intermediate_dir = results_dir.join("intermediate");
+        std::fs::create_dir_all(&intermediate_dir)?;
+        let num_file = intermediate_dir.join(format!("{}.num", pdb_id_chain));
         let n = original_resnums.len();
         let num_content: Vec<String> = (1..=n).map(|i| i.to_string()).collect();
         std::fs::write(&num_file, num_content.join(" "))?;
@@ -451,12 +451,10 @@ fn main() -> Result<()> {
     };
 
     let (sword_output, sword_results) = sword::run_pipeline(
-        &pdb_no_ext,
+        &input_pdb,
+        &pdb_id_chain,
         &config,
     ).context("Failed to run SWORD pipeline")?;
-
-    // Save raw SWORD output
-    std::fs::write(results_dir.join("sword.txt"), sword_output.join("\n") + "\n")?;
 
     // Step 6: Parse SWORD output (already done in run_pipeline)
     let n_domains = sword_results.domains.first().map_or(0, |p| p.nb_domains);
@@ -485,7 +483,7 @@ fn main() -> Result<()> {
     } else {
         None
     };
-    let pdb_path_str = results_dir.join(&pdb_id_chain).to_string_lossy().to_string();
+    let pdb_path_str = input_pdb.to_string_lossy().to_string();
     let chain_str = chain_id.to_string();
 
     // Pre-compute all unique PU energies in one parallel batch
@@ -535,26 +533,23 @@ fn main() -> Result<()> {
         &sword_results,
         &energies,
         cli.disable_energies,
-        &results_dir.join("SWORD2_summary.txt"),
+        &results_dir.join("summary.txt"),
     )?;
     output::write_sword_summary_json(
         &sword_results,
         &energies,
         cli.disable_energies,
-        &results_dir.join("SWORD2_summary.json"),
+        &results_dir.join("summary.json"),
     )?;
 
     // Step 9: Write Peeling results
     tracing::debug!("Write Peeling results");
     let peeling_num = results_dir
-        .join("PDBs_Clean")
-        .join(&pdb_id_chain)
+        .join("intermediate")
         .join(format!("{}.num", pdb_id_chain));
     let peeling_log = results_dir
-        .join("PDBs_Clean")
-        .join(&pdb_id_chain)
-        .join("Peeling")
-        .join("Peeling.log");
+        .join("intermediate")
+        .join("peeling.log");
 
     if peeling_log.exists() {
         if peeling_num.exists() {
@@ -602,12 +597,12 @@ fn main() -> Result<()> {
 
             peeling::write_peeling_summary(
                 &peeling_results,
-                &results_dir.join("PEELING_summary.txt"),
+                &results_dir.join("peeling.txt"),
                 peeling_energies.as_ref(),
             )?;
             peeling::write_peeling_summary_json(
                 &peeling_results,
-                &results_dir.join("PEELING_summary.json"),
+                &results_dir.join("peeling.json"),
                 peeling_energies.as_ref(),
             )?;
             tracing::debug!("Wrote peeling summary");
@@ -618,16 +613,15 @@ fn main() -> Result<()> {
     // Step 10: Generate plots
     if config.generate_plots {
         reporter.step("Generate plots");
-        let contact_matrix_dir = results_dir.join("Contact_Probability_Matrix");
-        std::fs::create_dir_all(&contact_matrix_dir)?;
+        let plots_dir = results_dir.join("plots");
+        std::fs::create_dir_all(&plots_dir)?;
 
         let proba_mat_file = results_dir
-            .join("PDBs_Clean")
-            .join(&pdb_id_chain)
-            .join("file_proba_contact.mat");
+            .join("intermediate")
+            .join("contact_matrix.mat");
 
         // Domain consistency histogram (SVG)
-        let histogram_output = contact_matrix_dir.join("domain_consistency_histogram.svg");
+        let histogram_output = plots_dir.join("domain_histogram.svg");
         let domain_counts = plot::count_domains(&sword_results.domains);
         if let Err(err) = plot::write_domain_histogram(
             &domain_counts,
@@ -655,7 +649,7 @@ fn main() -> Result<()> {
                             i,
                             partition,
                             &pu_colors,
-                            &contact_matrix_dir,
+                            &plots_dir,
                         ) {
                             tracing::warn!(
                                 error = %err,
@@ -683,7 +677,7 @@ fn main() -> Result<()> {
         sword::junctions::calculate_junction_consistencies(&sword_output);
     if !junctions_content.is_empty() {
         std::fs::write(
-            results_dir.join("junctions_consistencies.txt"),
+            results_dir.join("junctions.txt"),
             &junctions_content,
         )?;
     }
@@ -691,34 +685,14 @@ fn main() -> Result<()> {
     // Step 12: Write mapping file
     pdb::writer::write_mapping_file(
         &original_resnums,
-        &results_dir.join("mapping_auth_resnums.txt"),
+        &results_dir.join("residue_mapping.txt"),
     )?;
 
-    // Step 13: Clean and prepare results
-    tracing::debug!("Clean and prepare results");
+    // Step 13: Clean up legacy artifacts
+    tracing::debug!("Clean up results");
     let pdbs_stand = results_dir.join("PDBs_Stand");
     if pdbs_stand.exists() {
         let _ = std::fs::remove_dir_all(&pdbs_stand);
-    }
-
-    let pdbs_clean = results_dir.join("PDBs_Clean");
-    let sword_dir_dest = results_dir.join("SWORD");
-    if pdbs_clean.exists() {
-        let _ = std::fs::rename(&pdbs_clean, &sword_dir_dest);
-    }
-
-    // Move junctions file into Junctions/ directory
-    let junctions_dir = results_dir.join("Junctions");
-    let junctions_file = results_dir.join("junctions_consistencies.txt");
-    if junctions_file.exists() {
-        std::fs::create_dir_all(&junctions_dir)?;
-        let _ = std::fs::rename(&junctions_file, junctions_dir.join("junctions_consistencies.txt"));
-    }
-
-    // Move Peeling directory
-    let peeling_dir_glob = results_dir.join("SWORD").join(&pdb_id_chain).join("Peeling");
-    if peeling_dir_glob.exists() {
-        let _ = std::fs::rename(&peeling_dir_glob, results_dir.join("Protein_Units"));
     }
     reporter.step_done("Junctions & cleanup", None);
 
@@ -728,24 +702,24 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Resolve the input source to a file path and base name.
-fn resolve_input(cli: &Cli, output_dir: &PathBuf) -> Result<(PathBuf, String)> {
+/// Resolve the input source to a file path, base name, and whether it was fetched.
+fn resolve_input(cli: &Cli, output_dir: &PathBuf) -> Result<(PathBuf, String, bool)> {
     if let Some(ref input_file) = cli.input_file {
         let base = input_file
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("unknown")
             .to_string();
-        Ok((input_file.clone(), base))
+        Ok((input_file.clone(), base, false))
     } else if let Some(ref uniprot_id) = cli.uniprot_id {
         let path = fetch::fetch_alphafold(uniprot_id, output_dir)?;
-        Ok((path, uniprot_id.clone()))
+        Ok((path, uniprot_id.clone(), true))
     } else if let Some(ref mgnify_id) = cli.mgnify_id {
         let path = fetch::fetch_esm(mgnify_id, output_dir)?;
-        Ok((path, mgnify_id.clone()))
+        Ok((path, mgnify_id.clone(), true))
     } else if let Some(ref pdb_id) = cli.pdb_id {
         let path = fetch::fetch_pdb(pdb_id, output_dir)?;
-        Ok((path, pdb_id.to_uppercase()))
+        Ok((path, pdb_id.to_uppercase(), true))
     } else {
         anyhow::bail!("No input source specified");
     }

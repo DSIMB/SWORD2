@@ -85,38 +85,32 @@ pub struct SwordPartition {
 /// structured SwordResults.
 pub fn run_pipeline(
     pdb_path: &Path,
+    pdb_name: &str,
     config: &SwordConfig,
 ) -> Result<(Vec<String>, SwordResults)> {
-    let pdb_name = pdb_path
-        .file_name()
-        .and_then(|f| f.to_str())
-        .unwrap_or("unknown");
-
     let results_dir = PathBuf::from(&config.output_dir);
-    let clean_dir = results_dir.join("PDBs_Clean").join(pdb_name);
-    std::fs::create_dir_all(&clean_dir)?;
+    let intermediate_dir = results_dir.join("intermediate");
+    std::fs::create_dir_all(&intermediate_dir)?;
 
-    // Copy PDB file to PDBs_Clean structure (SWORD convention)
+    // Copy PDB file to intermediate directory
     let pdb_file_src = pdb_path.to_path_buf();
-    let pdb_file_dst = clean_dir.join(format!("{}.pdb", pdb_name));
+    let pdb_file_dst = intermediate_dir.join(format!("{}.pdb", pdb_name));
     if pdb_file_src.exists() && !pdb_file_dst.exists() {
         std::fs::copy(&pdb_file_src, &pdb_file_dst)?;
     }
 
     // Step 1: Run DSSP (pure Rust)
-    let dssp_file = clean_dir.join(format!("{}.dssp", pdb_name));
+    let dssp_file = intermediate_dir.join(format!("{}.dssp", pdb_name));
     if !dssp_file.exists() {
         tracing::debug!("Running DSSP on {}", pdb_file_dst.display());
-        let s2d_file = clean_dir.join(format!("{}.s2d", pdb_name));
+        let s2d_file = intermediate_dir.join(format!("{}.s2d", pdb_name));
         crate::dssp::run_dssp(&pdb_file_dst, &dssp_file, &s2d_file, pdb_name)?;
     }
 
     // Step 2: Run Peeling (native Rust)
-    let pu_delineation_file = clean_dir.join("file_pu_delineation.mtx");
+    let pu_delineation_file = intermediate_dir.join("pu_delineation.mtx");
     let peeling_output = if !pu_delineation_file.exists() {
         tracing::debug!("Running Peeling on {}", pdb_file_dst.display());
-        let peeling_dir = clean_dir.join("Peeling");
-        std::fs::create_dir_all(&peeling_dir)?;
 
         // Extract CA coordinates from the clean PDB
         let pdb_struct = crate::pdb::parse_pdb(&pdb_file_dst)
@@ -137,10 +131,10 @@ pub fn run_pipeline(
         let output = crate::peeling::run_peeling(&ca_coords, &dssp_file, &peeling_config)?;
 
         // Write files for downstream compatibility (plots, debugging)
-        output.write_peeling_log(&peeling_dir.join("Peeling.log"))?;
-        output.write_pu_contact_matrix(&clean_dir.join("file_matrix_pu_contact.mtx"))?;
+        output.write_peeling_log(&intermediate_dir.join("peeling.log"))?;
+        output.write_pu_contact_matrix(&intermediate_dir.join("pu_contact.mtx"))?;
         output.write_pu_delineation(&pu_delineation_file)?;
-        output.contact_matrix.write_matrix_file(&clean_dir.join("file_proba_contact.mat"))?;
+        output.contact_matrix.write_matrix_file(&intermediate_dir.join("contact_matrix.mat"))?;
 
         Some(output)
     } else {
@@ -150,7 +144,7 @@ pub fn run_pipeline(
     // Step 3: Prepare .num file (residue number mapping)
     // The .num file should already exist from main.rs clean_chain_for_sword
     // but if not, create a default one from the PDB
-    let num_file = clean_dir.join(format!("{}.num", pdb_name));
+    let num_file = intermediate_dir.join(format!("{}.num", pdb_name));
     if !num_file.exists() {
         // Create a simple 1-based num file
         let pdb_content = std::fs::read_to_string(&pdb_file_dst).unwrap_or_default();
@@ -218,7 +212,7 @@ pub fn run_pipeline(
             &po.final_pu_delineation,
         )
     } else {
-        let contact_matrix_file = clean_dir.join("file_matrix_pu_contact.mtx");
+        let contact_matrix_file = intermediate_dir.join("pu_contact.mtx");
         compute_measure::compute_measure(
             &contact_matrix_file,
             &pu_delineation_file,
@@ -240,7 +234,7 @@ pub fn run_pipeline(
     // First ParseMeasure pass — get all relevant measures
     let relevant_measure = parse_measure::parse_measure(
         &measure_strings,
-        &results_dir.join("PDBs_Clean").to_string_lossy(),
+        &results_dir.join("intermediate").to_string_lossy(),
         pdb_name,
         false,
         0,
@@ -276,7 +270,7 @@ pub fn run_pipeline(
 
     let relevant_measure2 = parse_measure::parse_measure(
         &measure_strings,
-        &results_dir.join("PDBs_Clean").to_string_lossy(),
+        &results_dir.join("intermediate").to_string_lossy(),
         pdb_name,
         true,
         n_dom,

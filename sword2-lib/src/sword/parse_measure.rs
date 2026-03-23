@@ -91,7 +91,6 @@ fn parse_measure_with_diff(
     // Pre-load CA residue numbers once for all Jones overlap checks
     let pdb_base = &pdb_id[..pdb_id.len().saturating_sub(3)];
     let pdb_file_path = std::path::Path::new(dir_data)
-        .join(pdb_base)
         .join(format!("{}.pdb", pdb_base));
     let cached_residue_nums = compute_jones::read_ca_residue_numbers(&pdb_file_path);
 

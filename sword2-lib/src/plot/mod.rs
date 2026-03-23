@@ -225,10 +225,7 @@ pub fn generate_alternative_plots(
             alt_idx
         )
     };
-    let alt_path = output_dir.join(format!(
-        "contact_probability_matrix_alternative_{}.png",
-        alt_idx
-    ));
+    let alt_path = output_dir.join(format!("alt{}.png", alt_idx));
     write_contact_matrix_png(matrix, n, &alt_title, &all_pus, &alt_path, true)?;
 
     // 2) Domain-level plots
@@ -252,10 +249,7 @@ pub fn generate_alternative_plots(
                 j + 1, alt_idx
             )
         };
-        let dom_path = output_dir.join(format!(
-            "contact_probability_matrix_alternative_{}_domain_{}.png",
-            alt_idx, j
-        ));
+        let dom_path = output_dir.join(format!("alt{}_dom{}.png", alt_idx, j));
         write_contact_matrix_png(matrix, n, &dom_title, &dom_pus, &dom_path, true)?;
 
         // 3) PU-level plots
@@ -275,7 +269,7 @@ pub fn generate_alternative_plots(
                 )
             };
             let pu_path = output_dir.join(format!(
-                "contact_probability_matrix_alternative_{}_domain_{}_pu_{}_{}.png",
+                "alt{}_dom{}_pu_{}_{}.png",
                 alt_idx, j, start, end
             ));
             write_contact_matrix_png(matrix, n, &pu_title, &pu_vec, &pu_path, false)?;

@@ -64,7 +64,7 @@ pub fn compute_jones_with_cache(
         cached
     } else {
         let pdb_base = &pdb_name[..pdb_name.len().saturating_sub(3)];
-        let pdb_file_path = Path::new(dir_data).join(pdb_base).join(format!("{}.pdb", pdb_base));
+        let pdb_file_path = Path::new(dir_data).join(format!("{}.pdb", pdb_base));
         tab_num_aa = read_ca_residue_numbers(&pdb_file_path);
         &tab_num_aa
     };
