@@ -15,5 +15,6 @@
         "**/dl/data/**": true,
         "**/target/**": true,
         "**/results*/**": true
-    }
+    },
+    "python.defaultInterpreterPath": "python"
 }
