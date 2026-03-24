@@ -1,0 +1,44 @@
+{
+  "os": "Linux-6.8.0-94-generic-x86_64-with-glibc2.39",
+  "python": "CPython 3.12.8",
+  "startedAt": "2026-03-24T11:00:41.787845Z",
+  "args": [
+    "--config",
+    "configs/default.yaml"
+  ],
+  "program": "/home/chili/cretin/PROJECTS/SWORD2/dl/.venv/bin/sword3-train",
+  "codePath": "dl/.venv/bin/sword3-train",
+  "codePathLocal": ".venv/bin/sword3-train",
+  "git": {
+    "remote": "git@github.com:DSIMB/SWORD2.git",
+    "commit": "14c50beb66bb681877b41594f2d6a8833974e1a2"
+  },
+  "email": "gabrielcretin@gmail.com",
+  "root": "/home/chili/cretin/PROJECTS/SWORD2/dl",
+  "host": "chili",
+  "executable": "/home/chili/cretin/PROJECTS/SWORD2/dl/.venv/bin/python3",
+  "cpu_count": 20,
+  "cpu_count_logical": 40,
+  "gpu": "NVIDIA RTX A5000",
+  "gpu_count": 1,
+  "disk": {
+    "/": {
+      "total": "1006450962432",
+      "used": "269985861632"
+    }
+  },
+  "memory": {
+    "total": "67148632064"
+  },
+  "gpu_nvidia": [
+    {
+      "name": "NVIDIA RTX A5000",
+      "memoryTotal": "25757220864",
+      "cudaCores": 8192,
+      "architecture": "Ampere",
+      "uuid": "GPU-156c72b9-9085-eb44-fb9f-8ba61a2000cc"
+    }
+  ],
+  "cudaVersion": "13.0",
+  "writerId": "rlsnd0oyc4rz1125wdwiezr7x6whgjzk"
+}

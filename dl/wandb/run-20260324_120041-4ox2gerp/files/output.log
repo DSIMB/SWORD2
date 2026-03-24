@@ -1,0 +1,45 @@
+/home/chili/cretin/PROJECTS/SWORD2/dl/sword2_dl/train.py:257: FutureWarning: `torch.cuda.amp.autocast(args...)` is deprecated. Please use `torch.amp.autocast('cuda', args...)` instead.
+  with autocast(dtype=torch.float16):
+Traceback (most recent call last):
+  File "/home/chili/cretin/PROJECTS/SWORD2/dl/.venv/bin/sword3-train", line 10, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/home/chili/cretin/PROJECTS/SWORD2/dl/sword2_dl/train.py", line 407, in main
+    train(config)
+  File "/home/chili/cretin/PROJECTS/SWORD2/dl/sword2_dl/train.py", line 258, in train
+    outputs = model(embeddings, mask)
+              ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chili/cretin/PROJECTS/SWORD2/dl/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chili/cretin/PROJECTS/SWORD2/dl/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1882, in _call_impl
+    return inner()
+           ^^^^^^^
+  File "/home/chili/cretin/PROJECTS/SWORD2/dl/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1830, in inner
+    result = forward_call(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chili/cretin/PROJECTS/SWORD2/dl/sword2_dl/model.py", line 752, in forward
+    pair = self.pair_module(single, mask)  # (B, pair_dim, L, L)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chili/cretin/PROJECTS/SWORD2/dl/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chili/cretin/PROJECTS/SWORD2/dl/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chili/cretin/PROJECTS/SWORD2/dl/sword2_dl/model.py", line 404, in forward
+    pair_flat = pair_flat + self.row_attn(
+                            ^^^^^^^^^^^^^^
+  File "/home/chili/cretin/PROJECTS/SWORD2/dl/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chili/cretin/PROJECTS/SWORD2/dl/.venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chili/cretin/PROJECTS/SWORD2/dl/.venv/lib/python3.12/site-packages/torch/nn/modules/activation.py", line 1491, in forward
+    attn_output, attn_output_weights = F.multi_head_attention_forward(
+                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/chili/cretin/PROJECTS/SWORD2/dl/.venv/lib/python3.12/site-packages/torch/nn/functional.py", line 6589, in multi_head_attention_forward
+    attn_output_weights = torch.bmm(q_scaled, k.transpose(-2, -1))
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 39.52 GiB. GPU 0 has a total capacity of 23.55 GiB of which 601.19 MiB is free. Including non-PyTorch memory, this process has 22.92 GiB memory in use. Of the allocated memory 22.41 GiB is allocated by PyTorch, and 263.28 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
