@@ -1,0 +1,19 @@
+{
+    "files.watcherExclude": {
+        "**/data/**": true,
+        "**/dl/data/**": true,
+        "**/target/**": true,
+        "**/results*/**": true
+    },
+    "files.exclude": {
+        "**/data/**": true,
+        "**/dl/data/**": true,
+        "**/target/**": true
+    },
+    "search.exclude": {
+        "**/data/**": true,
+        "**/dl/data/**": true,
+        "**/target/**": true,
+        "**/results*/**": true
+    }
+}
