@@ -107,6 +107,12 @@ impl ContactMatrix {
         self.n
     }
 
+    /// Whether the matrix is empty.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.n == 0
+    }
+
     /// Get contact probability between residues i and j (0-indexed).
     #[inline]
     pub fn get(&self, i: usize, j: usize) -> f64 {
@@ -118,16 +124,20 @@ impl ContactMatrix {
     /// All indices are 0-based. Uses the cumulative sum table for O(1) computation.
     /// Matches the C `get_rectangle_sum()` function exactly.
     #[inline]
-    pub fn rectangle_sum(&self, row_start: usize, col_start: usize, row_end: usize, col_end: usize) -> f64 {
+    pub fn rectangle_sum(
+        &self,
+        row_start: usize,
+        col_start: usize,
+        row_end: usize,
+        col_end: usize,
+    ) -> f64 {
         // Convert to 1-based indices into the cumulative sum table
         let r1 = row_start; // cum index: row_start (before +1, this is the "start-1")
         let c1 = col_start;
         let r2 = row_end + 1;
         let c2 = col_end + 1;
         let cn = self.n + 1;
-        self.cum[r2 * cn + c2]
-            - self.cum[r1 * cn + c2]
-            - self.cum[r2 * cn + c1]
+        self.cum[r2 * cn + c2] - self.cum[r1 * cn + c2] - self.cum[r2 * cn + c1]
             + self.cum[r1 * cn + c1]
     }
 
@@ -158,11 +168,7 @@ mod tests {
     #[test]
     fn test_contact_matrix_small() {
         // Three residues at known positions
-        let coords = vec![
-            [0.0, 0.0, 0.0],
-            [3.0, 0.0, 0.0],
-            [10.0, 0.0, 0.0],
-        ];
+        let coords = vec![[0.0, 0.0, 0.0], [3.0, 0.0, 0.0], [10.0, 0.0, 0.0]];
         let mat = ContactMatrix::from_ca_coords(&coords, 6.0, 1.5);
         assert_eq!(mat.len(), 3);
 

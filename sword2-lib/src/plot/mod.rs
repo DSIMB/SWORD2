@@ -8,6 +8,7 @@
 //! 2. Domain-level: one domain's PU rectangles
 //! 3. PU-level: single PU rectangle
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -70,17 +71,17 @@ pub const DOMAIN_COLORS: &[(u8, u8, u8)] = &[
 
 /// RdPu colormap approximation (11 stops interpolated from matplotlib).
 const RDPU_STOPS: &[(f64, u8, u8, u8)] = &[
-    (0.0,   255, 247, 243),
-    (0.1,   253, 224, 221),
-    (0.2,   252, 197, 192),
-    (0.3,   250, 159, 181),
-    (0.4,   247, 104, 161),
-    (0.5,   221,  52, 151),
-    (0.6,   174,   1, 126),
-    (0.7,   122,   1, 119),
-    (0.8,    73,   0, 106),
-    (0.9,    47,   0,  79),
-    (1.0,    47,   0,  79),
+    (0.0, 255, 247, 243),
+    (0.1, 253, 224, 221),
+    (0.2, 252, 197, 192),
+    (0.3, 250, 159, 181),
+    (0.4, 247, 104, 161),
+    (0.5, 221, 52, 151),
+    (0.6, 174, 1, 126),
+    (0.7, 122, 1, 119),
+    (0.8, 73, 0, 106),
+    (0.9, 47, 0, 79),
+    (1.0, 47, 0, 79),
 ];
 
 /// Interpolate a color from the RdPu colormap.
@@ -90,7 +91,11 @@ fn rdpu_color(t: f64) -> (u8, u8, u8) {
         let (t0, r0, g0, b0) = window[0];
         let (t1, r1, g1, b1) = window[1];
         if t >= t0 && t <= t1 {
-            let frac = if (t1 - t0).abs() < 1e-12 { 0.0 } else { (t - t0) / (t1 - t0) };
+            let frac = if (t1 - t0).abs() < 1e-12 {
+                0.0
+            } else {
+                (t - t0) / (t1 - t0)
+            };
             let r = (r0 as f64 + frac * (r1 as f64 - r0 as f64)) as u8;
             let g = (g0 as f64 + frac * (g1 as f64 - g0 as f64)) as u8;
             let b = (b0 as f64 + frac * (b1 as f64 - b0 as f64)) as u8;
@@ -118,7 +123,11 @@ pub fn load_contact_matrix(path: &Path) -> Result<Array2<f64>> {
                 .map(str::parse::<f64>)
                 .collect::<std::result::Result<_, _>>()
                 .ok()?;
-            if row.is_empty() { None } else { Some(row) }
+            if row.is_empty() {
+                None
+            } else {
+                Some(row)
+            }
         })
         .collect();
 
@@ -158,8 +167,8 @@ pub fn assign_pu_colors(
     for part in partitions {
         for domain in &part.boundaries {
             for &(start, end) in domain {
-                if !pu_colors.contains_key(&(start, end)) {
-                    pu_colors.insert((start, end), PU_COLORS[color_idx % PU_COLORS.len()]);
+                if let Entry::Vacant(e) = pu_colors.entry((start, end)) {
+                    e.insert(PU_COLORS[color_idx % PU_COLORS.len()]);
                     color_idx += 1;
                 }
             }
@@ -182,8 +191,8 @@ pub fn assign_domain_colors(
         for domain in &part.boundaries {
             let mut sorted = domain.clone();
             sorted.sort_by_key(|&(s, _)| s);
-            if !dom_colors.contains_key(&sorted) {
-                dom_colors.insert(sorted, DOMAIN_COLORS[color_idx % DOMAIN_COLORS.len()]);
+            if let Entry::Vacant(e) = dom_colors.entry(sorted) {
+                e.insert(DOMAIN_COLORS[color_idx % DOMAIN_COLORS.len()]);
                 color_idx += 1;
             }
         }
@@ -211,7 +220,10 @@ pub fn generate_alternative_plots(
     let mut all_pus: Vec<ColoredPu> = Vec::new();
     for domain in &partition.boundaries {
         for &(start, end) in domain {
-            let color = pu_colors.get(&(start, end)).copied().unwrap_or((200, 200, 200));
+            let color = pu_colors
+                .get(&(start, end))
+                .copied()
+                .unwrap_or((200, 200, 200));
             all_pus.push(ColoredPu { start, end, color });
         }
     }
@@ -233,7 +245,10 @@ pub fn generate_alternative_plots(
         let dom_pus: Vec<ColoredPu> = domain
             .iter()
             .map(|&(start, end)| {
-                let color = pu_colors.get(&(start, end)).copied().unwrap_or((200, 200, 200));
+                let color = pu_colors
+                    .get(&(start, end))
+                    .copied()
+                    .unwrap_or((200, 200, 200));
                 ColoredPu { start, end, color }
             })
             .collect();
@@ -246,7 +261,8 @@ pub fn generate_alternative_plots(
         } else {
             format!(
                 "Contact Probability Map of the domain {}\nof the alternative partition n\u{b0}{}",
-                j + 1, alt_idx
+                j + 1,
+                alt_idx
             )
         };
         let dom_path = output_dir.join(format!("alt{}_dom{}.png", alt_idx, j));
@@ -254,7 +270,10 @@ pub fn generate_alternative_plots(
 
         // 3) PU-level plots
         for &(start, end) in domain {
-            let color = pu_colors.get(&(start, end)).copied().unwrap_or((200, 200, 200));
+            let color = pu_colors
+                .get(&(start, end))
+                .copied()
+                .unwrap_or((200, 200, 200));
             let pu_vec = vec![ColoredPu { start, end, color }];
 
             let pu_title = if alt_idx == 0 {
@@ -268,10 +287,8 @@ pub fn generate_alternative_plots(
                     start, end, j + 1, alt_idx
                 )
             };
-            let pu_path = output_dir.join(format!(
-                "alt{}_dom{}_pu_{}_{}.png",
-                alt_idx, j, start, end
-            ));
+            let pu_path =
+                output_dir.join(format!("alt{}_dom{}_pu_{}_{}.png", alt_idx, j, start, end));
             write_contact_matrix_png(matrix, n, &pu_title, &pu_vec, &pu_path, false)?;
         }
     }
@@ -290,7 +307,11 @@ fn write_contact_matrix_png(
 ) -> Result<()> {
     // Matching original matplotlib: figsize=(6,9) @ 150 dpi = 900×1350 for large,
     // figsize=(5,6.5) @ 150 dpi = 750×975 for PU-level
-    let (width, height) = if large_format { (900u32, 1350u32) } else { (750u32, 975u32) };
+    let (width, height) = if large_format {
+        (900u32, 1350u32)
+    } else {
+        (750u32, 975u32)
+    };
     let title_font_size = if large_format { 24 } else { 22 };
     let axis_font_size = if large_format { 18 } else { 16 };
     let axis_desc_font_size = if large_format { 20 } else { 18 };
@@ -393,11 +414,18 @@ fn write_contact_matrix_png(
     let row_height = 28;
 
     // Legend title
-    let legend_title = if pus.len() == 1 { "Protein Unit" } else { "Protein Units" };
+    let legend_title = if pus.len() == 1 {
+        "Protein Unit"
+    } else {
+        "Protein Units"
+    };
     legend_area.draw_text(
         legend_title,
         &TextStyle::from(("sans-serif", legend_title_font_size).into_font()).color(&BLACK),
-        (width as i32 / 2 - (legend_title.len() as i32 * 4), legend_y_start),
+        (
+            width as i32 / 2 - (legend_title.len() as i32 * 4),
+            legend_y_start,
+        ),
     )?;
 
     for (i, pu) in pus.iter().enumerate() {
@@ -493,9 +521,7 @@ pub fn write_domain_histogram(domain_counts: &[DomainCount], output_path: &str) 
 }
 
 /// Count unique domains across all partitionings and assign colors.
-pub fn count_domains(
-    partitions: &[crate::sword::SwordPartition],
-) -> Vec<DomainCount> {
+pub fn count_domains(partitions: &[crate::sword::SwordPartition]) -> Vec<DomainCount> {
     let mut domain_freq: HashMap<Vec<(i32, i32)>, usize> = HashMap::new();
 
     for part in partitions {

@@ -10,7 +10,10 @@ use anyhow::{Context, Result};
 use rayon::prelude::*;
 use regex::Regex;
 
-static ENERGY_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^Pseudo-energy = (.+)$").unwrap());
+type WorkItem = (usize, usize, Vec<(i32, i32)>);
+
+static ENERGY_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^Pseudo-energy = (.+)$").unwrap());
 static ZSCORE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^Z-score = (.+)$").unwrap());
 
 /// Result of an energy calculation for a domain or PU.
@@ -140,7 +143,7 @@ pub fn calculate_all_energies(
     let results = Mutex::new(HashMap::new());
 
     // Collect all work items
-    let mut work_items: Vec<(usize, usize, Vec<(i32, i32)>)> = Vec::new();
+    let mut work_items: Vec<WorkItem> = Vec::new();
     for (i, part) in partitions.iter().enumerate() {
         for (j, domain) in part.boundaries.iter().enumerate() {
             work_items.push((i, j, domain.clone()));
@@ -159,9 +162,7 @@ pub fn calculate_all_energies(
             }
             dom_residues.push_str(&pu_res_list);
 
-            if let Ok(pu_result) =
-                get_energy_and_z_score(config, pdb_path, Some(&pu_res_list))
-            {
+            if let Ok(pu_result) = get_energy_and_z_score(config, pdb_path, Some(&pu_res_list)) {
                 results
                     .lock()
                     .unwrap()
@@ -170,9 +171,7 @@ pub fn calculate_all_energies(
         }
 
         // Calculate energy for the entire domain
-        if let Ok(dom_result) =
-            get_energy_and_z_score(config, pdb_path, Some(&dom_residues))
-        {
+        if let Ok(dom_result) = get_energy_and_z_score(config, pdb_path, Some(&dom_residues)) {
             results
                 .lock()
                 .unwrap()
@@ -200,7 +199,7 @@ pub fn calculate_all_energies_with_cache(
     let results = Mutex::new(HashMap::new());
 
     // Collect all work items
-    let mut work_items: Vec<(usize, usize, Vec<(i32, i32)>)> = Vec::new();
+    let mut work_items: Vec<WorkItem> = Vec::new();
     for (i, part) in partitions.iter().enumerate() {
         for (j, domain) in part.boundaries.iter().enumerate() {
             work_items.push((i, j, domain.clone()));
@@ -228,9 +227,7 @@ pub fn calculate_all_energies_with_cache(
         }
 
         // Calculate energy for the entire domain (not cached — unique per partition)
-        if let Ok(dom_result) =
-            get_energy_and_z_score(config, pdb_path, Some(&dom_residues))
-        {
+        if let Ok(dom_result) = get_energy_and_z_score(config, pdb_path, Some(&dom_residues)) {
             results
                 .lock()
                 .unwrap()
@@ -261,7 +258,10 @@ pub fn compute_pu_energies_batch(
     chain: &str,
     pu_ranges: &[(i32, i32)],
 ) -> std::collections::HashMap<(i32, i32), EnergyResult> {
-    tracing::debug!("Computing energies for {} unique PU ranges", pu_ranges.len());
+    tracing::debug!(
+        "Computing energies for {} unique PU ranges",
+        pu_ranges.len()
+    );
     pu_ranges
         .par_iter()
         .filter_map(|&(start, end)| {

@@ -54,9 +54,10 @@ pub struct BackboneResidue {
 impl BackboneResidue {
     /// Create a chain break marker residue.
     pub fn chain_break() -> Self {
-        let mut res = Self::default();
-        res.aa = '!';
-        res
+        Self {
+            aa: '!',
+            ..Self::default()
+        }
     }
 }
 
@@ -85,21 +86,12 @@ impl Default for BackboneResidue {
 }
 
 /// A hydrogen bond with residue index and energy.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct HydrogenBond {
     /// 1-based residue index (0 = no bond).
     pub residue: usize,
     /// Energy in cal/mol.
     pub energy: i64,
-}
-
-impl Default for HydrogenBond {
-    fn default() -> Self {
-        Self {
-            residue: 0,
-            energy: 0,
-        }
-    }
 }
 
 /// Bridge type between two residues.
@@ -152,6 +144,12 @@ pub struct DsspChain {
     pub residues: Vec<BackboneResidue>,
     /// Number of actual residues (length of chain, excluding index 0).
     pub len: usize,
+}
+
+impl Default for DsspChain {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DsspChain {

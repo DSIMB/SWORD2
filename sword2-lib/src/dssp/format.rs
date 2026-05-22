@@ -25,17 +25,21 @@ pub fn write_dssp(chain: &DsspChain, pdb_name: &str, output_path: &Path) -> Resu
     // The C binary's parse_dssp() skips lines where line[126] is whitespace or '-'.
     // Without padding, short header lines leave position 126 as uninitialized buffer
     // content, causing them to be incorrectly parsed as data lines.
-    write_padded_line(&mut out, "==== Secondary Structure Definition by the program DSSP, Rust port ====")?;
-    write_padded_line(&mut out, "REFERENCE W. KABSCH AND C.SANDER, BIOPOLYMERS 22 (1983) 2577-2637")?;
+    write_padded_line(
+        &mut out,
+        "==== Secondary Structure Definition by the program DSSP, Rust port ====",
+    )?;
+    write_padded_line(
+        &mut out,
+        "REFERENCE W. KABSCH AND C.SANDER, BIOPOLYMERS 22 (1983) 2577-2637",
+    )?;
     write_padded_line(&mut out, &format!("HEADER    {}", pdb_name))?;
     write_padded_line(&mut out, "COMPND")?;
     write_padded_line(&mut out, "SOURCE")?;
     write_padded_line(&mut out, "AUTHOR")?;
 
     // Count residues (excluding chain breaks)
-    let nres = (1..=chain.len)
-        .filter(|&i| chain.get(i).aa != '!')
-        .count();
+    let nres = (1..=chain.len).filter(|&i| chain.get(i).aa != '!').count();
     let nchains = count_chains(chain);
 
     writeln!(
@@ -97,12 +101,12 @@ pub fn write_dssp(chain: &DsspChain, pdb_name: &str, output_path: &Path) -> Resu
 
         // Column 12: space, 13: AA, 14: chain_break(' '), 15: space, 16: SS symbol, 17: space
         // Written character by character to ensure exact column alignment.
-        out.push(b' ');       // col 12
-        out.push(res.aa as u8);  // col 13
-        out.push(b' ');       // col 14 (chain break placeholder)
-        out.push(b' ');       // col 15
-        out.push(res.ss[0] as u8);  // col 16
-        out.push(b' ');       // col 17
+        out.push(b' '); // col 12
+        out.push(res.aa as u8); // col 13
+        out.push(b' '); // col 14 (chain break placeholder)
+        out.push(b' '); // col 15
+        out.push(res.ss[0] as u8); // col 16
+        out.push(b' '); // col 17
 
         // Turn/bend/chirality/beta columns (18-24): turn3, turn4, turn5, bend, chirality, beta1, beta2
         for s in 1..=7 {
@@ -129,11 +133,7 @@ pub fn write_dssp(chain: &DsspChain, pdb_name: &str, output_path: &Path) -> Resu
         )?;
 
         // CA coordinates
-        write!(
-            out,
-            "{:>7.1}{:>7.1}{:>7.1}",
-            res.ca.x, res.ca.y, res.ca.z
-        )?;
+        write!(out, "{:>7.1}{:>7.1}{:>7.1}", res.ca.x, res.ca.y, res.ca.z)?;
 
         // Pad to ensure column 126 has a non-space character
         // Current position is approximately 126+ already with coordinates

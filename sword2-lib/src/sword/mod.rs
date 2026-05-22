@@ -134,7 +134,9 @@ pub fn run_pipeline(
         output.write_peeling_log(&intermediate_dir.join("peeling.log"))?;
         output.write_pu_contact_matrix(&intermediate_dir.join("pu_contact.mtx"))?;
         output.write_pu_delineation(&pu_delineation_file)?;
-        output.contact_matrix.write_matrix_file(&intermediate_dir.join("contact_matrix.mat"))?;
+        output
+            .contact_matrix
+            .write_matrix_file(&intermediate_dir.join("contact_matrix.mat"))?;
 
         Some(output)
     } else {
@@ -207,24 +209,18 @@ pub fn run_pipeline(
     // Run ComputeMeasure (in-memory if peeling output available, file-based if cached)
     tracing::debug!("Computing criteria for PUs merging");
     let measure_lines = if let Some(ref po) = peeling_output {
-        compute_measure::compute_measure_from_data(
-            &po.final_pu_contacts,
-            &po.final_pu_delineation,
-        )
+        compute_measure::compute_measure_from_data(&po.final_pu_contacts, &po.final_pu_delineation)
     } else {
         let contact_matrix_file = intermediate_dir.join("pu_contact.mtx");
-        compute_measure::compute_measure(
-            &contact_matrix_file,
-            &pu_delineation_file,
-            0.0001,
-        )
+        compute_measure::compute_measure(&contact_matrix_file, &pu_delineation_file, 0.0001)
     };
 
     let measure_strings: Vec<String> = measure_lines.iter().map(|ml| ml.to_line()).collect();
 
     // DEBUG: count measure lines per domain count
     {
-        let mut counts: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+        let mut counts: std::collections::BTreeMap<usize, usize> =
+            std::collections::BTreeMap::new();
         for ml in &measure_lines {
             *counts.entry(ml.num_domains).or_insert(0) += 1;
         }
@@ -244,7 +240,10 @@ pub fn run_pipeline(
     );
 
     // Prediction model
-    tracing::debug!("Predicting structural domains from {} measures", relevant_measure.len());
+    tracing::debug!(
+        "Predicting structural domains from {} measures",
+        relevant_measure.len()
+    );
     let predictions = prediction_model(&relevant_measure);
     let predictions_rev: Vec<i32> = predictions.iter().rev().cloned().collect();
     let mut n_dom = predictions_rev.len() + 1;
@@ -260,12 +259,23 @@ pub fn run_pipeline(
 
     // DEBUG: dump relevant_measure from first pass
     {
-        let mut counts: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+        let mut counts: std::collections::BTreeMap<usize, usize> =
+            std::collections::BTreeMap::new();
         for rm in &relevant_measure {
-            let nd: usize = rm.split('|').next().unwrap_or("0").trim().parse().unwrap_or(0);
+            let nd: usize = rm
+                .split('|')
+                .next()
+                .unwrap_or("0")
+                .trim()
+                .parse()
+                .unwrap_or(0);
             *counts.entry(nd).or_insert(0) += 1;
         }
-        tracing::info!("First ParseMeasure: {} lines, per level: {:?}", relevant_measure.len(), counts);
+        tracing::info!(
+            "First ParseMeasure: {} lines, per level: {:?}",
+            relevant_measure.len(),
+            counts
+        );
     }
 
     let relevant_measure2 = parse_measure::parse_measure(
@@ -282,15 +292,37 @@ pub fn run_pipeline(
     // Find the measure line for the predicted N_dom
     // DEBUG: dump relevant_measure2 from second pass
     {
-        tracing::info!("Second ParseMeasure: {} lines total", relevant_measure2.len());
+        tracing::info!(
+            "Second ParseMeasure: {} lines total",
+            relevant_measure2.len()
+        );
         for (i, rm) in relevant_measure2.iter().enumerate() {
             let fields: Vec<&str> = rm.split('|').collect();
             let nd: usize = fields[0].trim().parse().unwrap_or(0);
-            let del = if fields.len() > 2 { fields[2].trim() } else { "?" };
-            let cr: f64 = if fields.len() > 3 { fields[3].trim().parse().unwrap_or(0.0) } else { 0.0 };
-            let cpd: f64 = if fields.len() > 5 { fields[5].trim().parse().unwrap_or(0.0) } else { 0.0 };
+            let del = if fields.len() > 2 {
+                fields[2].trim()
+            } else {
+                "?"
+            };
+            let cr: f64 = if fields.len() > 3 {
+                fields[3].trim().parse().unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            let cpd: f64 = if fields.len() > 5 {
+                fields[5].trim().parse().unwrap_or(0.0)
+            } else {
+                0.0
+            };
             let dist_signed = crate::sword::distance_model::distance_model(cr, cpd, 1);
-            tracing::info!("  [{}] nd={} dist_signed={:.4} abs={:.4} del={}", i, nd, dist_signed, dist_signed.abs(), del);
+            tracing::info!(
+                "  [{}] nd={} dist_signed={:.4} abs={:.4} del={}",
+                i,
+                nd,
+                dist_signed,
+                dist_signed.abs(),
+                del
+            );
         }
     }
 
@@ -330,8 +362,9 @@ fn prediction_model(relevant_measure: &[String]) -> Vec<i32> {
     let mut predictions = Vec::new();
     let mut max_dom: i32 = -1;
 
-    for idline in 0..relevant_measure.len().saturating_sub(1) {
-        let fields: Vec<&str> = relevant_measure[idline].split('|').collect();
+    let last = relevant_measure.len().saturating_sub(1);
+    for line_str in &relevant_measure[..last] {
+        let fields: Vec<&str> = line_str.split('|').collect();
         if fields.is_empty() {
             continue;
         }
@@ -494,15 +527,16 @@ fn quality_and_display(
 /// `tab_num` is 0-indexed: tab_num[i] = original residue number for index i.
 /// This matches the Perl original: `$$ref_tab_num[$1]` (direct 0-based access).
 fn remap_residue_numbers(delineation: &str, tab_num: &[i32]) -> String {
-    DIGITS_RE.replace_all(delineation, |caps: &regex::Captures| {
-        let idx: usize = caps[0].parse().unwrap_or(0);
-        if idx < tab_num.len() {
-            tab_num[idx].to_string()
-        } else {
-            caps[0].to_string()
-        }
-    })
-    .to_string()
+    DIGITS_RE
+        .replace_all(delineation, |caps: &regex::Captures| {
+            let idx: usize = caps[0].parse().unwrap_or(0);
+            if idx < tab_num.len() {
+                tab_num[idx].to_string()
+            } else {
+                caps[0].to_string()
+            }
+        })
+        .to_string()
 }
 
 /// Compute the complexity (ambiguity) index from quality scores.
@@ -513,8 +547,6 @@ fn compute_cindex(globqual: &[usize]) -> String {
     let c4 = globqual.iter().filter(|&&q| q >= 4).count();
     let c3 = globqual.iter().filter(|&&q| q >= 3).count();
     let c2 = globqual.iter().filter(|&&q| q >= 2).count();
-    let c1 = globqual.iter().filter(|&&q| q >= 1).count();
-
     if c5 >= 5 {
         "+++++".to_string()
     } else if c4 >= 4 {
@@ -523,13 +555,10 @@ fn compute_cindex(globqual: &[usize]) -> String {
         "+++".to_string()
     } else if c2 >= 2 {
         "++".to_string()
-    } else if c1 >= 1 {
-        "+".to_string()
     } else {
         "+".to_string()
     }
 }
-
 
 /// Parse the output from the SWORD pipeline into structured results.
 ///
@@ -653,9 +682,7 @@ mod tests {
 
     #[test]
     fn test_parse_sword_output_multiseg() {
-        let output = vec![
-            "  2 | 30 | 1-50;151-200 51-150 | 3.5 | ****".to_string(),
-        ];
+        let output = vec!["  2 | 30 | 1-50;151-200 51-150 | 3.5 | ****".to_string()];
         let results = parse_sword_output(&output).unwrap();
         assert_eq!(results.domains.len(), 1);
         assert_eq!(results.domains[0].boundaries[0], vec![(1, 50), (151, 200)]);
@@ -664,9 +691,7 @@ mod tests {
 
     #[test]
     fn test_parse_sword_no_ambiguity() {
-        let output = vec![
-            "  2 | 30 | 1-100 101-200 | 3.5 | *****".to_string(),
-        ];
+        let output = vec!["  2 | 30 | 1-100 101-200 | 3.5 | *****".to_string()];
         let results = parse_sword_output(&output).unwrap();
         assert_eq!(results.ambiguity, "n/a");
     }

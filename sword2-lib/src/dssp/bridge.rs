@@ -77,6 +77,7 @@ fn test_bridge(chain: &DsspChain, i: usize, j: usize) -> BridgeType {
 }
 
 /// Add a bridge to an existing ladder or create a new one.
+#[allow(clippy::needless_range_loop)]
 fn ladder(
     table: &mut Vec<Bridge>,
     nbridge: &mut usize,
@@ -132,7 +133,7 @@ fn ladder(
 }
 
 /// Extend ladders by detecting bulges (gaps < 6 residues).
-fn extend_ladder(table: &mut Vec<Bridge>, nbridge: usize, chain: &DsspChain) {
+fn extend_ladder(table: &mut [Bridge], nbridge: usize, chain: &DsspChain) {
     // Link ladders that can be joined via bulges
     for i in 0..nbridge {
         let mut j = i + 1;
@@ -151,15 +152,13 @@ fn extend_ladder(table: &mut Vec<Bridge>, nbridge: usize, chain: &DsspChain) {
                 match table[i].btype {
                     BridgeType::Parallel => {
                         let je_i = table[i].je;
-                        bulge = (jb1.saturating_sub(je_i) < 6
-                            && ib1.saturating_sub(ie) < 3
+                        bulge = (jb1.saturating_sub(je_i) < 6 && ib1.saturating_sub(ie) < 3
                             || jb1.saturating_sub(je_i) < 3)
                             && chain.no_chain_break(je_i, jb1);
                     }
                     BridgeType::Antiparallel => {
                         let jb_i = table[i].jb;
-                        bulge = (jb_i.saturating_sub(je1) < 6
-                            && ib1.saturating_sub(ie) < 3
+                        bulge = (jb_i.saturating_sub(je1) < 6 && ib1.saturating_sub(ie) < 3
                             || jb_i.saturating_sub(je1) < 3)
                             && chain.no_chain_break(je1, jb_i);
                     }
@@ -199,7 +198,8 @@ fn extend_ladder(table: &mut Vec<Bridge>, nbridge: usize, chain: &DsspChain) {
 }
 
 /// Assemble ladders sharing residues into sheets, assign sheet/ladder labels.
-fn sheet(table: &mut Vec<Bridge>, nbridge: usize) {
+#[allow(clippy::needless_range_loop)]
+fn sheet(table: &mut [Bridge], nbridge: usize) {
     // ladderset: which ladders still need sheet assignment (1-based)
     let mut ladder_set = vec![true; nbridge + 1]; // [1..nbridge]
     ladder_set[0] = false;
@@ -343,12 +343,22 @@ fn mark_strands(chain: &mut DsspChain, table: &[Bridge], nbridge: usize) {
                     j_col_free[1] = false;
                 }
             }
-            if b.ib < ib0 { ib0 = b.ib; }
-            if b.ie > ie0 { ie0 = b.ie; }
-            if b.jb < jb0 { jb0 = b.jb; }
-            if b.je > je0 { je0 = b.je; }
+            if b.ib < ib0 {
+                ib0 = b.ib;
+            }
+            if b.ie > ie0 {
+                ie0 = b.ie;
+            }
+            if b.jb < jb0 {
+                jb0 = b.jb;
+            }
+            if b.je > je0 {
+                je0 = b.je;
+            }
 
-            if b.towards == 0 { break; }
+            if b.towards == 0 {
+                break;
+            }
             j_idx = b.towards - 1;
         }
 
@@ -383,7 +393,9 @@ fn mark_strands(chain: &mut DsspChain, table: &[Bridge], nbridge: usize) {
             }
 
             let towards = table[j_idx].towards;
-            if towards == 0 { break; }
+            if towards == 0 {
+                break;
+            }
             j_idx = towards - 1;
         }
 
@@ -403,12 +415,12 @@ fn mark_strands(chain: &mut DsspChain, table: &[Bridge], nbridge: usize) {
     }
 
     // Assign sheet labels to all residues in bridges
-    for k in 0..nbridge {
-        for l in table[k].ib..=table[k].ie {
-            chain.get_mut(l).sheet_label = table[k].sheet_name;
+    for b in &table[..nbridge] {
+        for l in b.ib..=b.ie {
+            chain.get_mut(l).sheet_label = b.sheet_name;
         }
-        for l in table[k].jb..=table[k].je {
-            chain.get_mut(l).sheet_label = table[k].sheet_name;
+        for l in b.jb..=b.je {
+            chain.get_mut(l).sheet_label = b.sheet_name;
         }
     }
 }

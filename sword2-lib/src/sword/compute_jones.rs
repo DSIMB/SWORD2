@@ -4,8 +4,8 @@
 //! Uses the Hungarian (Kuhn-Munkres) algorithm in O(n³) to find the optimal
 //! domain-to-domain mapping, replacing the previous O(n!) permutation search.
 
-use std::path::Path;
 use std::fs;
+use std::path::Path;
 
 /// Compute the Jones overlap criterion between two domain delineations.
 ///
@@ -43,8 +43,16 @@ pub fn compute_jones_with_cache(
     let tab_del1: Vec<&str> = del1_clean.split_whitespace().collect();
     let tab_del2: Vec<&str> = del2_clean.split_whitespace().collect();
 
-    let skip1 = if tab_del1.len() > 2 && tab_del1[0].chars().any(|c| c.is_alphabetic()) { 2 } else { 0 };
-    let skip2 = if tab_del2.len() > 2 && tab_del2[0].chars().any(|c| c.is_alphabetic()) { 2 } else { 0 };
+    let skip1 = if tab_del1.len() > 2 && tab_del1[0].chars().any(|c| c.is_alphabetic()) {
+        2
+    } else {
+        0
+    };
+    let skip2 = if tab_del2.len() > 2 && tab_del2[0].chars().any(|c| c.is_alphabetic()) {
+        2
+    } else {
+        0
+    };
 
     let del1_domains = &tab_del1[skip1..];
     let del2_domains = &tab_del2[skip2..];
@@ -115,7 +123,7 @@ pub fn compute_jones_with_cache(
     let peel_length = (peel_end - peel_start) as usize + 1;
 
     let mut tab_protein_domain_peel = vec![-1i32; peel_length];
-    for pos in 0..peel_length {
+    for (pos, slot) in tab_protein_domain_peel.iter_mut().enumerate() {
         for (num_dom, domain_str) in peel_domains.iter().enumerate() {
             let pu_parts: Vec<&str> = domain_str.split(';').collect();
             for pu in &pu_parts {
@@ -123,7 +131,7 @@ pub fn compute_jones_with_cache(
                     let adj_s = (s - peel_start) as usize;
                     let adj_e = (e - peel_start) as usize;
                     if pos >= adj_s && pos <= adj_e {
-                        tab_protein_domain_peel[pos] = num_dom as i32;
+                        *slot = num_dom as i32;
                     }
                 }
             }
@@ -148,7 +156,11 @@ pub fn compute_jones_with_cache(
 
     // Find optimal assignment using Hungarian algorithm (maximize overlap)
     // Convert to cost minimization: cost = max_val - overlap
-    let max_val = *overlap.iter().flat_map(|row| row.iter()).max().unwrap_or(&0);
+    let max_val = *overlap
+        .iter()
+        .flat_map(|row| row.iter())
+        .max()
+        .unwrap_or(&0);
     let cost: Vec<Vec<i32>> = overlap
         .iter()
         .map(|row| row.iter().map(|&v| max_val - v).collect())
@@ -313,8 +325,26 @@ pub fn read_ca_residue_numbers(pdb_path: &Path) -> Vec<i32> {
 fn is_standard_aa(aa: &str) -> bool {
     matches!(
         aa,
-        "ALA" | "CYS" | "ASP" | "GLU" | "PHE" | "GLY" | "HIS" | "ILE" | "LYS" | "LEU"
-            | "MET" | "ASN" | "PRO" | "GLN" | "ARG" | "SER" | "THR" | "VAL" | "TRP" | "TYR"
+        "ALA"
+            | "CYS"
+            | "ASP"
+            | "GLU"
+            | "PHE"
+            | "GLY"
+            | "HIS"
+            | "ILE"
+            | "LYS"
+            | "LEU"
+            | "MET"
+            | "ASN"
+            | "PRO"
+            | "GLN"
+            | "ARG"
+            | "SER"
+            | "THR"
+            | "VAL"
+            | "TRP"
+            | "TYR"
             | "UNK"
     )
 }
@@ -326,11 +356,7 @@ mod tests {
     #[test]
     fn test_hungarian_identity() {
         // Cost matrix where optimal is diagonal assignment
-        let cost = vec![
-            vec![0, 10, 10],
-            vec![10, 0, 10],
-            vec![10, 10, 0],
-        ];
+        let cost = vec![vec![0, 10, 10], vec![10, 0, 10], vec![10, 10, 0]];
         let result = hungarian_algorithm(&cost);
         assert_eq!(result, vec![0, 1, 2]);
     }
@@ -338,21 +364,14 @@ mod tests {
     #[test]
     fn test_hungarian_swap() {
         // Cost matrix where optimal swaps 0 and 1
-        let cost = vec![
-            vec![10, 0],
-            vec![0, 10],
-        ];
+        let cost = vec![vec![10, 0], vec![0, 10]];
         let result = hungarian_algorithm(&cost);
         assert_eq!(result, vec![1, 0]);
     }
 
     #[test]
     fn test_hungarian_3x3() {
-        let cost = vec![
-            vec![1, 2, 3],
-            vec![2, 4, 6],
-            vec![3, 6, 9],
-        ];
+        let cost = vec![vec![1, 2, 3], vec![2, 4, 6], vec![3, 6, 9]];
         let result = hungarian_algorithm(&cost);
         // Total cost should be minimized
         let total: i32 = result.iter().enumerate().map(|(i, &j)| cost[i][j]).sum();

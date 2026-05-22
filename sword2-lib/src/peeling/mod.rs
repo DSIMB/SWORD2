@@ -13,8 +13,10 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-pub use algorithm::{PeelingConfig, PeelingOutput, run_peeling};
+pub use algorithm::{run_peeling, PeelingConfig, PeelingOutput};
 pub use contact_matrix::ContactMatrix;
+
+type PuEnergyMap = std::collections::HashMap<(i32, i32), (Option<f64>, Option<f64>)>;
 
 /// The backend that produced peeling results.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -110,10 +112,7 @@ pub fn parse_num_file(num_path: &Path) -> Result<Vec<i32>> {
 ///
 /// The residue numbers in the log are 1-based indices into the renumbered sequence.
 /// They are converted back to original numbering using `ori_resnums`.
-pub fn parse_peeling_log(
-    peeling_log: &Path,
-    ori_resnums: &[i32],
-) -> Result<Vec<PeelingLevel>> {
+pub fn parse_peeling_log(peeling_log: &Path, ori_resnums: &[i32]) -> Result<Vec<PeelingLevel>> {
     let content = fs::read_to_string(peeling_log)
         .with_context(|| format!("Cannot read peeling log: {}", peeling_log.display()))?;
 
@@ -179,10 +178,7 @@ pub fn parse_peeling_log(
 }
 
 /// Convert peeling levels to a vector of ProteinUnit vectors (one per level).
-pub fn levels_to_protein_units(
-    levels: &[PeelingLevel],
-    chain_id: char,
-) -> Vec<Vec<ProteinUnit>> {
+pub fn levels_to_protein_units(levels: &[PeelingLevel], chain_id: char) -> Vec<Vec<ProteinUnit>> {
     levels
         .iter()
         .map(|level| {
@@ -202,10 +198,7 @@ pub fn levels_to_protein_units(
 }
 
 /// Load legacy peeling outputs into the structured result model.
-pub fn load_legacy_results(
-    peeling_log: &Path,
-    num_path: &Path,
-) -> Result<PeelingResults> {
+pub fn load_legacy_results(peeling_log: &Path, num_path: &Path) -> Result<PeelingResults> {
     let original_resnums = parse_num_file(num_path)?;
     let levels = parse_peeling_log(peeling_log, &original_resnums)?;
 
@@ -267,7 +260,7 @@ fn aul_percent(z_score: f64) -> i32 {
 
 fn build_summary<'a>(
     results: &'a PeelingResults,
-    energies: Option<&std::collections::HashMap<(i32, i32), (Option<f64>, Option<f64>)>>,
+    energies: Option<&PuEnergyMap>,
 ) -> PeelingResultsSummary<'a> {
     let levels = results
         .levels
@@ -314,7 +307,7 @@ fn build_summary<'a>(
 pub fn write_peeling_summary(
     results: &PeelingResults,
     output_path: &Path,
-    energies: Option<&std::collections::HashMap<(i32, i32), (Option<f64>, Option<f64>)>>,
+    energies: Option<&PuEnergyMap>,
 ) -> Result<()> {
     use std::io::Write;
     let mut f = fs::File::create(output_path)
@@ -371,7 +364,7 @@ pub fn write_peeling_summary(
 pub fn write_peeling_summary_json(
     results: &PeelingResults,
     output_path: &Path,
-    energies: Option<&std::collections::HashMap<(i32, i32), (Option<f64>, Option<f64>)>>,
+    energies: Option<&PuEnergyMap>,
 ) -> Result<()> {
     let summary = build_summary(results, energies);
     let json = serde_json::to_string_pretty(&summary)?;
@@ -460,12 +453,19 @@ mod tests {
         let log_path = dir.path().join("Peeling.log");
         let num_path = dir.path().join("test.num");
 
-        fs::write(&log_path, "Max_CR Min_Density CI R Num_PUs PU_Delineations\n0.5 0.3 0.95 1.2 2 1 2 3 4\n").unwrap();
+        fs::write(
+            &log_path,
+            "Max_CR Min_Density CI R Num_PUs PU_Delineations\n0.5 0.3 0.95 1.2 2 1 2 3 4\n",
+        )
+        .unwrap();
         fs::write(&num_path, "10 11 12 13").unwrap();
 
         let results = load_legacy_results(&log_path, &num_path).unwrap();
         assert_eq!(results.backend, PeelingBackend::LegacyBinary);
         assert_eq!(results.original_resnums, vec![10, 11, 12, 13]);
-        assert_eq!(results.levels[0].pus, vec![ResidueRange::new(10, 11), ResidueRange::new(12, 13)]);
+        assert_eq!(
+            results.levels[0].pus,
+            vec![ResidueRange::new(10, 11), ResidueRange::new(12, 13)]
+        );
     }
 }

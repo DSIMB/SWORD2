@@ -19,6 +19,7 @@ use super::distance_model;
 /// `option_alt_diff` - whether to check Jones overlap for uniqueness.
 ///
 /// Returns the filtered measure lines.
+#[allow(clippy::too_many_arguments)]
 pub fn parse_measure(
     measure_lines: &[String],
     dir_data: &str,
@@ -74,6 +75,7 @@ fn get_fields(line: &str) -> Vec<String> {
 }
 
 /// Parse measure with diff (option_alt_diff == true).
+#[allow(clippy::too_many_arguments)]
 fn parse_measure_with_diff(
     measure_lines: &[String],
     dir_data: &str,
@@ -90,8 +92,7 @@ fn parse_measure_with_diff(
 
     // Pre-load CA residue numbers once for all Jones overlap checks
     let pdb_base = &pdb_id[..pdb_id.len().saturating_sub(3)];
-    let pdb_file_path = std::path::Path::new(dir_data)
-        .join(format!("{}.pdb", pdb_base));
+    let pdb_file_path = std::path::Path::new(dir_data).join(format!("{}.pdb", pdb_base));
     let cached_residue_nums = compute_jones::read_ca_residue_numbers(&pdb_file_path);
 
     // First pass: group and filter by domain count levels
@@ -165,9 +166,15 @@ fn parse_measure_with_diff(
                                 dir_data,
                                 Some(&cached_residue_nums),
                             );
-                            tracing::info!("  Jones[i={},j={}] criterion={} pct={:.1}% del_i={} del_j={}",
-                                i, j, criterion, pct,
-                                fields_i[2].trim(), fields_j[2].trim());
+                            tracing::info!(
+                                "  Jones[i={},j={}] criterion={} pct={:.1}% del_i={} del_j={}",
+                                i,
+                                j,
+                                criterion,
+                                pct,
+                                fields_i[2].trim(),
+                                fields_j[2].trim()
+                            );
                             if criterion == 1 {
                                 // Too similar — remove
                                 tracing::info!("    REMOVED j={}", j);
@@ -184,7 +191,6 @@ fn parse_measure_with_diff(
                     i += 1;
                 }
                 clean_measure.extend(temp_measure2.clone());
-                
             } else if !temp_measure.is_empty() {
                 clean_measure.push(temp_measure[0].clone());
             }
@@ -278,8 +284,7 @@ fn parse_measure_simple(
                                 let cr: f64 = fields[3].parse().unwrap_or(0.0);
                                 let cpd: f64 = fields[5].parse().unwrap_or(0.0);
                                 if distance_model::distance_model(cr, cpd, 1).abs() < max_dist {
-                                    relevant_measure
-                                        .push(measure_lines[id_line - i].clone());
+                                    relevant_measure.push(measure_lines[id_line - i].clone());
                                 }
                             }
                         } else {

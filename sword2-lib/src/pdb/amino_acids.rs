@@ -8,8 +8,8 @@ use std::sync::LazyLock;
 
 /// The 20 standard three-letter amino acid codes.
 pub const STANDARD_AA3: &[&str] = &[
-    "ALA", "CYS", "ASP", "GLU", "PHE", "GLY", "HIS", "ILE", "LYS", "LEU",
-    "MET", "ASN", "PRO", "GLN", "ARG", "SER", "THR", "VAL", "TRP", "TYR",
+    "ALA", "CYS", "ASP", "GLU", "PHE", "GLY", "HIS", "ILE", "LYS", "LEU", "MET", "ASN", "PRO",
+    "GLN", "ARG", "SER", "THR", "VAL", "TRP", "TYR",
 ];
 
 /// Mapping from three-letter amino acid codes (standard + non-standard) to

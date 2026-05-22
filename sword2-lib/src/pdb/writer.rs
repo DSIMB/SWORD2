@@ -8,8 +8,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use super::types::Chain;
 use super::amino_acids;
+use super::types::Chain;
 
 /// Clean a chain for SWORD processing:
 /// - Keep only ATOM records (not HETATM)
@@ -53,12 +53,7 @@ pub fn clean_chain_for_sword(chain: &Chain) -> (Chain, Vec<i32>) {
             continue;
         }
 
-        let mut new_residue = super::types::Residue::new(
-            &residue.name,
-            new_resnum,
-            ' ',
-            chain.id,
-        );
+        let mut new_residue = super::types::Residue::new(&residue.name, new_resnum, ' ', chain.id);
 
         // Copy non-HETATM atoms with updated residue numbers
         for atom in &residue.atoms {
@@ -134,14 +129,14 @@ pub fn write_pdb(chain: &Chain, output_path: &Path) -> Result<()> {
             // Build the line using exact column positions
             let line = format!(
                 "{}{:>5} {}{}{:>3} {}{:>4}{}   {:8.3}{:8.3}{:8.3}{:6.2}{:6.2}          {:>2}{:>2}",
-                record,      // 1-6
-                serial,      // 7-11
-                atom_name,   // 13-16 (space at col 12 from format)
-                alt_loc,     // 17
-                residue.name, // 18-20
-                chain.id,    // 22 (space at 21 from format)
+                record,          // 1-6
+                serial,          // 7-11
+                atom_name,       // 13-16 (space at col 12 from format)
+                alt_loc,         // 17
+                residue.name,    // 18-20
+                chain.id,        // 22 (space at 21 from format)
                 residue.seq_num, // 23-26
-                ' ',         // 27 (icode)
+                ' ',             // 27 (icode)
                 atom.coord.x,
                 atom.coord.y,
                 atom.coord.z,
@@ -163,10 +158,7 @@ pub fn write_pdb(chain: &Chain, output_path: &Path) -> Result<()> {
 /// Write the residue number mapping file.
 ///
 /// Format matches Python: "# Mapping of authors PDB residues numbers\n# with the new one...\nORIGINAL RENUM\n{orig} {new}\n..."
-pub fn write_mapping_file(
-    original_resnums: &[i32],
-    output_path: &Path,
-) -> Result<()> {
+pub fn write_mapping_file(original_resnums: &[i32], output_path: &Path) -> Result<()> {
     let mut f = std::fs::File::create(output_path)
         .with_context(|| format!("Cannot create mapping file: {}", output_path.display()))?;
 

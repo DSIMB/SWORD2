@@ -24,7 +24,7 @@ pub fn parse_pdb(path: &Path) -> Result<Structure> {
         .to_string();
 
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    
+
     // Check if it's mmCIF (possibly gzipped)
     if ext == "cif" || (ext == "gz" && path.to_str().unwrap_or("").ends_with(".cif.gz")) {
         return parse_mmcif(path);
@@ -43,7 +43,9 @@ pub fn parse_pdb(path: &Path) -> Result<Structure> {
 
 /// Parse an mmCIF file using pdbtbx and convert it to our internal Structure type.
 pub fn parse_mmcif(path: &Path) -> Result<Structure> {
-    let path_str = path.to_str().ok_or_else(|| anyhow::anyhow!("Invalid path"))?;
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Invalid path"))?;
     let (pdbtbx_struct, _warnings) = pdbtbx::ReadOptions::new()
         .set_level(StrictnessLevel::Loose)
         .read(path_str)
@@ -66,17 +68,16 @@ pub fn parse_mmcif(path: &Path) -> Result<Structure> {
             for pdbtbx_residue in pdbtbx_chain.residues() {
                 let res_name = pdbtbx_residue.name().unwrap_or("UNK");
                 let res_serial = pdbtbx_residue.serial_number() as i32;
-                let icode = pdbtbx_residue.insertion_code().and_then(|s| s.chars().next()).unwrap_or(' ');
-                
-                let mut residue = Residue::new(
-                    res_name,
-                    res_serial,
-                    icode,
-                    chain_id,
-                );
+                let icode = pdbtbx_residue
+                    .insertion_code()
+                    .and_then(|s| s.chars().next())
+                    .unwrap_or(' ');
+
+                let mut residue = Residue::new(res_name, res_serial, icode, chain_id);
 
                 for pdbtbx_conformer in pdbtbx_residue.conformers() {
-                    let alt_loc = pdbtbx_conformer.alternative_location()
+                    let alt_loc = pdbtbx_conformer
+                        .alternative_location()
                         .and_then(|s| s.chars().next())
                         .unwrap_or(' ');
 
@@ -92,7 +93,11 @@ pub fn parse_mmcif(path: &Path) -> Result<Structure> {
                             Point3D::new(pdbtbx_atom.x(), pdbtbx_atom.y(), pdbtbx_atom.z()),
                             pdbtbx_atom.occupancy(),
                             pdbtbx_atom.b_factor(),
-                            pdbtbx_atom.element().map(|e| e.to_string()).unwrap_or_default().as_str(),
+                            pdbtbx_atom
+                                .element()
+                                .map(|e| e.to_string())
+                                .unwrap_or_default()
+                                .as_str(),
                             "", // Charge
                             pdbtbx_atom.hetero(),
                         );
@@ -149,8 +154,8 @@ fn parse_pdb_reader<R: BufRead>(reader: R, name: &str) -> Result<Structure> {
                     add_atom_to_model(&mut current_model, atom);
                 }
             }
-            "HEADER" | "TITLE" | "REMARK" | "SEQRES" | "DBREF" | "COMPND" | "SOURCE"
-            | "KEYWDS" | "EXPDTA" | "AUTHOR" | "REVDAT" | "JRNL" => {
+            "HEADER" | "TITLE" | "REMARK" | "SEQRES" | "DBREF" | "COMPND" | "SOURCE" | "KEYWDS"
+            | "EXPDTA" | "AUTHOR" | "REVDAT" | "JRNL" => {
                 structure.header_lines.push(line.clone());
             }
             "END" => {
@@ -223,9 +228,19 @@ fn parse_atom_line(line: &str) -> Option<Atom> {
         .unwrap_or_default();
 
     Some(Atom::new(
-        serial, &name, alt_loc, &res_name, chain_id, res_seq, icode,
+        serial,
+        &name,
+        alt_loc,
+        &res_name,
+        chain_id,
+        res_seq,
+        icode,
         Point3D::new(x, y, z),
-        occupancy, temp_factor, &element, &charge, is_hetatm,
+        occupancy,
+        temp_factor,
+        &element,
+        &charge,
+        is_hetatm,
     ))
 }
 

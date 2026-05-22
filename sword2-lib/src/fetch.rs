@@ -25,9 +25,11 @@ fn select_alphafold_prediction<'a>(
     predictions: &'a [AlphaFoldPrediction],
     uniprot_id: &str,
 ) -> Option<&'a AlphaFoldPrediction> {
-    predictions
-        .iter()
-        .find(|prediction| prediction.uniprot_accession.eq_ignore_ascii_case(uniprot_id))
+    predictions.iter().find(|prediction| {
+        prediction
+            .uniprot_accession
+            .eq_ignore_ascii_case(uniprot_id)
+    })
 }
 
 fn filename_from_url(url: &str) -> Result<&str> {
@@ -54,11 +56,7 @@ pub fn fetch_pdb(pdb_id: &str, output_dir: &Path) -> Result<PathBuf> {
         .with_context(|| format!("Failed to fetch PDB {}", pdb_id))?;
 
     if !response.status().is_success() {
-        anyhow::bail!(
-            "Failed to fetch PDB {}: HTTP {}",
-            pdb_id,
-            response.status()
-        );
+        anyhow::bail!("Failed to fetch PDB {}: HTTP {}", pdb_id, response.status());
     }
 
     let content = response.text()?;
@@ -104,10 +102,12 @@ pub fn fetch_alphafold(uniprot_id: &str, output_dir: &Path) -> Result<PathBuf> {
 
     let output_name = filename_from_url(&prediction.pdb_url)?;
     let output_path = output_dir.join(output_name);
-    let response = client
-        .get(&prediction.pdb_url)
-        .send()
-        .with_context(|| format!("Failed to download AlphaFold model from {}", prediction.pdb_url))?;
+    let response = client.get(&prediction.pdb_url).send().with_context(|| {
+        format!(
+            "Failed to download AlphaFold model from {}",
+            prediction.pdb_url
+        )
+    })?;
 
     if !response.status().is_success() {
         anyhow::bail!(
@@ -174,8 +174,7 @@ mod tests {
         let predictions = vec![
             AlphaFoldPrediction {
                 uniprot_accession: "Q5VSL9".to_string(),
-                pdb_url: "https://alphafold.ebi.ac.uk/files/AF-Q5VSL9-F1-model_v6.pdb"
-                    .to_string(),
+                pdb_url: "https://alphafold.ebi.ac.uk/files/AF-Q5VSL9-F1-model_v6.pdb".to_string(),
             },
             AlphaFoldPrediction {
                 uniprot_accession: "Q5VSL9-4".to_string(),

@@ -277,12 +277,7 @@ impl Model {
 
 impl fmt::Display for Model {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Model {} ({} chains)",
-            self.serial,
-            self.chains.len()
-        )
+        write!(f, "Model {} ({} chains)", self.serial, self.chains.len())
     }
 }
 
@@ -368,9 +363,19 @@ mod tests {
     #[test]
     fn test_atom_is_ca() {
         let atom = Atom::new(
-            1, " CA ", ' ', "ALA", 'A', 1, ' ',
+            1,
+            " CA ",
+            ' ',
+            "ALA",
+            'A',
+            1,
+            ' ',
             Point3D::new(0.0, 0.0, 0.0),
-            1.0, 0.0, "C", "", false,
+            1.0,
+            0.0,
+            "C",
+            "",
+            false,
         );
         assert!(atom.is_ca());
     }
@@ -381,8 +386,36 @@ mod tests {
         let mut r1 = Residue::new("ALA", 1, ' ', 'A');
         let mut r2 = Residue::new("GLY", 2, ' ', 'A');
         // Add a dummy CA to each residue so they are valid
-        r1.atoms.push(Atom::new(1, " CA ", ' ', "ALA", 'A', 1, ' ', Point3D::new(0.0,0.0,0.0), 1.0, 0.0, "C", "", false));
-        r2.atoms.push(Atom::new(2, " CA ", ' ', "GLY", 'A', 2, ' ', Point3D::new(1.0,0.0,0.0), 1.0, 0.0, "C", "", false));
+        r1.atoms.push(Atom::new(
+            1,
+            " CA ",
+            ' ',
+            "ALA",
+            'A',
+            1,
+            ' ',
+            Point3D::new(0.0, 0.0, 0.0),
+            1.0,
+            0.0,
+            "C",
+            "",
+            false,
+        ));
+        r2.atoms.push(Atom::new(
+            2,
+            " CA ",
+            ' ',
+            "GLY",
+            'A',
+            2,
+            ' ',
+            Point3D::new(1.0, 0.0, 0.0),
+            1.0,
+            0.0,
+            "C",
+            "",
+            false,
+        ));
         chain.residues.push(r1);
         chain.residues.push(r2);
         assert_eq!(chain.get_sequence(), "AG");

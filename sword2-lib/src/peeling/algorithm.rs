@@ -104,6 +104,7 @@ pub(crate) enum SsType {
 /// - `cutting_mask[i]`: whether position i can be a cut point
 ///
 /// Short SS segments (< min_ss_size) are marked as non-cuttable.
+#[allow(clippy::needless_range_loop)]
 pub(crate) fn parse_dssp_for_peeling(
     dssp_path: &Path,
     num_residues: usize,
@@ -138,7 +139,7 @@ pub(crate) fn parse_dssp_for_peeling(
         // Parse residue number from columns 6-10 (after blanking col 6 and 11)
         let mut num_bytes = Vec::from(&bytes[6..11]);
         num_bytes[0] = b' '; // line[6] = ' ' in C code
-        // Note: C code also sets line[11] = ' ' but we only read cols 6-10
+                             // Note: C code also sets line[11] = ' ' but we only read cols 6-10
         let num_str = std::str::from_utf8(&num_bytes).unwrap_or("0");
         let num: i32 = num_str.trim().parse().unwrap_or(0);
         true_nums.push(num);
@@ -170,7 +171,10 @@ pub(crate) fn parse_dssp_for_peeling(
             // Start of a new SS segment
             current_ss = ss_types[i];
             segment_start = i;
-        } else if ss_types[i] != current_ss && ss_types[i] != SsType::Coil && current_ss != SsType::Coil {
+        } else if ss_types[i] != current_ss
+            && ss_types[i] != SsType::Coil
+            && current_ss != SsType::Coil
+        {
             // Transition between different SS types
             let segment_end = i - 1;
             let size = segment_end - segment_start;
@@ -469,10 +473,16 @@ fn measure_coeff(matrix: &ContactMatrix, pus: &[[usize; 2]]) -> (f64, f64) {
 /// by the downstream compute_measure module.
 ///
 /// Returns (ci, r, pu_contact_entries, pu_delineation_entries).
+#[allow(clippy::type_complexity, clippy::needless_range_loop)]
 fn mutual_information(
     matrix: &ContactMatrix,
     pus: &[[usize; 2]],
-) -> (f64, f64, Vec<(usize, usize, f64)>, Vec<(usize, usize, usize)>) {
+) -> (
+    f64,
+    f64,
+    Vec<(usize, usize, f64)>,
+    Vec<(usize, usize, usize)>,
+) {
     let n_pus = pus.len();
 
     // Compute PU-PU contact sums
@@ -683,6 +693,7 @@ impl PeelingOutput {
 /// # Returns
 /// A `PeelingOutput` containing all iteration results, the contact matrix,
 /// and the final PU delineation data needed by downstream modules.
+#[allow(clippy::needless_range_loop)]
 pub fn run_peeling(
     ca_coords: &[[f64; 3]],
     dssp_path: &Path,
@@ -695,7 +706,11 @@ pub fn run_peeling(
 
     tracing::debug!(
         "Peeling: {} residues, d0={}, delta={}, min_pu_size={}, max_r2={}",
-        n, config.d0, config.delta, config.min_pu_size, config.max_r2
+        n,
+        config.d0,
+        config.delta,
+        config.min_pu_size,
+        config.max_r2
     );
 
     // Step 1: Compute contact probability matrix
@@ -703,8 +718,7 @@ pub fn run_peeling(
     let ind = n - 1; // C code uses 0-based, ind = number of residues - 1
 
     // Step 2: Parse DSSP for secondary structure and cutting mask
-    let (_ss_types, true_nums, cutting_mask) =
-        parse_dssp_for_peeling(dssp_path, n, config)?;
+    let (_ss_types, true_nums, cutting_mask) = parse_dssp_for_peeling(dssp_path, n, config)?;
 
     // Step 3: Initialize PU array
     // pu[iteration][pu_index] = [start, end]
@@ -741,17 +755,29 @@ pub fn run_peeling(
             }
 
             // Try single cut
-            if let Some(cut) =
-                simple_cutting(&matrix, start, end, &cutting_mask, config.min_pu_size, best_coeff, x)
-            {
+            if let Some(cut) = simple_cutting(
+                &matrix,
+                start,
+                end,
+                &cutting_mask,
+                config.min_pu_size,
+                best_coeff,
+                x,
+            ) {
                 best_coeff = cut.coeff;
                 best_cut = Some(cut);
             }
 
             // Try double cut
-            if let Some(cut) =
-                double_cutting(&matrix, start, end, &cutting_mask, config.min_pu_size, best_coeff, x)
-            {
+            if let Some(cut) = double_cutting(
+                &matrix,
+                start,
+                end,
+                &cutting_mask,
+                config.min_pu_size,
+                best_coeff,
+                x,
+            ) {
                 best_coeff = cut.coeff;
                 best_cut = Some(cut);
             }
@@ -761,7 +787,10 @@ pub fn run_peeling(
         let best_cut = match best_cut {
             Some(cut) => cut,
             None => {
-                tracing::debug!("Peeling: no further cuts possible at iteration {}", iteration);
+                tracing::debug!(
+                    "Peeling: no further cuts possible at iteration {}",
+                    iteration
+                );
                 break;
             }
         };
@@ -798,7 +827,10 @@ pub fn run_peeling(
                 (e - s) <= config.max_pu_size
             });
             if all_within {
-                tracing::debug!("Peeling: all PUs within max size at iteration {}", iteration);
+                tracing::debug!(
+                    "Peeling: all PUs within max size at iteration {}",
+                    iteration
+                );
                 break;
             }
         }
@@ -818,7 +850,10 @@ pub fn run_peeling(
                     || h3 >= config.cutoff_pruning
             };
             if !passes_pruning {
-                tracing::debug!("Peeling: pruning criteria not met at iteration {}", iteration);
+                tracing::debug!(
+                    "Peeling: pruning criteria not met at iteration {}",
+                    iteration
+                );
                 break;
             }
         }
@@ -850,7 +885,12 @@ pub fn run_peeling(
 
         // Check CI threshold
         if ci > config.max_r2 as f64 {
-            tracing::debug!("Peeling: CI ({:.2}) exceeds max_r2 ({}) at iteration {}", ci, config.max_r2, iteration);
+            tracing::debug!(
+                "Peeling: CI ({:.2}) exceeds max_r2 ({}) at iteration {}",
+                ci,
+                config.max_r2,
+                iteration
+            );
             break;
         }
     }

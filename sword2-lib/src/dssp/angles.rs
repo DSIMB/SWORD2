@@ -106,7 +106,7 @@ pub fn phi(chain: &DsspChain, i: usize) -> f64 {
 
 /// Psi angle for residue i.
 pub fn psi(chain: &DsspChain, i: usize) -> f64 {
-    if i + 1 <= chain.len && chain.no_chain_break(i, i + 1) {
+    if i < chain.len && chain.no_chain_break(i, i + 1) {
         dihedral_angle(
             &chain.get(i).n,
             &chain.get(i).ca,

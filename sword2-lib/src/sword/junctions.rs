@@ -94,15 +94,21 @@ mod tests {
         let result = calculate_junction_consistencies(&lines);
         assert!(result.contains("#Hinge/Junction consistency:"));
         // Should contain junction residue numbers from the boundaries
-        assert!(result.contains("100"), "Expected junction at 100, got:\n{}", result);
-        assert!(result.contains("200"), "Expected junction at 200, got:\n{}", result);
+        assert!(
+            result.contains("100"),
+            "Expected junction at 100, got:\n{}",
+            result
+        );
+        assert!(
+            result.contains("200"),
+            "Expected junction at 200, got:\n{}",
+            result
+        );
     }
 
     #[test]
     fn test_skip_na_quality() {
-        let lines = vec![
-            "  2 | 30 | 1-100 101-200 | 3.5 | n/a |".to_string(),
-        ];
+        let lines = vec!["  2 | 30 | 1-100 101-200 | 3.5 | n/a |".to_string()];
         let result = calculate_junction_consistencies(&lines);
         // Should only have header lines, no junction data
         assert!(!result.contains("100"));

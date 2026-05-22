@@ -5,8 +5,7 @@
 use super::hbond::test_bond;
 use super::types::DsspChain;
 
-/// SS column indices for reference:
-/// 0=symbol, 1=turn3, 2=turn4, 3=turn5, 4=bend, 5=chirality, 6=beta1, 7=beta2
+// SS column indices: 0=symbol, 1=turn3, 2=turn4, 3=turn5, 4=bend, 5=chirality, 6=beta1, 7=beta2
 
 /// Detect turns and assign helix/bend symbols.
 pub fn flag_turns(chain: &mut DsspChain) {

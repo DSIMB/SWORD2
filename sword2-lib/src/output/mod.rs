@@ -48,7 +48,12 @@ pub fn write_json(partitionings: &[Partitioning], path: &Path) -> Result<()> {
 /// Write partitioning results as plain text to a writer.
 pub fn write_text<W: Write>(partitionings: &[Partitioning], writer: &mut W) -> Result<()> {
     for (i, part) in partitionings.iter().enumerate() {
-        writeln!(writer, "Partitioning {} ({} domains):", i + 1, part.num_domains)?;
+        writeln!(
+            writer,
+            "Partitioning {} ({} domains):",
+            i + 1,
+            part.num_domains
+        )?;
         for domain in &part.domains {
             writeln!(
                 writer,
@@ -106,7 +111,13 @@ pub fn write_sword_summary(
             if !disable_energies {
                 let dom_energy = energies.get(&EnergyKey::Domain(i, j));
                 let (dom_aul, dom_z_str) = format_energy(dom_energy);
-                writeln!(f, "Domain:{}       AUL={:3}% Z-score={}", j + 1, dom_aul, dom_z_str)?;
+                writeln!(
+                    f,
+                    "Domain:{}       AUL={:3}% Z-score={}",
+                    j + 1,
+                    dom_aul,
+                    dom_z_str
+                )?;
             } else {
                 writeln!(f, "Domain:{}", j + 1)?;
             }
@@ -184,10 +195,7 @@ pub fn write_sword_summary_json(
                     "AUL".to_string(),
                     serde_json::Value::Number(serde_json::Number::from(dom_aul)),
                 );
-                domain_json.insert(
-                    "Z-score".to_string(),
-                    serde_json::Value::String(dom_z_str),
-                );
+                domain_json.insert("Z-score".to_string(), serde_json::Value::String(dom_z_str));
             }
 
             let mut pus_json = serde_json::Map::new();
@@ -201,19 +209,22 @@ pub fn write_sword_summary_json(
                         "AUL".to_string(),
                         serde_json::Value::Number(serde_json::Number::from(pu_aul)),
                     );
-                    pu_json.insert(
-                        "Z-score".to_string(),
-                        serde_json::Value::String(pu_z_str),
-                    );
+                    pu_json.insert("Z-score".to_string(), serde_json::Value::String(pu_z_str));
                     pus_json.insert(pu_key, serde_json::Value::Object(pu_json));
                 } else {
                     pus_json.insert(pu_key, serde_json::Value::Object(serde_json::Map::new()));
                 }
             }
             domain_json.insert("PUs".to_string(), serde_json::Value::Object(pus_json));
-            domains_json.insert(format!("Domain {}", j + 1), serde_json::Value::Object(domain_json));
+            domains_json.insert(
+                format!("Domain {}", j + 1),
+                serde_json::Value::Object(domain_json),
+            );
         }
-        alt_part_json.insert("Domains".to_string(), serde_json::Value::Object(domains_json));
+        alt_part_json.insert(
+            "Domains".to_string(),
+            serde_json::Value::Object(domains_json),
+        );
         json_results.insert(partition_name, serde_json::Value::Object(alt_part_json));
     }
 

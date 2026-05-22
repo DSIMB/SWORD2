@@ -4,7 +4,7 @@
 //! We use a spatial grid (cell size = CADIST) to only check 27 neighbor cells,
 //! reducing to O(N*k) where k is the average number of neighbors.
 
-use super::types::{DsspChain, HydrogenBond, CADIST, DIST_MIN, HBLOW, HBHIGH, Q};
+use super::types::{DsspChain, HydrogenBond, CADIST, DIST_MIN, HBHIGH, HBLOW, Q};
 
 /// Detect all backbone H-bonds in the chain using a spatial grid.
 pub fn flag_hydrogen_bonds(chain: &mut DsspChain) {
@@ -140,8 +140,12 @@ impl SpatialGrid {
         if chain.len == 0 {
             return Self {
                 cell_size,
-                nx: 0, ny: 0, nz: 0,
-                ox: 0.0, oy: 0.0, oz: 0.0,
+                nx: 0,
+                ny: 0,
+                nz: 0,
+                ox: 0.0,
+                oy: 0.0,
+                oz: 0.0,
                 cells: Vec::new(),
             };
         }
@@ -191,7 +195,16 @@ impl SpatialGrid {
             }
         }
 
-        Self { cell_size, nx, ny, nz, ox, oy, oz, cells }
+        Self {
+            cell_size,
+            nx,
+            ny,
+            nz,
+            ox,
+            oy,
+            oz,
+            cells,
+        }
     }
 
     /// Return all residue indices within CADIST of the given point.
@@ -217,9 +230,7 @@ impl SpatialGrid {
                     if gz < 0 || gz >= self.nz as isize {
                         continue;
                     }
-                    let idx = gx as usize * self.ny * self.nz
-                        + gy as usize * self.nz
-                        + gz as usize;
+                    let idx = gx as usize * self.ny * self.nz + gy as usize * self.nz + gz as usize;
                     if idx < self.cells.len() {
                         result.extend_from_slice(&self.cells[idx]);
                     }

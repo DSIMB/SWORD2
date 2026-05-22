@@ -53,7 +53,7 @@ pub fn distance_model(mx: f64, my: f64, _abs: i32) -> f64 {
         let dist = distance_to_diag
             .min(distance_to_horizontal)
             .min(distance_to_vertical);
-        return dist * -1.0;
+        return -dist;
     }
 
     if (my < diagonal_horizontal && my > horizontal && d < 0.0)
@@ -61,24 +61,23 @@ pub fn distance_model(mx: f64, my: f64, _abs: i32) -> f64 {
         || (my < diagonal_horizontal && mx > diagonal_vertical && d < 0.0)
     {
         // ZONE 7, 8, 9
-        return distance_to_diag * -1.0;
+        return -distance_to_diag;
     }
 
     if my < horizontal {
         // ZONE 6
-        return distance_to_horizontal * -1.0;
+        return -distance_to_horizontal;
     }
 
     if mx > vertical {
         // ZONE 5
-        return distance_to_vertical * -1.0;
+        return -distance_to_vertical;
     }
 
-    // ZONE 2, 3, or 4 — inside
-    let dist = distance_to_diag
+    // ZONE 2, 3, or 4 — inside (positive value)
+    distance_to_diag
         .min(distance_to_horizontal)
-        .min(distance_to_vertical);
-    dist // positive ⇒ inside
+        .min(distance_to_vertical)
 }
 
 /// Map a real-valued distance into a 1–5 star rating.

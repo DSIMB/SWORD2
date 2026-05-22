@@ -58,11 +58,7 @@ struct PuInfo {
 ///
 /// Returns a vector of `MeasureLine` items — one per domain decomposition
 /// explored during the merging process.
-pub fn compute_measure(
-    file_contact: &Path,
-    file_pu: &Path,
-    _cutoff_pdp: f64,
-) -> Vec<MeasureLine> {
+pub fn compute_measure(file_contact: &Path, file_pu: &Path, _cutoff_pdp: f64) -> Vec<MeasureLine> {
     // 1) Read PU delineation
     let pu_content = fs::read_to_string(file_pu).unwrap_or_default();
     let mut hash_pu: BTreeMap<i32, (i32, i32, i32)> = BTreeMap::new(); // start -> (id, start, end)
@@ -93,9 +89,7 @@ pub fn compute_measure(
         total_size += size as usize;
         id_to_idx.insert(*id_pu, pu_idx);
         pu_start_end.insert(pu_idx + 1, (*s, *e));
-        pu_list.push(PuInfo {
-            size,
-        });
+        pu_list.push(PuInfo { size });
     }
 
     // 2) Read contact matrix
@@ -179,9 +173,7 @@ fn compute_measure_core(
     let n_pus = pu_sizes.len();
 
     // 3) Initial domain assignment: each PU is its own domain
-    let initial_domains: Vec<String> = (1..=n_pus)
-        .map(|i| i.to_string())
-        .collect();
+    let initial_domains: Vec<String> = (1..=n_pus).map(|i| i.to_string()).collect();
 
     // Compute initial measure
     let mut output_lines: Vec<MeasureLine> = Vec::new();
@@ -233,7 +225,11 @@ fn compute_measure_core(
         }
 
         // Sort results by ratio_pdp (descending) and take top N
-        all_results.sort_by(|a, b| b.ratio_pdp.partial_cmp(&a.ratio_pdp).unwrap_or(std::cmp::Ordering::Equal));
+        all_results.sort_by(|a, b| {
+            b.ratio_pdp
+                .partial_cmp(&a.ratio_pdp)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         all_results.truncate(max_number_results + 1);
 
         // Compute measures and produce output for this merging level
@@ -252,21 +248,25 @@ fn compute_measure_core(
             let (min_sz, max_cr, _mean_cr, den_min, mean_den) =
                 measure_domain(&result.new_domains, &tab_matrix, &pu_sizes);
 
-            level_lines.push((mean_den, MeasureLine {
-                num_domains: number_domains - 1,
-                min_size: min_sz,
-                delineation: print_dom,
-                max_cr,
-                mean_cr: 0.0,
-                density_min: den_min,
-                mean_density: mean_den,
-            }, result.new_domains.clone()));
+            level_lines.push((
+                mean_den,
+                MeasureLine {
+                    num_domains: number_domains - 1,
+                    min_size: min_sz,
+                    delineation: print_dom,
+                    max_cr,
+                    mean_cr: 0.0,
+                    density_min: den_min,
+                    mean_density: mean_den,
+                },
+                result.new_domains.clone(),
+            ));
         }
 
         // Sort by mean_density (ascending)
         level_lines.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
-        let limit_number_of_domains = (total_size + cutoff_size_domain - 1) / cutoff_size_domain;
+        let limit_number_of_domains = total_size.div_ceil(cutoff_size_domain);
         let mut count = 0;
 
         for (_, ml, doms) in &level_lines {
@@ -334,12 +334,19 @@ fn compute_merge_pu(
             let (_size_ext, contact_ext) =
                 measure_external(&sub_doms_1, &sub_doms_2, tab_matrix, pu_sizes);
 
-            let contact_ext_safe = if contact_ext <= 0.001 { 0.001 } else { contact_ext };
-            let nnc = contact_ext_safe
-                / (size_int_1.powf(0.43) * size_int_2.powf(0.43));
+            let contact_ext_safe = if contact_ext <= 0.001 {
+                0.001
+            } else {
+                contact_ext
+            };
+            let nnc = contact_ext_safe / (size_int_1.powf(0.43) * size_int_2.powf(0.43));
 
             let denom_int = (contact_int_1 + contact_int_2) / (size_int_1 * size_int_2);
-            let ratio_pdp = if denom_int.abs() < 1e-15 { 0.0 } else { nnc / denom_int };
+            let ratio_pdp = if denom_int.abs() < 1e-15 {
+                0.0
+            } else {
+                nnc / denom_int
+            };
 
             if results.is_empty() || nnc > 0.01 {
                 let new_pu = format!("{};{}", domains[j], domains[k]);
@@ -427,8 +434,8 @@ fn measure_domain(
         let density1 = if size1 > 0.0 { contact1 / size1 } else { 0.0 };
         density_tot += density1;
 
-        for k in (j + 1)..n {
-            let sub2 = parse_sub_domains(&domains[k]);
+        for sub2_str in &domains[(j + 1)..n] {
+            let sub2 = parse_sub_domains(sub2_str);
             let (size2, contact2) = measure_internal(&sub2, tab_matrix, pu_sizes);
             let (_, contact_ext) = measure_external(&sub1, &sub2, tab_matrix, pu_sizes);
 
@@ -452,8 +459,16 @@ fn measure_domain(
 
             let total_contact = contact_ext + contact1 + contact2;
             let total_size = size1 + size2;
-            let criterion = if total_size > 0.0 { total_contact / total_size } else { 1.0 };
-            let current_cr = if criterion > 0.0 { current_nnc / criterion } else { 0.0 };
+            let criterion = if total_size > 0.0 {
+                total_contact / total_size
+            } else {
+                1.0
+            };
+            let current_cr = if criterion > 0.0 {
+                current_nnc / criterion
+            } else {
+                0.0
+            };
 
             if current_cr > max_cr {
                 max_cr = current_cr;
@@ -474,7 +489,7 @@ fn parse_sub_domains(dom: &str) -> Vec<usize> {
 }
 
 /// Sort domain fragments lexically by first PU number.
-fn sort_domain_fragments(domains: &mut Vec<String>) {
+fn sort_domain_fragments(domains: &mut [String]) {
     for dom in domains.iter_mut() {
         if dom.contains(';') {
             let mut parts: Vec<usize> = dom
@@ -482,12 +497,24 @@ fn sort_domain_fragments(domains: &mut Vec<String>) {
                 .filter_map(|s| s.parse::<usize>().ok())
                 .collect();
             parts.sort();
-            *dom = parts.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(";");
+            *dom = parts
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join(";");
         }
     }
     domains.sort_by(|a, b| {
-        let first_a = a.split(';').next().and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
-        let first_b = b.split(';').next().and_then(|s| s.parse::<usize>().ok()).unwrap_or(0);
+        let first_a = a
+            .split(';')
+            .next()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(0);
+        let first_b = b
+            .split(';')
+            .next()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(0);
         first_a.cmp(&first_b)
     });
 }

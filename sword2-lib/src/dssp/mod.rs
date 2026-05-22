@@ -85,9 +85,7 @@ pub fn run_dssp(
     tracing::debug!(
         "DSSP: {} residues extracted (including {} chain breaks)",
         chain.len,
-        (1..=chain.len)
-            .filter(|&i| chain.get(i).aa == '!')
-            .count()
+        (1..=chain.len).filter(|&i| chain.get(i).aa == '!').count()
     );
 
     // Step 2: Calculate backbone angles (kappa, alpha, chirality)
@@ -106,7 +104,11 @@ pub fn run_dssp(
     format::write_dssp(&chain, pdb_name, dssp_path)?;
     format::write_s2d(&chain, pdb_name, s2d_path)?;
 
-    tracing::debug!("DSSP: wrote {} and {}", dssp_path.display(), s2d_path.display());
+    tracing::debug!(
+        "DSSP: wrote {} and {}",
+        dssp_path.display(),
+        s2d_path.display()
+    );
 
     Ok(DsspResult {
         chain,
