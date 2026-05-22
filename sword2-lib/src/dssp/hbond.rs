@@ -241,3 +241,62 @@ impl SpatialGrid {
         result
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dssp::types::{BackboneResidue, DsspChain, HydrogenBond, HBHIGH};
+
+    fn two_residue_chain() -> DsspChain {
+        let mut chain = DsspChain::new();
+        chain.push(BackboneResidue {
+            aa: 'A',
+            ..BackboneResidue::default()
+        });
+        chain.push(BackboneResidue {
+            aa: 'A',
+            ..BackboneResidue::default()
+        });
+        chain
+    }
+
+    #[test]
+    fn test_bond_detected_when_energy_below_threshold() {
+        let mut chain = two_residue_chain();
+        chain.get_mut(1).acceptor[0] = HydrogenBond {
+            residue: 2,
+            energy: HBHIGH - 100,
+        };
+        assert!(test_bond(&chain, 1, 2));
+    }
+
+    #[test]
+    fn test_bond_not_detected_at_threshold() {
+        let mut chain = two_residue_chain();
+        chain.get_mut(1).acceptor[0] = HydrogenBond {
+            residue: 2,
+            energy: HBHIGH,
+        };
+        assert!(!test_bond(&chain, 1, 2));
+    }
+
+    #[test]
+    fn test_bond_detected_via_second_slot() {
+        let mut chain = two_residue_chain();
+        chain.get_mut(1).acceptor[1] = HydrogenBond {
+            residue: 2,
+            energy: HBHIGH - 1,
+        };
+        assert!(test_bond(&chain, 1, 2));
+    }
+
+    #[test]
+    fn test_no_bond_when_residue_mismatch() {
+        let mut chain = two_residue_chain();
+        chain.get_mut(1).acceptor[0] = HydrogenBond {
+            residue: 0,
+            energy: HBHIGH - 100,
+        };
+        assert!(!test_bond(&chain, 1, 2));
+    }
+}

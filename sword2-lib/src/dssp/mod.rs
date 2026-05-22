@@ -116,3 +116,78 @@ pub fn run_dssp(
         s2d_path: s2d_path.to_path_buf(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use types::BackboneResidue;
+
+    #[test]
+    fn test_from_dssp_char() {
+        assert_eq!(
+            SecondaryStructure::from_dssp_char('H'),
+            SecondaryStructure::Helix
+        );
+        assert_eq!(
+            SecondaryStructure::from_dssp_char('G'),
+            SecondaryStructure::Helix
+        );
+        assert_eq!(
+            SecondaryStructure::from_dssp_char('I'),
+            SecondaryStructure::Helix
+        );
+        assert_eq!(
+            SecondaryStructure::from_dssp_char('E'),
+            SecondaryStructure::Sheet
+        );
+        assert_eq!(
+            SecondaryStructure::from_dssp_char('B'),
+            SecondaryStructure::Sheet
+        );
+        assert_eq!(
+            SecondaryStructure::from_dssp_char('T'),
+            SecondaryStructure::Turn
+        );
+        assert_eq!(
+            SecondaryStructure::from_dssp_char('S'),
+            SecondaryStructure::Turn
+        );
+        assert_eq!(
+            SecondaryStructure::from_dssp_char(' '),
+            SecondaryStructure::Coil
+        );
+        assert_eq!(
+            SecondaryStructure::from_dssp_char('X'),
+            SecondaryStructure::Coil
+        );
+    }
+
+    #[test]
+    fn test_to_char() {
+        assert_eq!(SecondaryStructure::Helix.to_char(), 'H');
+        assert_eq!(SecondaryStructure::Sheet.to_char(), 'E');
+        assert_eq!(SecondaryStructure::Turn.to_char(), 'T');
+        assert_eq!(SecondaryStructure::Coil.to_char(), 'C');
+    }
+
+    #[test]
+    fn test_dssp_chain_new_is_empty() {
+        let chain = DsspChain::new();
+        assert_eq!(chain.len, 0);
+    }
+
+    #[test]
+    fn test_chain_break_residue_has_bang() {
+        let res = BackboneResidue::chain_break();
+        assert_eq!(res.aa, '!');
+    }
+
+    #[test]
+    fn test_dssp_chain_push_increments_len() {
+        let mut chain = DsspChain::new();
+        chain.push(BackboneResidue::default());
+        assert_eq!(chain.len, 1);
+        chain.push(BackboneResidue::default());
+        assert_eq!(chain.len, 2);
+    }
+}

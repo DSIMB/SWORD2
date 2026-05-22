@@ -903,3 +903,74 @@ pub fn run_peeling(
         true_nums,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    // Build a valid DSSP data line for parse_dssp_for_peeling.
+    //
+    // Column layout (0-indexed):
+    //  0-4:  DSSP seqnum (right-aligned in 5)
+    //  5:    space
+    //  6-9:  PDB resnum (right-aligned in 4; col 6 is blanked by the parser)
+    //  10:   icode (' ')
+    //  11:   chain ('A')
+    //  12:   space
+    //  13:   amino acid code
+    //  14-15: spaces
+    //  16:   secondary structure code
+    //  17-125: spaces
+    //  126:  '0'  (non-space marker the parser requires at this column)
+    fn dssp_line(seqnum: usize, resnum: i32, aa: char, ss: char) -> String {
+        let head = format!("{:>5} {:>4} A {}  {}", seqnum, resnum, aa, ss);
+        debug_assert_eq!(head.len(), 17);
+        let mut line = head;
+        line.extend(std::iter::repeat_n(' ', 109));
+        line.push('0');
+        line
+    }
+
+    #[test]
+    fn test_parse_dssp_ss_types_and_residue_numbers() {
+        let dir = tempdir().unwrap();
+        let dssp_path = dir.path().join("test.dssp");
+
+        // Header line: col 126 is space → skipped by parser
+        let mut content = format!("{:<128}\n", "  # RESIDUE AA STRUCTURE");
+        // 3 coil, 4 helix, 3 coil
+        for i in 1..=3usize {
+            content.push_str(&dssp_line(i, i as i32, 'A', ' '));
+            content.push('\n');
+        }
+        for i in 4..=7usize {
+            content.push_str(&dssp_line(i, i as i32, 'A', 'H'));
+            content.push('\n');
+        }
+        for i in 8..=10usize {
+            content.push_str(&dssp_line(i, i as i32, 'A', ' '));
+            content.push('\n');
+        }
+        std::fs::write(&dssp_path, &content).unwrap();
+
+        let config = PeelingConfig::default();
+        let (ss_types, true_nums, cutting_mask) =
+            parse_dssp_for_peeling(&dssp_path, 10, &config).unwrap();
+
+        assert_eq!(ss_types.len(), 10);
+        assert_eq!(true_nums, (1..=10).collect::<Vec<i32>>());
+
+        assert!(ss_types[..3].iter().all(|s| *s == SsType::Coil));
+        assert!(ss_types[3..7].iter().all(|s| *s == SsType::Helix));
+        assert!(ss_types[7..].iter().all(|s| *s == SsType::Coil));
+
+        // Helix segment (0-indexed 3..6) has size=3 <= min_ss_size=8 → marked non-cuttable
+        assert!(cutting_mask[2]); // last coil before helix: cuttable
+        assert!(!cutting_mask[3]); // helix interior: non-cuttable
+        assert!(!cutting_mask[4]);
+        assert!(!cutting_mask[5]);
+        assert!(cutting_mask[6]); // segment_end itself is NOT masked (loop is seg_start..seg_end)
+        assert!(cutting_mask[7]); // first coil after helix: cuttable
+    }
+}
