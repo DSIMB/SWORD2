@@ -16,7 +16,7 @@ cargo build --release
 # Binary output: target/release/sword2
 
 # Build C/C++ dependencies (MyPMFs scoring only — Peeling is now pure Rust)
-bash install.sh
+make -C bin/mypmfs-master
 
 # Run on a PDB id (from repo root)
 ./target/release/sword2 -p 1jx4 -o results
@@ -27,11 +27,9 @@ bash install.sh
 # Fast mode (skip energy calculation, ~2x faster)
 ./target/release/sword2 -p 1jx4 -o results --disable-energies
 
-# Run benchmarks
-bash benchmark.sh
+# Run tests
+cargo test
 ```
-
-There are no unit tests currently (`cargo test` will compile but there are no test functions).
 
 ## Architecture
 
@@ -53,7 +51,7 @@ There are no unit tests currently (`cargo test` will compile but there are no te
 The Rust code shells out to one compiled C binary:
 - **`bin/mypmfs-master/scoring_omp`** — Pseudo-energy scoring (OpenMP parallelized)
 
-This is compiled by `install.sh` and invoked via `std::process::Command`.
+This is compiled by `make -C bin/mypmfs-master` and invoked via `std::process::Command`.
 
 Both DSSP and Peeling are now **pure Rust**:
 - DSSP: spatial grid optimization for H-bond detection (O(N·k) vs original O(N²))

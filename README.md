@@ -202,37 +202,39 @@ This produces a directory like:
 
 ```text
 results/1JX4_A/
-  1JX4_A
-  SWORD2_summary.txt
-  SWORD2_summary.json
-  PEELING_summary.txt
-  PEELING_summary.json
-  sword.txt
-  mapping_auth_resnums.txt
-  Junctions/
-    junctions_consistencies.txt
-  Protein_Units/
-    Peeling.log
-  SWORD/
-    1JX4_A/
-      ...
+  input.pdb
+  summary.txt
+  summary.json
+  peeling.txt
+  peeling.json
+  junctions.txt
+  residue_mapping.txt
+  intermediate/
+    1JX4_A.dssp
+    1JX4_A.pdb
+    contact_matrix.mat
+    peeling.log
+    ...
+  plots/
+    alt0.png
+    alt0_dom0.png
+    alt0_dom0_pu_1_163.png
+    ...
+    domain_histogram.svg
 ```
 
-When plots are enabled, SWORD2 also writes a `Contact_Probability_Matrix/` directory containing:
-
-- `domain_consistency_histogram.svg`
-- `contact_probability_matrix_alternative_<N>.png`
-- per-domain and per-PU contact matrix PNGs
+The `plots/` directory is only written when `--disable-plots` is not set. It contains one overview PNG per alternative partitioning, one PNG per domain, and one PNG per protein unit, plus a `domain_histogram.svg` consistency histogram.
 
 ## Output Files
 
-- `SWORD2_summary.txt`: human-readable summary of the optimal and alternative partitions.
-- `SWORD2_summary.json`: machine-readable JSON summary of the same partitionings.
-- `PEELING_summary.txt`: text summary of peeling levels and PUs.
-- `PEELING_summary.json`: JSON version of peeling results.
-- `sword.txt`: raw SWORD pipeline output.
-- `mapping_auth_resnums.txt`: mapping from cleaned residue numbering back to author residue numbering.
-- `Junctions/junctions_consistencies.txt`: junction consistency report.
+- `summary.txt`: human-readable summary of the optimal and alternative partitions.
+- `summary.json`: machine-readable JSON summary of the same partitionings.
+- `peeling.txt`: text summary of peeling levels and protein units.
+- `peeling.json`: JSON version of peeling results.
+- `junctions.txt`: junction consistency report.
+- `residue_mapping.txt`: mapping from cleaned residue numbering back to author residue numbering.
+- `input.pdb`: cleaned copy of the analyzed structure.
+- `intermediate/`: internal algorithm files (DSSP output, contact matrices, peeling logs).
 
 ## Performance Notes
 
