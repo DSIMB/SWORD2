@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use clap::{ArgAction, Parser};
+use clap::{ArgAction, Args, Parser, Subcommand};
 use console::Style;
 use indicatif::{ProgressBar, ProgressStyle};
 
@@ -19,6 +19,10 @@ use sword2_lib::{energy, fetch, output, pdb, peeling, plot, sword};
 #[derive(Parser, Debug)]
 #[command(name = "sword2", version, about)]
 struct Cli {
+    /// Optional subcommand. When omitted, the full domain-partitioning pipeline runs.
+    #[command(subcommand)]
+    command: Option<Commands>,
+
     /// PDB code to fetch and analyze (e.g., "1TIM")
     #[arg(short = 'p', long)]
     pdb_id: Option<String>,
@@ -74,6 +78,72 @@ struct Cli {
     /// Suppress all output except errors
     #[arg(short = 'q', long)]
     quiet: bool,
+}
+
+/// Subcommands (the default no-subcommand form runs the full pipeline).
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Score one structure's pseudo-energy (and Z-score) with the pure-Rust
+    /// scorer. Prints `Pseudo-energy = …` and `Z-score = …`, mirroring the
+    /// legacy `scoring_omp` output. Used by the benchmark harness and for debugging.
+    Score(ScoreArgs),
+}
+
+/// Arguments for the `score` subcommand.
+#[derive(Args, Debug)]
+struct ScoreArgs {
+    /// Path to the (cleaned) structure file to score.
+    #[arg(long)]
+    pdb: PathBuf,
+
+    /// Path to the potential directory (e.g. bin/mypmfs-master/025_30_100_potential).
+    #[arg(long)]
+    potential_dir: String,
+
+    /// Skip the Z-score computation (energy only).
+    #[arg(long)]
+    no_zscore: bool,
+
+    /// Number of random shuffles for the Z-score.
+    #[arg(long, default_value = "2000")]
+    shuffles: usize,
+
+    /// Threads for parallel decoy scoring (0 = all CPUs).
+    #[arg(long, default_value = "0")]
+    cpu: usize,
+
+    /// Restrict scoring to a residue subset (comma-separated `numchain` tokens, e.g. "1A,2A").
+    #[arg(long)]
+    residues: Option<String>,
+}
+
+/// Run the `score` subcommand: load potentials, score the structure, print results.
+fn run_score(args: &ScoreArgs) -> Result<()> {
+    if args.cpu > 0 {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(args.cpu)
+            .build_global()
+            .ok();
+    }
+    let pot = energy::Potentials::load(&args.potential_dir)?;
+    let pdb_str = args.pdb.to_string_lossy();
+    let result = energy::score_structure(
+        &pot,
+        &pdb_str,
+        args.residues.as_deref(),
+        args.shuffles,
+        !args.no_zscore,
+    )?;
+    // Match the legacy scoring_omp output lines so the benchmark parser is shared.
+    if let Some(e) = result.energy {
+        println!("Pseudo-energy = {e}");
+    }
+    if !args.no_zscore {
+        if let Some(z) = result.z_score {
+            println!("Z-score = {z}");
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -296,6 +366,11 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+    // Subcommands short-circuit the full pipeline.
+    if let Some(Commands::Score(args)) = &cli.command {
+        return run_score(args);
+    }
+
     // Initialize logging based on verbosity
     setup_logging(cli.verbosity, cli.quiet);
 
@@ -490,6 +565,8 @@ fn main() -> Result<()> {
     let energy_config = if !cli.disable_energies {
         let mut ec = energy::EnergyConfig::from_bin_dir(&bin_dir.to_string_lossy());
         ec.num_shuffles = cli.num_shuffles;
+        // Load potentials once up front, before the parallel scoring batch.
+        ec.preload()?;
         Some(ec)
     } else {
         None

@@ -3,18 +3,15 @@
 //! This module runs the external `scoring_omp` binary (from mypmfs) to compute
 //! pseudo-energy and Z-score for protein domains and protein units.
 
-use std::process::Command;
-use std::sync::LazyLock;
+use std::sync::{Arc, OnceLock};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use rayon::prelude::*;
-use regex::Regex;
+
+mod score;
+pub use score::{score as score_structure, Potentials};
 
 type WorkItem = (usize, usize, Vec<(i32, i32)>);
-
-static ENERGY_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^Pseudo-energy = (.+)$").unwrap());
-static ZSCORE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^Z-score = (.+)$").unwrap());
 
 /// Result of an energy calculation for a domain or PU.
 #[derive(Debug, Clone)]
@@ -40,12 +37,14 @@ impl EnergyResult {
 /// Path configuration for energy calculations.
 #[derive(Debug, Clone)]
 pub struct EnergyConfig {
-    /// Path to the scoring_omp binary.
+    /// Path to the scoring_omp binary (legacy; scoring is now pure Rust).
     pub scoring_bin: String,
     /// Path to the potential directory (025_30_100_potential).
     pub potential_dir: String,
     /// Number of random shuffles for Z-score.
     pub num_shuffles: usize,
+    /// Lazily-loaded, shared potentials (loaded once, reused across all calls).
+    potentials: Arc<OnceLock<Potentials>>,
 }
 
 impl EnergyConfig {
@@ -55,63 +54,49 @@ impl EnergyConfig {
             scoring_bin: format!("{}/mypmfs-master/scoring_omp", bin_dir),
             potential_dir: format!("{}/mypmfs-master/025_30_100_potential", bin_dir),
             num_shuffles: 2000,
+            potentials: Arc::new(OnceLock::new()),
         }
+    }
+
+    /// Get the loaded potentials, loading them on first access.
+    ///
+    /// Safe to call from multiple threads: a losing racer simply discards its
+    /// redundant load. Call [`EnergyConfig::preload`] once up front to avoid that
+    /// race entirely before a parallel batch.
+    fn potentials(&self) -> Result<&Potentials> {
+        if let Some(p) = self.potentials.get() {
+            return Ok(p);
+        }
+        let loaded = Potentials::load(&self.potential_dir)?;
+        let _ = self.potentials.set(loaded);
+        Ok(self.potentials.get().expect("potentials set"))
+    }
+
+    /// Eagerly load the potentials (call once before parallel scoring).
+    pub fn preload(&self) -> Result<()> {
+        self.potentials().map(|_| ())
     }
 }
 
 /// Calculate pseudo-energy and Z-score for a set of residues.
 ///
-/// Runs the external `scoring_omp` binary:
-/// ```text
-/// scoring_omp -i <pdb> -d <potential_dir> [-q <residue_list>] -z -s <num_shuffles>
-/// ```
-///
-/// Ported from Python `get_energy_and_z_score()`.
+/// Pure-Rust scoring (see [`score`]), replacing the former `scoring_omp -z`
+/// shell-out. Replicates that binary's CA-representation, linear-interpolation
+/// scoring path. `residue_list` (comma-separated `numchain` tokens) restricts the
+/// calculation to a subset, mirroring the binary's `-q` option.
 pub fn get_energy_and_z_score(
     config: &EnergyConfig,
     pdb_path: &str,
     residue_list: Option<&str>,
 ) -> Result<EnergyResult> {
-    let mut cmd = Command::new(&config.scoring_bin);
-    cmd.arg("-i").arg(pdb_path);
-    cmd.arg("-d").arg(&config.potential_dir);
-    if let Some(res_list) = residue_list {
-        cmd.arg("-q").arg(res_list);
-    }
-    cmd.arg("-z");
-    cmd.arg("-s").arg(config.num_shuffles.to_string());
-
-    let output = cmd
-        .output()
-        .with_context(|| format!("Failed to execute scoring binary: {}", config.scoring_bin))?;
-
-    if !output.status.success() {
-        tracing::warn!(
-            "Scoring binary failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        return Ok(EnergyResult {
-            energy: None,
-            z_score: None,
-        });
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    let mut energy = None;
-    let mut z_score = None;
-
-    for line in stdout.lines() {
-        if let Some(caps) = ENERGY_RE.captures(line) {
-            energy = caps[1].trim().parse::<f64>().ok();
-        }
-        if let Some(caps) = ZSCORE_RE.captures(line) {
-            z_score = caps[1].trim().parse::<f64>().ok();
-        }
-    }
-
-    tracing::trace!("Energy result: energy={:?}, z_score={:?}", energy, z_score);
-    Ok(EnergyResult { energy, z_score })
+    let pot = config.potentials()?;
+    let result = score::score(pot, pdb_path, residue_list, config.num_shuffles, true)?;
+    tracing::trace!(
+        "Energy result: energy={:?}, z_score={:?}",
+        result.energy,
+        result.z_score
+    );
+    Ok(result)
 }
 
 /// Build the residue list string for a set of residue numbers and a chain.

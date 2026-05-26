@@ -12,3 +12,7 @@ target/
 
 # macOS metadata
 .DS_Store
+
+# Benchmark harness: fetched structures and run outputs
+benchmark/structures/
+benchmark/results.*

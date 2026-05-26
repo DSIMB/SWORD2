@@ -15,7 +15,9 @@ SWORD2 (SWift and Optimized Recognition of protein Domains) is a protein domain 
 cargo build --release
 # Binary output: target/release/sword2
 
-# Build C/C++ dependencies (MyPMFs scoring only — Peeling is now pure Rust)
+# (Optional) Build the legacy C++ scoring binary — only needed to run the
+# energy-agreement validation test (tests/energy_agreement.rs). Scoring is now
+# pure Rust; normal runs need no C/C++ build.
 make -C bin/mypmfs-master
 
 # Run on a PDB id (from repo root)
@@ -39,23 +41,25 @@ cargo test
 - **`sword2-lib/`** — Library crate. All core logic, organized as modules:
   - `sword/` — Pipeline orchestration (`mod.rs`), PU merging (`compute_measure.rs`), domain selection (`parse_measure.rs`), distance model (`distance_model.rs`), Jones metrics (`compute_jones.rs`), junction analysis (`junctions.rs`)
   - `pdb/` — PDB/mmCIF parsing (`parser.rs`) via `pdbtbx`, type definitions (`types.rs`), PDB writing (`writer.rs`), amino acid definitions (`amino_acids.rs`)
-  - `energy/` — Pseudo-energy and Z-score calculation via external `scoring_omp` binary
+  - `energy/` — **Pure Rust** pseudo-energy and Z-score calculation (`score.rs`); ports the mypmfs `scoring_omp` scoring path (CA representation, linear interpolation). `mod.rs` holds `EnergyConfig`/`EnergyResult` and the parallel batch helpers; potentials are loaded once and cached
   - `peeling/` — **Pure Rust Peeling implementation** (Gelly et al. 2006). Modules: `algorithm.rs` (iterative hierarchical cutting, rayon-parallelized double cuts), `contact_matrix.rs` (contact probability matrix with 2D prefix sums), `mod.rs` (types, result conversion, legacy file parsing)
   - `dssp/` — **Pure Rust DSSP implementation** (Kabsch & Sander 1983 algorithm). Modules: `backbone.rs` (atom extraction, H synthesis), `hbond.rs` (spatial grid H-bond detection), `bridge.rs` (β-sheet assembly), `helix.rs` (helix/turn assignment), `angles.rs` (backbone geometry), `format.rs` (DSSP output format), `types.rs` (data structures)
   - `fetch.rs` — Downloads structures from PDB, AlphaFold, ESM Atlas
   - `output/` — Writes SWORD2_summary.txt/json results
   - `plot/` — SVG plot generation via `plotters`
 
-### External C/C++ Dependencies (in `bin/`)
+### No runtime C/C++ dependencies
 
-The Rust code shells out to one compiled C binary:
-- **`bin/mypmfs-master/scoring_omp`** — Pseudo-energy scoring (OpenMP parallelized)
-
-This is compiled by `make -C bin/mypmfs-master` and invoked via `std::process::Command`.
-
-Both DSSP and Peeling are now **pure Rust**:
+The pipeline is now **fully pure Rust** at runtime — DSSP, Peeling, and scoring
+are all native Rust:
 - DSSP: spatial grid optimization for H-bond detection (O(N·k) vs original O(N²))
 - Peeling: rayon-parallelized double cutting with 2D prefix-sum contact matrix (O(1) rectangle queries)
+- Scoring: `energy/score.rs` (pseudo-energy + rayon-parallelized Z-score decoys)
+
+The legacy C++ binary **`bin/mypmfs-master/scoring_omp`** is retained only as the
+reference oracle for `tests/energy_agreement.rs` (gated on its presence; the test
+skips if it isn't built). The shipped potential data lives in
+`bin/mypmfs-master/025_30_100_potential/` and is read directly by `score.rs`.
 
 ### Key Types
 
@@ -70,12 +74,12 @@ Both DSSP and Peeling are now **pure Rust**:
 
 ### Pipeline Flow
 
-1. Fetch/load structure → 2. Parse PDB/mmCIF → 3. Clean chain (remove non-standard residues, renumber from 1) → 4. Run DSSP (pure Rust) → 5. Run Peeling (pure Rust, in-memory) → 6. ComputeMeasure (merge PUs, in-memory from peeling) → 7. ParseMeasure + distance model (select domains, pure Rust) → 8. Calculate pseudo-energies (external scoring_omp) → 9. Write results (JSON + text) → 10. Junction consistency analysis → 11. Cleanup
+1. Fetch/load structure → 2. Parse PDB/mmCIF → 3. Clean chain (remove non-standard residues, renumber from 1) → 4. Run DSSP (pure Rust) → 5. Run Peeling (pure Rust, in-memory) → 6. ComputeMeasure (merge PUs, in-memory from peeling) → 7. ParseMeasure + distance model (select domains, pure Rust) → 8. Calculate pseudo-energies (pure Rust, `energy/score.rs`) → 9. Write results (JSON + text) → 10. Junction consistency analysis → 11. Cleanup
 
 ### Important Notes
 
 - The binary auto-detects `bin/` directory relative to its location; use `--base-dir` when running from a non-standard location.
-- Parallelism uses rayon for Rust-side work and OpenMP in the C binaries; controlled via `-x`/`--cpu` flag.
+- Parallelism uses rayon throughout (DSSP, Peeling, energy decoys); controlled via `-x`/`--cpu` flag.
 - Logging via `tracing`; default level is `info` for the `sword2` target. Control with `RUST_LOG` env var.
 
 ## Workflow Guidelines
