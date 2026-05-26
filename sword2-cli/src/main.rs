@@ -83,9 +83,9 @@ struct Cli {
 /// Subcommands (the default no-subcommand form runs the full pipeline).
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Score one structure's pseudo-energy (and Z-score) with the pure-Rust
-    /// scorer. Prints `Pseudo-energy = …` and `Z-score = …`, mirroring the
-    /// legacy `scoring_omp` output. Used by the benchmark harness and for debugging.
+    /// Score one structure's pseudo-energy (and Z-score) for a whole structure
+    /// or residue subset. Prints `Pseudo-energy = …` and `Z-score = …`, one per
+    /// line. Useful for scoring a single structure or debugging.
     Score(ScoreArgs),
 }
 
@@ -134,7 +134,6 @@ fn run_score(args: &ScoreArgs) -> Result<()> {
         args.shuffles,
         !args.no_zscore,
     )?;
-    // Match the legacy scoring_omp output lines so the benchmark parser is shared.
     if let Some(e) = result.energy {
         println!("Pseudo-energy = {e}");
     }

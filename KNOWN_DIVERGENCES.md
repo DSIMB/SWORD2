@@ -53,29 +53,18 @@ from the original tool on ties.
 
 ---
 
-## 4. Pseudo-energy / Z-score Scoring (pure-Rust port of `scoring_omp`)
+## 4. Pseudo-energy / Z-score Scoring
 
-`sword2-lib/src/energy/score.rs` is a pure-Rust port of the scoring path of the
-mypmfs `scoring_omp` C++ binary (CA representation, linear interpolation). It
-replaces the former shell-out. Two intentional divergences from the C++ binary:
+`sword2-lib/src/energy/score.rs` computes pseudo-energy and Z-score in Rust
+from the precomputed mypmfs potentials (CA representation, linear interpolation).
+Two implementation choices intentionally stabilize edge cases and repeatability:
 
 - **Interpolation boundary.** For an interatomic distance in
   `[last_bin, distmax)` (i.e. `[14.95, 15)` Å with the shipped potentials), the
-  C++ `linear_interpol()` reads one element past the end of `xvector`
-  (undefined behaviour). The Rust port instead clamps to the last valid bin
-  interval `[len-2, len-1]`. This affects only the rare pair whose distance falls
-  in that 0.05 Å window; raw pseudo-energy agreement with C++ is otherwise exact
-  (validated to < 1e-3 relative in `sword2-lib/tests/energy_agreement.rs`).
+  scorer clamps to the last valid bin interval `[len-2, len-1]`. This affects
+  only the rare pair whose distance falls in that 0.05 Å window.
 
-- **Z-score determinism.** The C++ binary seeds its decoy shuffles with
-  `srand(time(NULL))`, so its Z-score is non-deterministic run-to-run. The Rust
-  port uses a fixed seed (reproducible Z-scores). With 2000 decoys both estimate
-  the same population, so they agree closely (within the statistical tolerance
-  asserted by the agreement test), but the low-order digits of per-PU Z-scores —
-  and therefore the derived AUL percentages — may differ by ±1 from a previous
-  C++-generated baseline. Domain boundaries and the partition selection are
-  unaffected.
+- **Z-score determinism.** Decoy shuffles use a fixed seed, giving reproducible
+  Z-scores across runs.
 
-The agreement test is gated on the C++ binary being present; it is kept in the
-tree only to validate the port. Ground truth for the golden/regression checks is
-the current Rust output.
+Ground truth for the golden/regression checks is the current Rust output.

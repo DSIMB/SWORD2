@@ -6,13 +6,8 @@ __pycache__/
 
 # Build artifacts
 *.o
-bin/mypmfs-master/scoring_omp
 results*/
 target/
 
 # macOS metadata
 .DS_Store
-
-# Benchmark harness: fetched structures and run outputs
-benchmark/structures/
-benchmark/results.*

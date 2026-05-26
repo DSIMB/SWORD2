@@ -21,7 +21,7 @@ This repository is the standalone Rust implementation of SWORD2. The current cod
 - Pure Rust Peeling implementation.
 - Supports local structures, PDB IDs, AlphaFold UniProt accessions, and ESM Metagenomic Atlas MGnify IDs.
 - Writes both human-readable summaries and JSON outputs.
-- Optional pseudo-energy scoring through the bundled `mypmfs` backend.
+- Optional pseudo-energy scoring from bundled `mypmfs` statistical potential data.
 
 ## Web Server
 
@@ -37,13 +37,13 @@ The public SWORD2 web server is available at [dsimb.inserm.fr/SWORD2](https://ds
 
 - `sword2-cli/`: CLI crate. Entry point for the standalone executable.
 - `sword2-lib/`: core library with parsing, DSSP, peeling, energy, plotting, and output modules.
-- `bin/mypmfs-master/`: pseudo-energy scoring backend and potentials.
+- `sword2-lib/assets/fonts/`: embedded OFL-licensed font used for plot labels.
+- `bin/mypmfs-master/025_30_100_potential/`: pseudo-energy statistical potential data.
 - `results/`: example outputs.
 
 ## Requirements
 
 - Rust toolchain for building the workspace.
-- A working C toolchain only if you need to rebuild the `mypmfs` scoring binary.
 
 The current code uses Rust edition 2021 and builds with standard Cargo commands.
 
@@ -83,19 +83,13 @@ cargo test
 
 ## Energy Backend
 
-Domain and PU pseudo-energies are computed by the external `scoring_omp` binary used by the `mypmfs` backend.
+Domain and PU pseudo-energies are computed in Rust (`sword2-lib/src/energy/score.rs`)
+using the precomputed `mypmfs` statistical potentials.
 
-The runtime expects these paths to exist relative to the SWORD2 base directory:
+The runtime expects the potential data to exist relative to the SWORD2 base directory:
 
 ```text
-bin/mypmfs-master/scoring_omp
 bin/mypmfs-master/025_30_100_potential/
-```
-
-If you need to rebuild the scoring backend manually, use the bundled makefile:
-
-```bash
-make -C bin/mypmfs-master
 ```
 
 If you do not need pseudo-energies, run with `--disable-energies`.
@@ -238,7 +232,7 @@ The `plots/` directory is only written when `--disable-plots` is not set. It con
 
 ## Performance Notes
 
-- `--disable-energies` is the main fast mode and avoids the external scoring backend.
+- `--disable-energies` is the main fast mode and skips pseudo-energy calculations.
 - `--num-shuffles` lets you trade Z-score precision for speed during energy calculations.
 - `--cpu 0` uses all available CPUs.
 - Memory usage depends strongly on protein size; large proteins will require substantially more memory than typical 100-300 residue inputs.
@@ -269,7 +263,7 @@ The current implementation differs from the older standalone releases in a few i
 - DSSP is implemented in Rust.
 - Peeling is implemented in Rust.
 - The CLI is a Rust binary with Clap-based argument parsing.
-- The only external runtime scoring component is `mypmfs/scoring_omp` for pseudo-energy calculations.
+- Pseudo-energy/Z-score scoring is implemented in Rust, using the precomputed `mypmfs` potentials.
 
 ## License
 

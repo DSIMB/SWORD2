@@ -14,11 +14,7 @@ SWORD2 (SWift and Optimized Recognition of protein Domains) is a protein domain 
 # Build the Rust binary (release)
 cargo build --release
 # Binary output: target/release/sword2
-
-# (Optional) Build the legacy C++ scoring binary — only needed to run the
-# energy-agreement validation test (tests/energy_agreement.rs). Scoring is now
-# pure Rust; normal runs need no C/C++ build.
-make -C bin/mypmfs-master
+# No auxiliary native build step is required.
 
 # Run on a PDB id (from repo root)
 ./target/release/sword2 -p 1jx4 -o results
@@ -41,25 +37,22 @@ cargo test
 - **`sword2-lib/`** — Library crate. All core logic, organized as modules:
   - `sword/` — Pipeline orchestration (`mod.rs`), PU merging (`compute_measure.rs`), domain selection (`parse_measure.rs`), distance model (`distance_model.rs`), Jones metrics (`compute_jones.rs`), junction analysis (`junctions.rs`)
   - `pdb/` — PDB/mmCIF parsing (`parser.rs`) via `pdbtbx`, type definitions (`types.rs`), PDB writing (`writer.rs`), amino acid definitions (`amino_acids.rs`)
-  - `energy/` — **Pure Rust** pseudo-energy and Z-score calculation (`score.rs`); ports the mypmfs `scoring_omp` scoring path (CA representation, linear interpolation). `mod.rs` holds `EnergyConfig`/`EnergyResult` and the parallel batch helpers; potentials are loaded once and cached
+  - `energy/` — **Pure Rust** pseudo-energy and Z-score calculation (`score.rs`) using the precomputed mypmfs potentials (CA representation, linear interpolation). `mod.rs` holds `EnergyConfig`/`EnergyResult` and the parallel batch helpers; potentials are loaded once and cached
   - `peeling/` — **Pure Rust Peeling implementation** (Gelly et al. 2006). Modules: `algorithm.rs` (iterative hierarchical cutting, rayon-parallelized double cuts), `contact_matrix.rs` (contact probability matrix with 2D prefix sums), `mod.rs` (types, result conversion, legacy file parsing)
   - `dssp/` — **Pure Rust DSSP implementation** (Kabsch & Sander 1983 algorithm). Modules: `backbone.rs` (atom extraction, H synthesis), `hbond.rs` (spatial grid H-bond detection), `bridge.rs` (β-sheet assembly), `helix.rs` (helix/turn assignment), `angles.rs` (backbone geometry), `format.rs` (DSSP output format), `types.rs` (data structures)
   - `fetch.rs` — Downloads structures from PDB, AlphaFold, ESM Atlas
   - `output/` — Writes SWORD2_summary.txt/json results
   - `plot/` — SVG plot generation via `plotters`
 
-### No runtime C/C++ dependencies
+### Self-contained Rust pipeline
 
-The pipeline is now **fully pure Rust** at runtime — DSSP, Peeling, and scoring
-are all native Rust:
+The pipeline implements DSSP, Peeling, and scoring in Rust:
 - DSSP: spatial grid optimization for H-bond detection (O(N·k) vs original O(N²))
 - Peeling: rayon-parallelized double cutting with 2D prefix-sum contact matrix (O(1) rectangle queries)
 - Scoring: `energy/score.rs` (pseudo-energy + rayon-parallelized Z-score decoys)
 
-The legacy C++ binary **`bin/mypmfs-master/scoring_omp`** is retained only as the
-reference oracle for `tests/energy_agreement.rs` (gated on its presence; the test
-skips if it isn't built). The shipped potential data lives in
-`bin/mypmfs-master/025_30_100_potential/` and is read directly by `score.rs`.
+The only thing kept under `bin/` is the precomputed potential data
+(`bin/mypmfs-master/025_30_100_potential/`), read directly by `score.rs`.
 
 ### Key Types
 

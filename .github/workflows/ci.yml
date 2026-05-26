@@ -33,17 +33,6 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      - name: Install C++ build tools (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get install -y g++ libomp-dev
-
-      - name: Install C++ build tools (macOS)
-        if: runner.os == 'macOS'
-        run: brew install libomp
-
-      - name: Build mypmfs scoring backend
-        run: make -C bin/mypmfs-master
-
       - name: Check formatting
         run: cargo fmt --check
 

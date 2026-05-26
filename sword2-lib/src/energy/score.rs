@@ -1,20 +1,17 @@
-//! Pure-Rust port of the mypmfs `scoring_omp` scoring path (CA representation,
-//! linear interpolation only).
+//! Pure-Rust pseudo-energy scorer using the mypmfs statistical potentials
+//! (CA representation, linear interpolation).
 //!
-//! Replaces the external `scoring_omp` binary for the SWORD2 hot path. Replicates
-//! the algorithm in `bin/mypmfs-master/src/scoring_omp.cpp`:
-//!   load `.nrg` potentials + `parameters.log` + `xvector.dat` → extract CA atoms →
-//!   pairwise distances within `[distmin, distmax]` and sequence separation
-//!   `(diffmin, diffmax)` → per atom-pair linear-interpolate the potential by
-//!   distance → sum = pseudo-energy. Z-score: shuffle the sequence `num_shuffles`
-//!   times (similarity-constrained), recompute, `z = (E - μ) / σ`.
+//! Algorithm: load `.nrg` potentials + `parameters.log` + `xvector.dat` → extract
+//! CA atoms → pairwise distances within `[distmin, distmax]` and sequence
+//! separation `(diffmin, diffmax)` → per atom-pair linear-interpolate the
+//! potential by distance → sum = pseudo-energy. Z-score: shuffle the sequence
+//! `num_shuffles` times (similarity-constrained), recompute, `z = (E - μ) / σ`.
 //!
-//! Scope cuts (matching how `energy/mod.rs` invokes the binary — never `-c`):
-//! linear interpolation only (no cubic spline); CA/BB representations only.
+//! Scope: linear interpolation only (no cubic spline); CA/BB representations only.
 //!
-//! Known divergence from C++: at distances in `[last_bin, distmax)` the C++ code
-//! reads one-past-the-end of `xvector` (undefined behavior); we clamp to the last
-//! valid bin interval instead. See `KNOWN_DIVERGENCES.md`.
+//! Implementation note: at distances in `[last_bin, distmax)` we clamp to the
+//! last valid bin interval, avoiding an invalid access at the upper edge.
+//! See `KNOWN_DIVERGENCES.md`.
 
 /// Loaded pseudo-energy potentials and scoring parameters for one representation.
 #[derive(Debug)]
@@ -133,9 +130,8 @@ impl Potentials {
     /// Bin index and interpolation fraction for distance `x`.
     ///
     /// Returns `(i, frac)` such that the interpolated value is
-    /// `table[i] * (1 - frac) + table[i+1] * frac`. Ports `linear_interpol()`'s
-    /// index search; the index is clamped to a valid interval `[i, i+1]` (C++
-    /// reads one-past-the-end here — see module docs).
+    /// `table[i] * (1 - frac) + table[i+1] * frac`. The index is clamped to a
+    /// valid interval `[i, i+1]` at the upper boundary.
     fn bin_and_frac(&self, x: f64) -> (usize, f64) {
         let last = self.xvector.len() - 1;
         let mut i = last;
@@ -210,8 +206,7 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rayon::prelude::*;
 
-/// Max sequence identity with the query allowed for a shuffled decoy (C++ default
-/// `-t 0.5`; `energy/mod.rs` never overrides it).
+/// Max sequence identity with the query allowed for a shuffled decoy.
 const SIM_THRES: f64 = 0.5;
 
 /// Permute a per-residue sequence until it is at most `simthres` identical to the
@@ -219,7 +214,7 @@ const SIM_THRES: f64 = 0.5;
 ///
 /// Returns the new value assigned to each residue index. A safety cap prevents a
 /// hang on degenerate inputs (n < 2, or too few distinct values to drop below
-/// `simthres`) where the C++ loop would spin forever.
+/// `simthres`).
 fn shuffle_seq<T: Clone + PartialEq + Default>(
     seq: &[T],
     simthres: f64,
@@ -232,7 +227,7 @@ fn shuffle_seq<T: Clone + PartialEq + Default>(
     // perm[i] = original residue index currently sitting at sequence position i.
     let mut perm: Vec<usize> = (0..n).collect();
     let mut similarity = 1.0;
-    let cap = 100 * n; // safety: C++ would spin forever on degenerate inputs.
+    let cap = 100 * n;
     let mut iters = 0;
     while similarity > simthres && iters < cap {
         iters += 1;
@@ -253,9 +248,8 @@ fn shuffle_seq<T: Clone + PartialEq + Default>(
 }
 
 /// Compute the Z-score: `z = (E - μ) / σ` over `num_shuffles` decoy energies.
-/// Returns `Some(0.0)` when the query energy is zero (C++ prints "Z-score = 0"),
-/// and `None` when σ is zero (undefined Z-score). Seeded per decoy for
-/// reproducibility (the C++ Z-score is non-deterministic: `srand(time(NULL))`).
+/// Returns `Some(0.0)` when the query energy is zero and `None` when sigma is
+/// zero (undefined Z-score). Decoys are seeded for reproducibility.
 ///
 /// Hot path is allocation-free: residue labels are mapped to small integer type
 /// indices, potential curves are gathered into a dense `K×K` table, and each
@@ -340,13 +334,12 @@ fn z_score(
     Some((total - mean) / stdev)
 }
 
-/// Fixed RNG seed so Z-scores are reproducible across runs (the C++ binary's
-/// Z-score is non-deterministic; ours is intentionally not).
+/// Fixed RNG seed so Z-scores are reproducible across runs.
 const DEFAULT_SEED: u64 = 0x00C0_FFEE_0000_0001;
 
 /// Score a structure: pseudo-energy and (optionally) Z-score, for the whole
 /// structure or a residue subset (`residue_list`, comma-separated `numchain`
-/// tokens like `"12A,13A"`). Drop-in replacement for the `scoring_omp -z` call.
+/// tokens like `"12A,13A"`).
 pub fn score(
     pot: &Potentials,
     pdb_path: &str,
@@ -366,7 +359,7 @@ pub fn score(
     });
     let atoms = parse_atoms(&content, &pot.atypes, filter.as_ref());
 
-    // No atoms in selection → C++ prints no energy line (regex misses → None).
+    // No atoms in the selected residue subset means there is no score.
     if atoms.is_empty() {
         return Ok(super::EnergyResult {
             energy: None,
@@ -415,8 +408,8 @@ fn three_to_one(resname: &str) -> Option<&'static str> {
     })
 }
 
-/// Parse the CA (or other-representation) atoms from PDB text, replicating C++
-/// `file2vec` + `residuefilter`: first model only; `ATOM` records with a known
+/// Parse the CA (or other-representation) atoms from PDB text: first model only;
+/// `ATOM` records with a known
 /// standard residue whose `<one-letter><atom-name>` label is in `atypes`; altloc
 /// blank or "A"; optionally restricted to residues in `residue_filter` (tokens
 /// like "12A" = resnum+chain).
@@ -427,11 +420,11 @@ fn parse_atoms(
 ) -> Vec<ScoreAtom> {
     let mut atoms = Vec::new();
     for line in content.lines() {
-        // First model only (C++ stops at ENDMDL).
+        // Score only the first structure model.
         if line.starts_with("ENDMDL") {
             break;
         }
-        // C++ requires len > 53 to safely read the z column [46:54].
+        // Coordinates require all columns through the z value at [46:54].
         if !line.starts_with("ATOM") || line.len() <= 53 {
             continue;
         }

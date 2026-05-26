@@ -11,10 +11,24 @@
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Once;
 
 use anyhow::{Context, Result};
 use ndarray::Array2;
 use plotters::prelude::*;
+
+const EMBEDDED_SANS_FONT: &[u8] = include_bytes!("../../assets/fonts/Abel-Regular.ttf");
+static REGISTER_EMBEDDED_FONT: Once = Once::new();
+
+fn register_embedded_font() {
+    REGISTER_EMBEDDED_FONT.call_once(|| {
+        assert!(
+            plotters::style::register_font("sans-serif", FontStyle::Normal, EMBEDDED_SANS_FONT)
+                .is_ok(),
+            "embedded plot font must be a valid TrueType font"
+        );
+    });
+}
 
 /// Color palette for Protein Units (pastel colors).
 pub const PU_COLORS: &[(u8, u8, u8)] = &[
@@ -305,6 +319,8 @@ fn write_contact_matrix_png(
     output_path: &Path,
     large_format: bool,
 ) -> Result<()> {
+    register_embedded_font();
+
     // Matching original matplotlib: figsize=(6,9) @ 150 dpi = 900×1350 for large,
     // figsize=(5,6.5) @ 150 dpi = 750×975 for PU-level
     let (width, height) = if large_format {
@@ -469,6 +485,7 @@ pub fn write_domain_histogram(domain_counts: &[DomainCount], output_path: &str) 
     if domain_counts.is_empty() {
         return Ok(());
     }
+    register_embedded_font();
 
     let width = 960u32;
     let height = 620u32;
@@ -568,6 +585,34 @@ pub fn get_domain_color(index: usize) -> (u8, u8, u8) {
 mod tests {
     use super::*;
     use crate::sword::SwordPartition;
+
+    #[test]
+    fn png_plot_renders_labels_without_system_fonts() {
+        let dir = tempfile::tempdir().expect("temporary output directory");
+        let output = dir.path().join("plot.png");
+        let matrix = Array2::from_elem((1, 1), 1.0);
+
+        write_contact_matrix_png(&matrix, 1, "Plot title", &[], &output, false)
+            .expect("write labeled PNG");
+
+        assert!(output.metadata().expect("PNG metadata").len() > 0);
+    }
+
+    #[test]
+    fn svg_histogram_renders_labels_without_system_fonts() {
+        let dir = tempfile::tempdir().expect("temporary output directory");
+        let output = dir.path().join("histogram.svg");
+        let counts = [DomainCount {
+            label: "(1, 20)".to_string(),
+            count: 1,
+            color: DOMAIN_COLORS[0],
+        }];
+
+        write_domain_histogram(&counts, output.to_str().expect("UTF-8 path"))
+            .expect("write labeled SVG");
+
+        assert!(output.metadata().expect("SVG metadata").len() > 0);
+    }
 
     #[test]
     fn test_count_domains() {

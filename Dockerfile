@@ -1,6 +1,6 @@
 ### BUILD-STAGE: Compile Rust SWORD2 binary
 ##########################################
-FROM rust:1.76-bookworm AS rust_build
+FROM rust:bookworm AS rust_build
 
 # Set the working directory to /app
 WORKDIR /app
@@ -9,7 +9,6 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY sword2-lib/ sword2-lib/
 COPY sword2-cli/ sword2-cli/
-COPY src/ src/
 
 # Build the release binary
 RUN cargo build --release
@@ -20,7 +19,7 @@ RUN cargo build --release
 FROM ubuntu:22.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    make gcc g++ libc-dev libc6 gosu\
+    gosu \
     && rm -rf /var/lib/apt/lists/*
 
 LABEL program="SWORD2"
@@ -34,17 +33,12 @@ WORKDIR /app
 # Copy the compiled Rust binary from the build stage
 COPY --from=rust_build /app/target/release/sword2 /usr/local/bin/sword2
 
-# Copy sources to build the internal tools and data files needed
-COPY install.sh install.sh
+# Copy the statistical potential data needed by the Rust scorer
 COPY bin/ bin/
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 # Make the entrypoint script executable
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
-
-# Run the install.sh script
-# This step compiles all C/C++ dependencies in bin/
-RUN bash install.sh
 
 # Change ownership of the /app directory to root initially
 RUN chown -R root:root /app

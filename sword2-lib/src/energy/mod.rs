@@ -1,7 +1,7 @@
 //! Pseudo-energy calculations for protein domains.
 //!
-//! This module runs the external `scoring_omp` binary (from mypmfs) to compute
-//! pseudo-energy and Z-score for protein domains and protein units.
+//! Pure-Rust pseudo-energy and Z-score computation (see [`score`]) for protein
+//! domains and protein units, using the precomputed mypmfs potentials.
 
 use std::sync::{Arc, OnceLock};
 
@@ -37,8 +37,6 @@ impl EnergyResult {
 /// Path configuration for energy calculations.
 #[derive(Debug, Clone)]
 pub struct EnergyConfig {
-    /// Path to the scoring_omp binary (legacy; scoring is now pure Rust).
-    pub scoring_bin: String,
     /// Path to the potential directory (025_30_100_potential).
     pub potential_dir: String,
     /// Number of random shuffles for Z-score.
@@ -51,7 +49,6 @@ impl EnergyConfig {
     /// Create config from the bin directory path.
     pub fn from_bin_dir(bin_dir: &str) -> Self {
         Self {
-            scoring_bin: format!("{}/mypmfs-master/scoring_omp", bin_dir),
             potential_dir: format!("{}/mypmfs-master/025_30_100_potential", bin_dir),
             num_shuffles: 2000,
             potentials: Arc::new(OnceLock::new()),
@@ -80,10 +77,9 @@ impl EnergyConfig {
 
 /// Calculate pseudo-energy and Z-score for a set of residues.
 ///
-/// Pure-Rust scoring (see [`score`]), replacing the former `scoring_omp -z`
-/// shell-out. Replicates that binary's CA-representation, linear-interpolation
-/// scoring path. `residue_list` (comma-separated `numchain` tokens) restricts the
-/// calculation to a subset, mirroring the binary's `-q` option.
+/// Pure-Rust scoring (see [`score`]), CA representation with linear interpolation.
+/// `residue_list` (comma-separated `numchain` tokens) restricts the calculation to
+/// a residue subset.
 pub fn get_energy_and_z_score(
     config: &EnergyConfig,
     pdb_path: &str,
