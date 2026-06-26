@@ -75,7 +75,7 @@ struct Cli {
     #[arg(long)]
     skip_existing: bool,
 
-    /// Write one PDB file per domain (best partition) into <output>/domains/
+    /// Write one PDB file per domain of the optimal partition into <output>/domains_optimal/
     #[arg(long)]
     extract_domains: bool,
 
@@ -88,6 +88,12 @@ struct Cli {
     /// Output format for stdout summary: text (default), tsv, json
     #[arg(long, default_value = "text")]
     format: output::OutputFormat,
+
+    /// Fetch legacy PDB format (.pdb) from RCSB instead of mmCIF (.cif).
+    /// Use this only if you specifically need PDB format; some entries are
+    /// unavailable in PDB format and will error.
+    #[arg(long)]
+    legacy_pdb: bool,
 
     /// Batch file: one structure per line (PDB ID, af:UNIPROT, esm:MGNIFY, or file path)
     #[arg(long)]
@@ -270,6 +276,18 @@ impl Reporter {
             eprintln!("{}", line.trim_end());
         }
         self.step_start = None;
+    }
+
+    /// Print a plain informational note (always visible unless quiet).
+    fn note(&self, msg: &str) {
+        if self.quiet {
+            return;
+        }
+        if let Some(ref pb) = self.spinner {
+            pb.println(format!(" {}  {}", self.s_ok.apply_to("·"), msg));
+        } else {
+            eprintln!(" {}  {}", self.s_ok.apply_to("·"), msg);
+        }
     }
 
     /// Print a warning.
@@ -492,7 +510,7 @@ fn process_entry(
 
     // Step 1: Obtain the structure file
     reporter.step("Fetch structure");
-    let (input_path, pdb_id_base, is_fetched) = resolve_input(entry, output_dir)?;
+    let (input_path, pdb_id_base, is_fetched) = resolve_input(entry, output_dir, cli.legacy_pdb)?;
     reporter.step_done("Fetch structure", None);
 
     // Step 2: Parse the structure
@@ -784,17 +802,21 @@ fn process_entry(
     }
     reporter.step_done("Write results", None);
 
-    // Domain PDB extraction
+    // Domain PDB extraction (optimal partition only)
     if cli.extract_domains {
         if let Some(best) = sword_results.domains.first() {
-            let domains_dir = results_dir.join("domains");
+            let domains_dir = results_dir.join("domains_optimal");
             pdb::writer::write_domain_pdbs(&cleaned_chain, &best.boundaries, &domains_dir)
                 .context("Failed to write domain PDBs")?;
-            tracing::debug!(
-                "Wrote {} domain PDB(s) to {}",
-                best.boundaries.len(),
-                domains_dir.display()
-            );
+            // The directory name (domains_optimal) already conveys this; only
+            // surface the note when the user asks for more verbose output.
+            if cli.verbosity >= 1 {
+                reporter.note(&format!(
+                    "Extracted {} domain PDB(s) (optimal partition) → {}",
+                    best.boundaries.len(),
+                    domains_dir.display()
+                ));
+            }
         }
     }
 
@@ -981,7 +1003,11 @@ fn main() -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Resolve an entry to a local file path, a base name for output, and a fetch flag.
-fn resolve_input(entry: &EntryArgs, output_dir: &PathBuf) -> Result<(PathBuf, String, bool)> {
+fn resolve_input(
+    entry: &EntryArgs,
+    output_dir: &PathBuf,
+    legacy_pdb: bool,
+) -> Result<(PathBuf, String, bool)> {
     if let Some(ref input_file) = entry.input_file {
         let base = input_file
             .file_stem()
@@ -996,7 +1022,7 @@ fn resolve_input(entry: &EntryArgs, output_dir: &PathBuf) -> Result<(PathBuf, St
         let path = fetch::fetch_esm(mgnify_id, output_dir)?;
         Ok((path, mgnify_id.clone(), true))
     } else if let Some(ref pdb_id) = entry.pdb_id {
-        let path = fetch::fetch_pdb(pdb_id, output_dir)?;
+        let path = fetch::fetch_pdb(pdb_id, output_dir, legacy_pdb)?;
         Ok((path, pdb_id.to_uppercase(), true))
     } else {
         anyhow::bail!("No input source specified");

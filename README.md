@@ -180,7 +180,7 @@ Current top-level options:
 - `--install-dir <DIR>`: override SWORD2 installation directory (where `bin/` lives).
 - `-z, --zscore-shuffles <N>`: Z-score shuffle count. Higher = more precise. Default: `2000`.
 - `--skip-existing`: skip structures whose output directory already contains `summary.json`.
-- `--extract-domains`: write one PDB file per domain into `<output>/domains/`.
+- `--extract-domains`: write one PDB file per domain of the optimal partition into `<output>/domains_optimal/`.
 - `--min-plddt <VALUE>`: filter residues below this pLDDT confidence score (AlphaFold/ESM only).
 - `--format <text|tsv|json>`: stdout output format. Default: `text`.
 - `--batch <FILE>`: process multiple structures from a file (one per line).
