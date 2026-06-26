@@ -22,8 +22,8 @@ cargo build --release
 # Run on a local file
 ./target/release/sword2 -i structure.pdb -o results
 
-# Fast mode (skip energy calculation, ~2x faster)
-./target/release/sword2 -p 1jx4 -o results --disable-energies
+# With energy calculation and plots
+./target/release/sword2 -p 1jx4 -o results -E -P
 
 # Run tests
 cargo test
@@ -71,8 +71,8 @@ The only thing kept under `bin/` is the precomputed potential data
 
 ### Important Notes
 
-- The binary auto-detects `bin/` directory relative to its location; use `--base-dir` when running from a non-standard location.
-- Parallelism uses rayon throughout (DSSP, Peeling, energy decoys); controlled via `-x`/`--cpu` flag.
+- The binary auto-detects `bin/` directory relative to its location; use `--install-dir` when running from a non-standard location.
+- Parallelism uses rayon throughout (DSSP, Peeling, energy decoys); controlled via `-j`/`--threads` flag.
 - Logging via `tracing`; default level is `info` for the `sword2` target. Control with `RUST_LOG` env var.
 
 ## Workflow Guidelines

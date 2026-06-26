@@ -49,27 +49,27 @@ struct Cli {
 
     /// Structure model number to parse (for NMR structures)
     #[arg(long, default_value = "1")]
-    model: i32,
+    nmr_model: i32,
 
-    /// Disable energy calculations
-    #[arg(short = 'e', long)]
-    disable_energies: bool,
+    /// Enable pseudo-energy calculations
+    #[arg(short = 'E', long)]
+    energies: bool,
 
-    /// Disable generation of contact probability matrix plots
-    #[arg(short = 'l', long)]
-    disable_plots: bool,
+    /// Enable generation of contact probability matrix plots
+    #[arg(short = 'P', long)]
+    plots: bool,
 
     /// Number of threads for parallel computation (0 = all CPUs)
-    #[arg(short = 'x', long, default_value = "0")]
-    cpu: usize,
+    #[arg(short = 'j', long, default_value = "0")]
+    threads: usize,
 
-    /// Path to SWORD2 base directory (defaults to parent of binary location)
+    /// Path to SWORD2 installation directory (defaults to parent of binary location)
     #[arg(long)]
-    base_dir: Option<PathBuf>,
+    install_dir: Option<PathBuf>,
 
     /// Number of random shuffles for Z-score calculation (default: 2000, lower = faster)
-    #[arg(short = 's', long, default_value = "2000")]
-    num_shuffles: usize,
+    #[arg(short = 'z', long, default_value = "2000")]
+    zscore_shuffles: usize,
 
     /// Increase verbosity (-v steps, -vv debug, -vvv trace)
     #[arg(short = 'v', long = "verbose", action = ArgAction::Count)]
@@ -387,14 +387,14 @@ fn main() -> Result<()> {
     }
 
     // Determine number of threads
-    let num_threads = if cli.cpu == 0 {
+    let num_threads = if cli.threads == 0 {
         num_cpus::get()
     } else {
-        cli.cpu
+        cli.threads
     };
 
     // Resolve base directory (where bin/ lives)
-    let base_dir = if let Some(ref bd) = cli.base_dir {
+    let base_dir = if let Some(ref bd) = cli.install_dir {
         bd.clone()
     } else {
         // Try: parent of the binary, then current directory
@@ -527,8 +527,8 @@ fn main() -> Result<()> {
     reporter.step("SWORD pipeline");
     tracing::debug!("Launch SWORD pipeline");
     let config = sword::SwordConfig {
-        compute_energies: !cli.disable_energies,
-        generate_plots: !cli.disable_plots,
+        compute_energies: cli.energies,
+        generate_plots: cli.plots,
         num_threads,
         output_dir: results_dir.to_string_lossy().to_string(),
         max_alternatives: 9,
@@ -561,9 +561,9 @@ fn main() -> Result<()> {
 
     // Step 7: Calculate energies
     // First, collect all unique PU ranges across SWORD partitions (for batch dedup)
-    let energy_config = if !cli.disable_energies {
+    let energy_config = if cli.energies {
         let mut ec = energy::EnergyConfig::from_bin_dir(&bin_dir.to_string_lossy());
-        ec.num_shuffles = cli.num_shuffles;
+        ec.num_shuffles = cli.zscore_shuffles;
         // Load potentials once up front, before the parallel scoring batch.
         ec.preload()?;
         Some(ec)
@@ -621,13 +621,13 @@ fn main() -> Result<()> {
     output::write_sword_summary(
         &sword_results,
         &energies,
-        cli.disable_energies,
+        !cli.energies,
         &results_dir.join("summary.txt"),
     )?;
     output::write_sword_summary_json(
         &sword_results,
         &energies,
-        cli.disable_energies,
+        !cli.energies,
         &results_dir.join("summary.json"),
     )?;
 

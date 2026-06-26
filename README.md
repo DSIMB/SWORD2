@@ -92,7 +92,7 @@ The runtime expects the potential data to exist relative to the SWORD2 base dire
 bin/mypmfs-master/025_30_100_potential/
 ```
 
-If you do not need pseudo-energies, run with `--disable-energies`.
+Pseudo-energy calculations require the scoring backend. Enable them with `-E`/`--energies`.
 
 ## Usage
 
@@ -126,16 +126,22 @@ Useful variants:
 ./sword2 -p 1jx4 -c A -o results
 
 # Use a different model for NMR structures
-./sword2 -i structure.pdb --model 2 -o results
+./sword2 -i structure.pdb --nmr-model 2 -o results
 
-# Skip pseudo-energy calculations
-./sword2 -p 1jx4 -o results --disable-energies
+# Enable pseudo-energy calculations
+./sword2 -p 1jx4 -o results -E
 
-# Skip plot generation
-./sword2 -p 1jx4 -o results --disable-plots
+# Enable plot generation
+./sword2 -p 1jx4 -o results -P
 
-# Reduce Z-score shuffle count for faster energy runs
-./sword2 -p 1jx4 -o results --num-shuffles 500
+# Enable both energies and plots
+./sword2 -p 1jx4 -o results -E -P
+
+# Reduce Z-score shuffles for faster energy runs
+./sword2 -p 1jx4 -o results -E --zscore-shuffles 500
+
+# Use 8 threads
+./sword2 -p 1jx4 -o results -j 8
 
 # Increase verbosity
 ./sword2 -p 1jx4 -o results -v
@@ -145,10 +151,10 @@ Useful variants:
 ./sword2 -p 1jx4 -o results -q
 ```
 
-If you run the binary outside the repository root, point it to the project base directory so it can find `bin/`:
+If you run the binary outside the repository root, point it to the installation directory so it can find `bin/`:
 
 ```bash
-./sword2 -p 1jx4 -o results --base-dir /path/to/SWORD2
+./sword2 -p 1jx4 -o results --install-dir /path/to/SWORD2
 ```
 
 You can also run directly through Cargo:
@@ -167,12 +173,17 @@ Current top-level options:
 - `-m, --mgnify-id <MGNIFY_ID>`: fetch an ESM Atlas model.
 - `-i, --input-file <INPUT_FILE>`: analyze a local PDB or mmCIF file.
 - `-o, --output-dir <OUTPUT_DIR>`: choose the output directory. Defaults to the current directory.
-- `--model <MODEL>`: pick a structure model for NMR inputs. Defaults to `1`.
-- `-e, --disable-energies`: skip pseudo-energy calculations.
-- `-l, --disable-plots`: skip contact matrix plot generation.
-- `-x, --cpu <CPU>`: set the number of worker threads. `0` means all CPUs.
-- `--base-dir <BASE_DIR>`: locate the SWORD2 base directory containing `bin/`.
-- `-s, --num-shuffles <NUM_SHUFFLES>`: adjust Z-score shuffle count. Defaults to `2000`.
+- `--nmr-model <N>`: pick a structure model for NMR inputs. Defaults to `1`.
+- `-E, --energies`: enable pseudo-energy calculations (off by default).
+- `-P, --plots`: enable contact matrix plot generation (off by default).
+- `-j, --threads <N>`: number of worker threads. `0` = all CPUs (default).
+- `--install-dir <DIR>`: override SWORD2 installation directory (where `bin/` lives).
+- `-z, --zscore-shuffles <N>`: Z-score shuffle count. Higher = more precise. Default: `2000`.
+- `--skip-existing`: skip structures whose output directory already contains `summary.json`.
+- `--extract-domains`: write one PDB file per domain into `<output>/domains/`.
+- `--min-plddt <VALUE>`: filter residues below this pLDDT confidence score (AlphaFold/ESM only).
+- `--format <text|tsv|json>`: stdout output format. Default: `text`.
+- `--batch <FILE>`: process multiple structures from a file (one per line).
 - `-v, --verbose...`: increase logging verbosity.
 - `-q, --quiet`: suppress non-error output.
 
@@ -232,9 +243,9 @@ The `plots/` directory is only written when `--disable-plots` is not set. It con
 
 ## Performance Notes
 
-- `--disable-energies` is the main fast mode and skips pseudo-energy calculations.
-- `--num-shuffles` lets you trade Z-score precision for speed during energy calculations.
-- `--cpu 0` uses all available CPUs.
+- Energies and plots are off by default; use `-E` and `-P` to activate them.
+- `-z` lets you trade Z-score precision for speed during energy calculations.
+- `-j 0` uses all available CPUs (default).
 - Memory usage depends strongly on protein size; large proteins will require substantially more memory than typical 100-300 residue inputs.
 
 ## Docker
