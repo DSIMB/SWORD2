@@ -9,6 +9,27 @@ use std::path::Path;
 use anyhow::Result;
 use serde::Serialize;
 
+/// Format for machine-readable stdout output produced by `write_stdout_summary`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutputFormat {
+    #[default]
+    Text,
+    Tsv,
+    Json,
+}
+
+impl std::str::FromStr for OutputFormat {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "text" => Ok(Self::Text),
+            "tsv" => Ok(Self::Tsv),
+            "json" => Ok(Self::Json),
+            other => anyhow::bail!("Unknown output format '{}'. Valid: text, tsv, json", other),
+        }
+    }
+}
+
 use crate::energy::{EnergyKey, EnergyResult};
 use crate::sword::SwordResults;
 
@@ -232,6 +253,79 @@ pub fn write_sword_summary_json(
     std::fs::write(output_path, json_str)?;
 
     Ok(())
+}
+
+/// Write a single-run result summary line to stdout in the requested format.
+///
+/// `Text` is a no-op — the spinner/finish line already handles human output.
+/// `Tsv` emits one tab-separated data line (print header separately via `write_tsv_header`).
+/// `Json` emits one compact JSON object.
+pub fn write_stdout_summary(
+    id_chain: &str,
+    chain: char,
+    results: &crate::sword::SwordResults,
+    energies: &std::collections::HashMap<EnergyKey, EnergyResult>,
+    format: OutputFormat,
+) {
+    if format == OutputFormat::Text {
+        return;
+    }
+
+    let best = match results.domains.first() {
+        Some(p) => p,
+        None => return,
+    };
+
+    let n_domains = best.boundaries.len();
+
+    // "1-34,227-256;35-91;92-144" — comma separates PU segments, semicolon separates domains
+    let domains_str: String = best
+        .boundaries
+        .iter()
+        .map(|segs| {
+            segs.iter()
+                .map(|(s, e)| format!("{}-{}", s, e))
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .collect::<Vec<_>>()
+        .join(";");
+
+    let quality = &best.quality;
+    let ambiguity = &results.ambiguity;
+
+    let dom_energy = energies.get(&EnergyKey::Domain(0, 0));
+    let energy_val = dom_energy.and_then(|e| e.energy);
+    let zscore_val = dom_energy.and_then(|e| e.z_score);
+
+    match format {
+        OutputFormat::Tsv => {
+            let energy_str = energy_val.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "NA".to_string());
+            let zscore_str = zscore_val.map(|v| format!("{:.2}", v)).unwrap_or_else(|| "NA".to_string());
+            println!(
+                "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                id_chain, chain, n_domains, domains_str, quality, ambiguity, energy_str, zscore_str
+            );
+        }
+        OutputFormat::Json => {
+            let energy_json = energy_val
+                .map(|v| format!("{:.4}", v))
+                .unwrap_or_else(|| "null".to_string());
+            let zscore_json = zscore_val
+                .map(|v| format!("{:.2}", v))
+                .unwrap_or_else(|| "null".to_string());
+            println!(
+                "{{\"id\":\"{}\",\"chain\":\"{}\",\"n_domains\":{},\"domains\":\"{}\",\"quality\":\"{}\",\"ambiguity\":\"{}\",\"energy\":{},\"z_score\":{}}}",
+                id_chain, chain, n_domains, domains_str, quality, ambiguity, energy_json, zscore_json,
+            );
+        }
+        OutputFormat::Text => {}
+    }
+}
+
+/// Print the TSV header line. Call once before processing any entries.
+pub fn write_tsv_header() {
+    println!("id\tchain\tn_domains\tdomains\tquality\tambiguity\tenergy\tz_score");
 }
 
 /// Format energy result into (AUL%, Z-score string).

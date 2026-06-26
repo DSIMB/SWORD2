@@ -83,9 +83,9 @@ struct Cli {
     #[arg(long)]
     min_plddt: Option<f64>,
 
-    /// Output format for stdout summary (text, tsv, json). Default: text
+    /// Output format for stdout summary: text (default), tsv, json
     #[arg(long, default_value = "text")]
-    format: String,
+    format: output::OutputFormat,
 
     /// Batch file: one structure per line (PDB ID, af:UNIPROT, esm:MGNIFY, or file path)
     #[arg(long)]
@@ -394,6 +394,10 @@ fn main() -> Result<()> {
     setup_logging(cli.verbosity, cli.quiet);
 
     let mut reporter = Reporter::new(cli.verbosity, cli.quiet);
+
+    if cli.format == output::OutputFormat::Tsv {
+        output::write_tsv_header();
+    }
 
     // Validate that at least one input source is provided
     if cli.pdb_id.is_none()
@@ -825,6 +829,8 @@ fn main() -> Result<()> {
         let _ = std::fs::remove_dir_all(&pdbs_stand);
     }
     reporter.step_done("Junctions & cleanup", None);
+
+    output::write_stdout_summary(&pdb_id_chain, chain_id, &sword_results, &energies, cli.format);
 
     let elapsed = start.elapsed();
     reporter.finish(&pdb_id_chain, n_domains, prot_len, elapsed, &results_dir);
