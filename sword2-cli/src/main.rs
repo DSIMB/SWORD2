@@ -71,6 +71,26 @@ struct Cli {
     #[arg(short = 'z', long, default_value = "2000")]
     zscore_shuffles: usize,
 
+    /// Skip if output already exists (summary.json present in output directory)
+    #[arg(long)]
+    skip_existing: bool,
+
+    /// Write one PDB file per domain (best partition) into <output>/domains/
+    #[arg(long)]
+    extract_domains: bool,
+
+    /// Minimum pLDDT confidence score to retain residues (AlphaFold/ESM structures only)
+    #[arg(long)]
+    min_plddt: Option<f64>,
+
+    /// Output format for stdout summary (text, tsv, json). Default: text
+    #[arg(long, default_value = "text")]
+    format: String,
+
+    /// Batch file: one structure per line (PDB ID, af:UNIPROT, esm:MGNIFY, or file path)
+    #[arg(long)]
+    batch: Option<PathBuf>,
+
     /// Increase verbosity (-v steps, -vv debug, -vvv trace)
     #[arg(short = 'v', long = "verbose", action = ArgAction::Count)]
     verbosity: u8,
@@ -478,6 +498,16 @@ fn main() -> Result<()> {
     let pdb_id_chain = format!("{}_{}", pdb_id_base, chain_id);
     let results_dir = output_dir.join(&pdb_id_chain);
     std::fs::create_dir_all(&results_dir)?;
+
+    if cli.skip_existing && results_dir.join("summary.json").exists() {
+        if let Some(ref pb) = reporter.spinner {
+            pb.finish_and_clear();
+        }
+        if !cli.quiet {
+            eprintln!(" ⏭  {}  · already exists, skipping", pdb_id_chain);
+        }
+        return Ok(());
+    }
 
     // Delete downloaded PDB from output root (it was only needed for parsing)
     if is_fetched {
