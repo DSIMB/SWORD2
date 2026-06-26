@@ -155,6 +155,34 @@ pub fn write_pdb(chain: &Chain, output_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Write one PDB file per domain in a partition.
+///
+/// Each file contains only the residues whose seq_num falls within any
+/// (start, end) segment of that domain. Files are written to `output_dir`
+/// as `domain_1.pdb`, `domain_2.pdb`, etc.
+pub fn write_domain_pdbs(
+    chain: &Chain,
+    boundaries: &[Vec<(i32, i32)>],
+    output_dir: &Path,
+) -> Result<()> {
+    std::fs::create_dir_all(output_dir)?;
+
+    for (domain_idx, segments) in boundaries.iter().enumerate() {
+        let mut domain_chain = Chain::new(chain.id);
+        for residue in &chain.residues {
+            let in_domain = segments
+                .iter()
+                .any(|&(start, end)| residue.seq_num >= start && residue.seq_num <= end);
+            if in_domain {
+                domain_chain.residues.push(residue.clone());
+            }
+        }
+        let out_path = output_dir.join(format!("domain_{}.pdb", domain_idx + 1));
+        write_pdb(&domain_chain, &out_path)?;
+    }
+    Ok(())
+}
+
 /// Write the residue number mapping file.
 ///
 /// Format matches Python: "# Mapping of authors PDB residues numbers\n# with the new one...\nORIGINAL RENUM\n{orig} {new}\n..."

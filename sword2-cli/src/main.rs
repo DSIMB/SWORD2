@@ -726,6 +726,20 @@ fn main() -> Result<()> {
     }
     reporter.step_done("Write results", None);
 
+    // Domain PDB extraction
+    if cli.extract_domains {
+        if let Some(best) = sword_results.domains.first() {
+            let domains_dir = results_dir.join("domains");
+            pdb::writer::write_domain_pdbs(&cleaned_chain, &best.boundaries, &domains_dir)
+                .context("Failed to write domain PDBs")?;
+            tracing::debug!(
+                "Wrote {} domain PDB(s) to {}",
+                best.boundaries.len(),
+                domains_dir.display()
+            );
+        }
+    }
+
     // Step 10: Generate plots
     if config.generate_plots {
         reporter.step("Generate plots");
