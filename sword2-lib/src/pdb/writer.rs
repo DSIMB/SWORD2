@@ -155,6 +155,25 @@ pub fn write_pdb(chain: &Chain, output_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Remove residues whose mean B-factor (pLDDT in AlphaFold/ESM) is below `min_plddt`.
+///
+/// Returns a new chain without the low-confidence residues. Renumbering is left
+/// to `clean_chain_for_sword`, which always runs immediately after.
+pub fn filter_by_plddt(chain: &Chain, min_plddt: f64) -> Chain {
+    let mut filtered = Chain::new(chain.id);
+    for residue in &chain.residues {
+        if residue.atoms.is_empty() {
+            continue;
+        }
+        let mean_b: f64 = residue.atoms.iter().map(|a| a.temp_factor).sum::<f64>()
+            / residue.atoms.len() as f64;
+        if mean_b >= min_plddt {
+            filtered.residues.push(residue.clone());
+        }
+    }
+    filtered
+}
+
 /// Write one PDB file per domain in a partition.
 ///
 /// Each file contains only the residues whose seq_num falls within any

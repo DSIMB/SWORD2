@@ -519,6 +519,20 @@ fn main() -> Result<()> {
 
     // Step 3: Clean PDB - remove non-standard residues, insertion codes, renumber from 1
     tracing::debug!("Write a clean version of the PDB: remove non standard residues");
+    // Optional pLDDT filter (AlphaFold/ESM structures store confidence in B-factor column)
+    let plddt_filtered;
+    let chain = if let Some(min_plddt) = cli.min_plddt {
+        if cli.uniprot_id.is_none() && cli.mgnify_id.is_none() {
+            tracing::warn!(
+                "--min-plddt is intended for AlphaFold/ESM structures; \
+                 B-factors in experimental PDB structures have different semantics"
+            );
+        }
+        plddt_filtered = pdb::writer::filter_by_plddt(chain, min_plddt);
+        &plddt_filtered
+    } else {
+        chain
+    };
     let (cleaned_chain, original_resnums) = pdb::writer::clean_chain_for_sword(chain);
 
     if cleaned_chain.is_empty() {
