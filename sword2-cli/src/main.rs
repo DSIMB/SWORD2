@@ -79,8 +79,10 @@ struct Cli {
     #[arg(long)]
     extract_domains: bool,
 
-    /// Minimum pLDDT confidence score to retain residues (AlphaFold/ESM structures only)
-    #[arg(long)]
+    /// Drop residues with pLDDT (AlphaFold/ESM confidence score) below this value [0–100].
+    /// Use e.g. --min-plddt 70 to discard low-confidence disordered regions before analysis.
+    /// Has no effect on experimental PDB structures (their B-factors mean something different).
+    #[arg(long, value_name = "0-100")]
     min_plddt: Option<f64>,
 
     /// Output format for stdout summary: text (default), tsv, json
