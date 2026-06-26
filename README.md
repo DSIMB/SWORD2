@@ -193,6 +193,46 @@ For the exact CLI help of the binary you built:
 ./sword2 --help
 ```
 
+## Batch Processing
+
+Create a text file with one structure per line. Lines starting with `#` and blank lines are ignored:
+
+```text
+# PDB entries — optional :chain suffix
+1TIM
+1JX4:A
+
+# AlphaFold models (UniProt accession)
+af:Q5VSL9
+
+# ESM Metagenomic Atlas
+esm:MGYP000936678158
+
+# Local files
+/path/to/structure.pdb
+./relative/structure.cif
+```
+
+Run with `--batch`:
+
+```bash
+./sword2 --batch structures.txt -o results/
+```
+
+Combine with `--format tsv` to collect results in a table:
+
+```bash
+./sword2 --batch structures.txt -o results/ --format tsv > results.tsv
+```
+
+Resume an interrupted batch run with `--skip-existing`:
+
+```bash
+./sword2 --batch structures.txt -o results/ --skip-existing
+```
+
+Failed entries are logged with an error message and counted; the batch continues to completion.
+
 ## Output Structure
 
 A run creates one directory per analyzed chain, named `<INPUT>_<CHAIN>` inside the selected output directory.

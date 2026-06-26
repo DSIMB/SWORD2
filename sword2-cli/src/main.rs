@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -380,79 +380,117 @@ fn setup_logging(verbosity: u8, quiet: bool) {
     }
 }
 
-fn main() -> Result<()> {
+// ---------------------------------------------------------------------------
+// Batch support — entry descriptor and line parser
+// ---------------------------------------------------------------------------
+
+/// One structure to process (populated from CLI flags or a batch file line).
+struct EntryArgs {
+    pdb_id: Option<String>,
+    uniprot_id: Option<String>,
+    mgnify_id: Option<String>,
+    input_file: Option<PathBuf>,
+    /// Explicit chain override (overrides auto-detection).
+    chain: Option<char>,
+}
+
+impl EntryArgs {
+    fn label(&self) -> &str {
+        self.pdb_id
+            .as_deref()
+            .or(self.uniprot_id.as_deref())
+            .or(self.mgnify_id.as_deref())
+            .or_else(|| self.input_file.as_ref().and_then(|p| p.to_str()))
+            .unwrap_or("?")
+    }
+
+    fn is_predicted(&self) -> bool {
+        self.uniprot_id.is_some() || self.mgnify_id.is_some()
+    }
+}
+
+/// Parse one batch-file line into an `EntryArgs`.
+///
+/// Prefixes: `af:` → AlphaFold, `esm:` → ESM Atlas.
+/// Paths: any value containing `/` or starting with `.`.
+/// Optional `:A` suffix on any value selects a chain.
+/// Lines starting with `#` or empty are skipped (return `None`).
+fn parse_batch_line(line: &str) -> Option<EntryArgs> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    if let Some(rest) = line.strip_prefix("af:") {
+        let (value, chain) = split_chain_suffix(rest);
+        return Some(EntryArgs {
+            pdb_id: None,
+            uniprot_id: Some(value.to_string()),
+            mgnify_id: None,
+            input_file: None,
+            chain,
+        });
+    }
+    if let Some(rest) = line.strip_prefix("esm:") {
+        let (value, chain) = split_chain_suffix(rest);
+        return Some(EntryArgs {
+            pdb_id: None,
+            uniprot_id: None,
+            mgnify_id: Some(value.to_string()),
+            input_file: None,
+            chain,
+        });
+    }
+    if line.contains('/') || line.starts_with('.') {
+        let (value, chain) = split_chain_suffix(line);
+        return Some(EntryArgs {
+            pdb_id: None,
+            uniprot_id: None,
+            mgnify_id: None,
+            input_file: Some(PathBuf::from(value)),
+            chain,
+        });
+    }
+    let (value, chain) = split_chain_suffix(line);
+    Some(EntryArgs {
+        pdb_id: Some(value.to_string()),
+        uniprot_id: None,
+        mgnify_id: None,
+        input_file: None,
+        chain,
+    })
+}
+
+/// Split `"VALUE:A"` → `("VALUE", Some('A'))`, or `("VALUE", None)` if no single-char suffix.
+fn split_chain_suffix(s: &str) -> (&str, Option<char>) {
+    if let Some(pos) = s.rfind(':') {
+        let suffix = &s[pos + 1..];
+        if suffix.len() == 1 {
+            if let Some(c) = suffix.chars().next().filter(|c| c.is_ascii_alphabetic()) {
+                return (&s[..pos], Some(c));
+            }
+        }
+    }
+    (s, None)
+}
+
+// ---------------------------------------------------------------------------
+// Per-entry pipeline
+// ---------------------------------------------------------------------------
+
+/// Run the full SWORD2 pipeline for a single structure entry.
+fn process_entry(
+    entry: &EntryArgs,
+    cli: &Cli,
+    reporter: &mut Reporter,
+    bin_dir: &std::path::Path,
+    output_dir: &PathBuf,
+    num_threads: usize,
+) -> Result<()> {
     let start = Instant::now();
-
-    let cli = Cli::parse();
-
-    // Subcommands short-circuit the full pipeline.
-    if let Some(Commands::Score(args)) = &cli.command {
-        return run_score(args);
-    }
-
-    // Initialize logging based on verbosity
-    setup_logging(cli.verbosity, cli.quiet);
-
-    let mut reporter = Reporter::new(cli.verbosity, cli.quiet);
-
-    if cli.format == output::OutputFormat::Tsv {
-        output::write_tsv_header();
-    }
-
-    // Validate that at least one input source is provided
-    if cli.pdb_id.is_none()
-        && cli.uniprot_id.is_none()
-        && cli.mgnify_id.is_none()
-        && cli.input_file.is_none()
-    {
-        anyhow::bail!(
-            "Please provide an input source: --pdb-id, --uniprot-id, --mgnify-id, or --input-file"
-        );
-    }
-
-    // Determine number of threads
-    let num_threads = if cli.threads == 0 {
-        num_cpus::get()
-    } else {
-        cli.threads
-    };
-
-    // Resolve base directory (where bin/ lives)
-    let base_dir = if let Some(ref bd) = cli.install_dir {
-        bd.clone()
-    } else {
-        // Try: parent of the binary, then current directory
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|pp| pp.to_path_buf()))
-            .and_then(|p| {
-                if p.join("bin").exists() {
-                    Some(p)
-                } else {
-                    p.parent().and_then(|pp| {
-                        if pp.join("bin").exists() {
-                            Some(pp.to_path_buf())
-                        } else {
-                            None
-                        }
-                    })
-                }
-            })
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-    };
-
-    let bin_dir = base_dir.join("bin");
-
-    // Ensure output directory exists
-    let output_dir = std::fs::canonicalize(&cli.output_dir).unwrap_or_else(|_| {
-        std::fs::create_dir_all(&cli.output_dir).ok();
-        cli.output_dir.clone()
-    });
-    std::fs::create_dir_all(&output_dir)?;
 
     // Step 1: Obtain the structure file
     reporter.step("Fetch structure");
-    let (input_path, pdb_id_base, is_fetched) = resolve_input(&cli, &output_dir)?;
+    let (input_path, pdb_id_base, is_fetched) = resolve_input(entry, output_dir)?;
     reporter.step_done("Fetch structure", None);
 
     // Step 2: Parse the structure
@@ -462,8 +500,8 @@ fn main() -> Result<()> {
         .with_context(|| format!("Failed to parse {}", input_path.display()))?;
 
     // Determine chain
-    let chain_id = if let Some(ref chain_str) = cli.chain {
-        chain_str.chars().next().unwrap_or('A')
+    let chain_id = if let Some(c) = entry.chain {
+        c
     } else if let Some(model) = structure.first_model() {
         // Find the first chain that contains at least one standard amino acid residue
         if let Some(chain) = model.chains.iter().find(|c| {
@@ -526,7 +564,7 @@ fn main() -> Result<()> {
     // Optional pLDDT filter (AlphaFold/ESM structures store confidence in B-factor column)
     let plddt_filtered;
     let chain = if let Some(min_plddt) = cli.min_plddt {
-        if cli.uniprot_id.is_none() && cli.mgnify_id.is_none() {
+        if !entry.is_predicted() {
             tracing::warn!(
                 "--min-plddt is intended for AlphaFold/ESM structures; \
                  B-factors in experimental PDB structures have different semantics"
@@ -838,22 +876,124 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Resolve the input source to a file path, base name, and whether it was fetched.
-fn resolve_input(cli: &Cli, output_dir: &Path) -> Result<(PathBuf, String, bool)> {
-    if let Some(ref input_file) = cli.input_file {
+// ---------------------------------------------------------------------------
+// Main entry point
+// ---------------------------------------------------------------------------
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    // Subcommands short-circuit the full pipeline.
+    if let Some(Commands::Score(args)) = &cli.command {
+        return run_score(args);
+    }
+
+    setup_logging(cli.verbosity, cli.quiet);
+
+    if cli.format == output::OutputFormat::Tsv {
+        output::write_tsv_header();
+    }
+
+    let num_threads = if cli.threads == 0 { num_cpus::get() } else { cli.threads };
+
+    let base_dir = if let Some(ref bd) = cli.install_dir {
+        bd.clone()
+    } else {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|pp| pp.to_path_buf()))
+            .and_then(|p| {
+                if p.join("bin").exists() {
+                    Some(p)
+                } else {
+                    p.parent().and_then(|pp| {
+                        if pp.join("bin").exists() { Some(pp.to_path_buf()) } else { None }
+                    })
+                }
+            })
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    };
+    let bin_dir = base_dir.join("bin");
+
+    let output_dir = std::fs::canonicalize(&cli.output_dir).unwrap_or_else(|_| {
+        std::fs::create_dir_all(&cli.output_dir).ok();
+        cli.output_dir.clone()
+    });
+    std::fs::create_dir_all(&output_dir)?;
+
+    if let Some(ref batch_file) = cli.batch {
+        // Batch mode: read entries from file, process each in turn
+        let content = std::fs::read_to_string(batch_file)
+            .with_context(|| format!("Failed to read batch file {}", batch_file.display()))?;
+        let entries: Vec<EntryArgs> = content.lines().filter_map(parse_batch_line).collect();
+
+        if entries.is_empty() {
+            anyhow::bail!("Batch file contains no valid entries");
+        }
+
+        let mut n_ok = 0usize;
+        let mut n_err = 0usize;
+        for entry in &entries {
+            let mut reporter = Reporter::new(cli.verbosity, cli.quiet);
+            match process_entry(&entry, &cli, &mut reporter, &bin_dir, &output_dir, num_threads) {
+                Ok(()) => n_ok += 1,
+                Err(e) => {
+                    n_err += 1;
+                    if !cli.quiet {
+                        eprintln!(" ✗  {}  · {}", entry.label(), e);
+                    }
+                }
+            }
+        }
+        if !cli.quiet {
+            eprintln!("\nBatch complete: {} ok, {} failed", n_ok, n_err);
+        }
+    } else {
+        // Single mode: validate that exactly one input source is given
+        if cli.pdb_id.is_none()
+            && cli.uniprot_id.is_none()
+            && cli.mgnify_id.is_none()
+            && cli.input_file.is_none()
+        {
+            anyhow::bail!(
+                "Please provide an input source: --pdb-id, --uniprot-id, --mgnify-id, \
+                 --input-file, or --batch"
+            );
+        }
+        let entry = EntryArgs {
+            pdb_id: cli.pdb_id.clone(),
+            uniprot_id: cli.uniprot_id.clone(),
+            mgnify_id: cli.mgnify_id.clone(),
+            input_file: cli.input_file.clone(),
+            chain: cli.chain.as_ref().and_then(|s| s.chars().next()),
+        };
+        let mut reporter = Reporter::new(cli.verbosity, cli.quiet);
+        process_entry(&entry, &cli, &mut reporter, &bin_dir, &output_dir, num_threads)?;
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Input resolution
+// ---------------------------------------------------------------------------
+
+/// Resolve an entry to a local file path, a base name for output, and a fetch flag.
+fn resolve_input(entry: &EntryArgs, output_dir: &PathBuf) -> Result<(PathBuf, String, bool)> {
+    if let Some(ref input_file) = entry.input_file {
         let base = input_file
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("unknown")
             .to_string();
         Ok((input_file.clone(), base, false))
-    } else if let Some(ref uniprot_id) = cli.uniprot_id {
+    } else if let Some(ref uniprot_id) = entry.uniprot_id {
         let path = fetch::fetch_alphafold(uniprot_id, output_dir)?;
         Ok((path, uniprot_id.clone(), true))
-    } else if let Some(ref mgnify_id) = cli.mgnify_id {
+    } else if let Some(ref mgnify_id) = entry.mgnify_id {
         let path = fetch::fetch_esm(mgnify_id, output_dir)?;
         Ok((path, mgnify_id.clone(), true))
-    } else if let Some(ref pdb_id) = cli.pdb_id {
+    } else if let Some(ref pdb_id) = entry.pdb_id {
         let path = fetch::fetch_pdb(pdb_id, output_dir)?;
         Ok((path, pdb_id.to_uppercase(), true))
     } else {
