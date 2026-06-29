@@ -217,6 +217,39 @@ pub fn run_pipeline(
 
     let measure_strings: Vec<String> = measure_lines.iter().map(|ml| ml.to_line()).collect();
 
+    // Training dump: set SWORD2_DUMP_CANDIDATES=/path/to/output.csv to record all
+    // ComputeMeasure candidates (features + delineation) for offline model fitting.
+    if let Ok(dump_path) = std::env::var("SWORD2_DUMP_CANDIDATES") {
+        use std::io::Write as _;
+        let file_existed = std::path::Path::new(&dump_path).exists();
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&dump_path)
+        {
+            if !file_existed {
+                let _ = writeln!(
+                    f,
+                    "chain_id,output_dir,num_domains,min_size,max_cr,density_min,mean_density,delineation"
+                );
+            }
+            for ml in &measure_lines {
+                let _ = writeln!(
+                    f,
+                    "{},{},{},{},{:.6},{:.6},{:.6},\"{}\"",
+                    pdb_name,
+                    results_dir.display(),
+                    ml.num_domains,
+                    ml.min_size,
+                    ml.max_cr,
+                    ml.density_min,
+                    ml.mean_density,
+                    ml.delineation.trim(),
+                );
+            }
+        }
+    }
+
     // DEBUG: count measure lines per domain count
     {
         let mut counts: std::collections::BTreeMap<usize, usize> =
