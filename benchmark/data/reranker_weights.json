@@ -1,0 +1,27 @@
+{
+  "features": [
+    "num_domains",
+    "min_size",
+    "max_cr",
+    "density_min",
+    "mean_density",
+    "n_discontinuous",
+    "size_balance",
+    "largest_domain_frac",
+    "mean_junction_support"
+  ],
+  "weights": [
+    -1.3329183384825485,
+    -0.35472829959224755,
+    -1.0920904735895476,
+    0.11649184545463633,
+    -0.026792688866579928,
+    -0.9183576148068141,
+    0.6269091008096437,
+    -0.4374425483499017,
+    0.020104180409427255
+  ],
+  "bias": -8.645465737029765,
+  "train_oracle_hit_rate": 0.325973950119736,
+  "baseline_oracle_hit_rate": 0.9348168915367093
+}
