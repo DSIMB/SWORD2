@@ -230,13 +230,52 @@ pub fn run_pipeline(
             if !file_existed {
                 let _ = writeln!(
                     f,
-                    "chain_id,output_dir,num_domains,min_size,max_cr,density_min,mean_density,delineation"
+                    "chain_id,output_dir,num_domains,min_size,max_cr,density_min,mean_density,n_discontinuous,size_balance,largest_domain_frac,mean_junction_support,delineation"
                 );
             }
+            // Compute junction support map once per chain (across all candidates)
+            let jsup_map = crate::sword::junctions::junction_support_map(&measure_strings);
             for ml in &measure_lines {
+                // Parse domain sizes from delineation
+                let dom_tokens: Vec<&str> = ml.delineation.trim().split_whitespace().collect();
+                let n_discontinuous: usize = dom_tokens.iter().filter(|d| d.contains(';')).count();
+                let sizes: Vec<f64> = dom_tokens.iter().map(|d| {
+                    d.split(';').map(|seg| {
+                        let parts: Vec<&str> = seg.split('-').collect();
+                        if parts.len() == 2 {
+                            parts[1].parse::<f64>().unwrap_or(0.0) - parts[0].parse::<f64>().unwrap_or(0.0) + 1.0
+                        } else { 0.0 }
+                    }).sum::<f64>()
+                }).collect();
+                let total_res: f64 = sizes.iter().sum();
+                let n_dom_f = sizes.len() as f64;
+                let mean_size = if n_dom_f > 0.0 { total_res / n_dom_f } else { 1.0 };
+                let min_size_f = sizes.iter().cloned().fold(f64::INFINITY, f64::min);
+                let max_size = sizes.iter().cloned().fold(0.0_f64, f64::max);
+                let size_balance: f64 = if mean_size > 0.0 { (min_size_f / mean_size).min(1.0) } else { 0.0 };
+                let largest_domain_frac: f64 = if total_res > 0.0 { max_size / total_res } else { 0.0 };
+
+                // Junction support: parse junctions from delineation the same way junctions.rs does
+                let junctions: Vec<i32> = dom_tokens.iter().flat_map(|d| {
+                    let mut v = Vec::new();
+                    if let Some(p) = d.find('-') {
+                        if let Ok(j) = d[..p].parse::<i32>() { v.push(j); }
+                    }
+                    if let Some(p) = d.rfind('-') {
+                        if let Ok(j) = d[p+1..].parse::<i32>() { v.push(j); }
+                    }
+                    v
+                }).collect();
+                let mean_junction_support: f64 = if junctions.is_empty() {
+                    0.0
+                } else {
+                    let s: f64 = junctions.iter().map(|j| jsup_map.get(j).copied().unwrap_or(0.0)).sum();
+                    s / junctions.len() as f64
+                };
+
                 let _ = writeln!(
                     f,
-                    "{},{},{},{},{:.6},{:.6},{:.6},\"{}\"",
+                    "{},{},{},{},{:.6},{:.6},{:.6},{},{:.6},{:.6},{:.6},\"{}\"",
                     pdb_name,
                     results_dir.display(),
                     ml.num_domains,
@@ -244,6 +283,10 @@ pub fn run_pipeline(
                     ml.max_cr,
                     ml.density_min,
                     ml.mean_density,
+                    n_discontinuous,
+                    size_balance,
+                    largest_domain_frac,
+                    mean_junction_support,
                     ml.delineation.trim(),
                 );
             }
