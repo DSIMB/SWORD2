@@ -306,6 +306,12 @@ fn link(table: &[Bridge], l1: usize, l2: usize) -> bool {
         || (a.je >= b.jb && a.jb <= b.je)
 }
 
+fn partner_index(base: usize, add: usize, sub: usize) -> usize {
+    base.checked_add(add)
+        .and_then(|value| value.checked_sub(sub))
+        .unwrap_or(0)
+}
+
 /// Mark strand residues in the chain based on bridge table.
 fn mark_strands(chain: &mut DsspChain, table: &[Bridge], nbridge: usize) {
     for i in 0..nbridge {
@@ -378,16 +384,16 @@ fn mark_strands(chain: &mut DsspChain, table: &[Bridge], nbridge: usize) {
             for l in ib..=ie {
                 chain.get_mut(l).ss[betai] = ladder_name;
                 chain.get_mut(l).partner[betai - 6] = match btype {
-                    BridgeType::Parallel => jb + l - ib,
-                    BridgeType::Antiparallel => je - l + ib,
+                    BridgeType::Parallel => partner_index(jb, l, ib),
+                    BridgeType::Antiparallel => partner_index(je, ib, l),
                     BridgeType::NoBridge => 0,
                 };
             }
             for l in jb..=je {
                 chain.get_mut(l).ss[betaj] = ladder_name;
                 chain.get_mut(l).partner[betaj - 6] = match btype {
-                    BridgeType::Parallel => ib + l - jb,
-                    BridgeType::Antiparallel => ie - l + jb,
+                    BridgeType::Parallel => partner_index(ib, l, jb),
+                    BridgeType::Antiparallel => partner_index(ie, jb, l),
                     BridgeType::NoBridge => 0,
                 };
             }
@@ -422,5 +428,32 @@ fn mark_strands(chain: &mut DsspChain, table: &[Bridge], nbridge: usize) {
         for l in b.jb..=b.je {
             chain.get_mut(l).sheet_label = b.sheet_name;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dssp::types::{BackboneResidue, MAXBRIDGE};
+
+    #[test]
+    fn mark_strands_does_not_underflow_antiparallel_partner_indices() {
+        let mut chain = DsspChain::new();
+        for _ in 0..6 {
+            chain.push(BackboneResidue::default());
+        }
+
+        let mut bridge = Bridge::new(MAXBRIDGE);
+        bridge.sheet_name = 'A';
+        bridge.ladder_name = 'A';
+        bridge.btype = BridgeType::Antiparallel;
+        bridge.ib = 1;
+        bridge.ie = 1;
+        bridge.jb = 3;
+        bridge.je = 5;
+
+        mark_strands(&mut chain, &[bridge], 1);
+
+        assert_eq!(chain.get(5).partner[0], 0);
     }
 }

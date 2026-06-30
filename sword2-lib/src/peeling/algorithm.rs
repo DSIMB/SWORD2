@@ -625,6 +625,16 @@ pub struct PeelingOutput {
 }
 
 impl PeelingOutput {
+    pub(crate) fn true_num_at(&self, index: usize) -> i32 {
+        if let Some(value) = self.true_nums.get(index) {
+            *value
+        } else if let Some(last) = self.true_nums.last() {
+            last + (index + 1 - self.true_nums.len()) as i32
+        } else {
+            (index + 1) as i32
+        }
+    }
+
     /// Write Peeling.log in the format expected by downstream parsers.
     ///
     /// Format:
@@ -642,8 +652,8 @@ impl PeelingOutput {
             write!(buf, "{:.*} {:.*} ", 6, iter.ci, 6, iter.r)?;
             write!(buf, "{} ", iter.num_pus)?;
             for pu in &iter.pu_boundaries {
-                let start_num = self.true_nums[pu[0]];
-                let end_num = self.true_nums[pu[1]];
+                let start_num = self.true_num_at(pu[0]);
+                let end_num = self.true_num_at(pu[1]);
                 write!(buf, "{} {} ", start_num, end_num)?;
             }
             writeln!(buf)?;
@@ -972,5 +982,40 @@ mod tests {
         assert!(!cutting_mask[5]);
         assert!(cutting_mask[6]); // segment_end itself is NOT masked (loop is seg_start..seg_end)
         assert!(cutting_mask[7]); // first coil after helix: cuttable
+    }
+
+    #[test]
+    fn test_write_peeling_log_extends_missing_true_numbers() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("Peeling.log");
+        let matrix = ContactMatrix::from_ca_coords(
+            &[
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [3.0, 0.0, 0.0],
+            ],
+            6.0,
+            1.5,
+        );
+        let output = PeelingOutput {
+            contact_matrix: matrix,
+            iterations: vec![IterationResult {
+                max_cr: 1.0,
+                min_density: 2.0,
+                ci: 3.0,
+                r: 4.0,
+                num_pus: 1,
+                pu_boundaries: vec![[0, 3]],
+            }],
+            final_pu_contacts: vec![],
+            final_pu_delineation: vec![],
+            true_nums: vec![1, 2, 3],
+        };
+
+        output.write_peeling_log(&path).unwrap();
+
+        let log = std::fs::read_to_string(path).unwrap();
+        assert!(log.contains("1 4"));
     }
 }

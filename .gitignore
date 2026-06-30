@@ -11,3 +11,6 @@ target/
 
 # macOS metadata
 .DS_Store
+
+data/
+benchmark/

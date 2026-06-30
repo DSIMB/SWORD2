@@ -388,8 +388,8 @@ pub fn native_peeling_to_results(output: &PeelingOutput) -> PeelingResults {
                 .pu_boundaries
                 .iter()
                 .map(|pu| {
-                    let start = output.true_nums[pu[0]];
-                    let end = output.true_nums[pu[1]];
+                    let start = output.true_num_at(pu[0]);
+                    let end = output.true_num_at(pu[1]);
                     ResidueRange::new(start, end)
                 })
                 .collect();
