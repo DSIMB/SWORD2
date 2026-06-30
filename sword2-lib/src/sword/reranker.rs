@@ -139,7 +139,7 @@ pub fn rerank(candidates: &[CandidateFeatures]) -> usize {
         }
     }
     for s in &mut stds {
-        *s = (*s / nf).sqrt() + 1e-8;
+        *s = (*s / (nf - 1.0).max(1.0)).sqrt() + 1e-8;
     }
 
     // Score each candidate: linear(z-scored features) — pick argmax

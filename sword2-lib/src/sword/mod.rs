@@ -237,43 +237,7 @@ pub fn run_pipeline(
             // Compute junction support map once per chain (across all candidates)
             let jsup_map = crate::sword::junctions::junction_support_map(&measure_strings);
             for ml in &measure_lines {
-                // Parse domain sizes from delineation
-                let dom_tokens: Vec<&str> = ml.delineation.trim().split_whitespace().collect();
-                let n_discontinuous: usize = dom_tokens.iter().filter(|d| d.contains(';')).count();
-                let sizes: Vec<f64> = dom_tokens.iter().map(|d| {
-                    d.split(';').map(|seg| {
-                        let parts: Vec<&str> = seg.split('-').collect();
-                        if parts.len() == 2 {
-                            parts[1].parse::<f64>().unwrap_or(0.0) - parts[0].parse::<f64>().unwrap_or(0.0) + 1.0
-                        } else { 0.0 }
-                    }).sum::<f64>()
-                }).collect();
-                let total_res: f64 = sizes.iter().sum();
-                let n_dom_f = sizes.len() as f64;
-                let mean_size = if n_dom_f > 0.0 { total_res / n_dom_f } else { 1.0 };
-                let min_size_f = sizes.iter().cloned().fold(f64::INFINITY, f64::min);
-                let max_size = sizes.iter().cloned().fold(0.0_f64, f64::max);
-                let size_balance: f64 = if mean_size > 0.0 { (min_size_f / mean_size).min(1.0) } else { 0.0 };
-                let largest_domain_frac: f64 = if total_res > 0.0 { max_size / total_res } else { 0.0 };
-
-                // Junction support: parse junctions from delineation the same way junctions.rs does
-                let junctions: Vec<i32> = dom_tokens.iter().flat_map(|d| {
-                    let mut v = Vec::new();
-                    if let Some(p) = d.find('-') {
-                        if let Ok(j) = d[..p].parse::<i32>() { v.push(j); }
-                    }
-                    if let Some(p) = d.rfind('-') {
-                        if let Ok(j) = d[p+1..].parse::<i32>() { v.push(j); }
-                    }
-                    v
-                }).collect();
-                let mean_junction_support: f64 = if junctions.is_empty() {
-                    0.0
-                } else {
-                    let s: f64 = junctions.iter().map(|j| jsup_map.get(j).copied().unwrap_or(0.0)).sum();
-                    s / junctions.len() as f64
-                };
-
+                let cf = reranker::extract_features(ml, &jsup_map);
                 let _ = writeln!(
                     f,
                     "{},{},{},{},{:.6},{:.6},{:.6},{},{:.6},{:.6},{:.6},\"{}\"",
@@ -284,10 +248,10 @@ pub fn run_pipeline(
                     ml.max_cr,
                     ml.density_min,
                     ml.mean_density,
-                    n_discontinuous,
-                    size_balance,
-                    largest_domain_frac,
-                    mean_junction_support,
+                    cf.n_discontinuous as usize,
+                    cf.size_balance,
+                    cf.largest_domain_frac,
+                    cf.mean_junction_support,
                     ml.delineation.trim(),
                 );
             }
@@ -442,65 +406,6 @@ pub fn run_pipeline(
     let results = parse_sword_output(&output_lines)?;
 
     Ok((output_lines, results))
-}
-
-/// Linear prediction model for optimal number of domains.
-///
-/// Port of `prediction_model()` from SWORD Perl script.
-fn prediction_model(relevant_measure: &[String]) -> Vec<i32> {
-    let mut predictions = Vec::new();
-    let mut max_dom: i32 = -1;
-
-    let last = relevant_measure.len().saturating_sub(1);
-    for line_str in &relevant_measure[..last] {
-        let fields: Vec<&str> = line_str.split('|').collect();
-        if fields.is_empty() {
-            continue;
-        }
-
-        let nd: i32 = fields[0].trim().parse().unwrap_or(0);
-        if max_dom == -1 {
-            max_dom = nd;
-        }
-
-        if nd == max_dom {
-            max_dom -= 1;
-
-            let cr: f64 = if fields.len() > 3 {
-                fields[3].trim().parse().unwrap_or(0.0)
-            } else {
-                0.0
-            };
-            let obs_cpd: f64 = if fields.len() > 5 {
-                fields[5].trim().parse().unwrap_or(0.0)
-            } else {
-                0.0
-            };
-
-            // Model parameters
-            let diag_intercept: f64 = 2.818831;
-            let diag_slope: f64 = 3.582524;
-            let diag_inter_v: f64 = 0.09434462;
-            let horizontal_lim: f64 = 3.166823;
-            let vertical_lim: f64 = 0.231845;
-
-            let theo_cpd = if cr <= diag_inter_v {
-                horizontal_lim
-            } else if cr >= vertical_lim {
-                10000.0
-            } else {
-                cr * diag_slope + diag_intercept
-            };
-
-            if theo_cpd - obs_cpd > 0.0 {
-                predictions.push(0);
-            } else {
-                predictions.push(1);
-            }
-        }
-    }
-
-    predictions
 }
 
 /// Generate quality and display output lines.
@@ -794,15 +699,4 @@ mod tests {
         assert_eq!(compute_cindex(&[1]), "+");
     }
 
-    #[test]
-    fn test_prediction_model() {
-        // With CR below threshold and obs_CPD below theo → prediction = 0
-        let lines = vec![
-            "5|30|...|0.05|...|2.5|0.5".to_string(),
-            "4|30|...|0.05|...|2.5|0.5".to_string(),
-            "".to_string(),
-        ];
-        let preds = prediction_model(&lines);
-        assert!(!preds.is_empty());
-    }
 }
