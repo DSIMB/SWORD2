@@ -217,8 +217,7 @@ def chain_local_normalize(df: pd.DataFrame) -> np.ndarray:
 
     X = df[FEATURES].astype(np.float64)
     chain_mean = df.groupby('chain_id')[FEATURES].transform('mean')
-    # ddof=1 is pandas default; NaN for single-candidate chains → fill with 0
-    chain_std = df.groupby('chain_id')[FEATURES].transform('std').fillna(0.0)
+    chain_std = df.groupby('chain_id')[FEATURES].transform('std', ddof=1).fillna(0.0)  # ddof=1: sample std; single-candidate chains give NaN → filled with 0 below
 
     X_norm = (X - chain_mean) / (chain_std + 1e-8)
 
@@ -332,6 +331,17 @@ def main():
     if not args.training.exists():
         print(f"ERROR: training table not found: {args.training}", file=sys.stderr)
         sys.exit(1)
+
+    # Fast schema validation before loading 2.8 GB
+    REQUIRED_COLUMNS = [
+        "chain_id", "num_domains", "min_size", "max_cr", "density_min",
+        "mean_density", "delineation", "n_true_domains", "n_pred_domains",
+        "is_oracle_s", "S",
+    ]
+    header = pd.read_csv(args.training, nrows=0)
+    missing = [c for c in REQUIRED_COLUMNS if c not in header.columns]
+    if missing:
+        sys.exit(f"Error: training CSV is missing required columns: {missing}")
 
     # ------------------------------------------------------------------
     # Load
