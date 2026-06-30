@@ -24,6 +24,7 @@ pub mod compute_measure;
 pub mod distance_model;
 pub mod junctions;
 pub mod parse_measure;
+mod reranker;
 
 /// Configuration for a SWORD2 run.
 #[derive(Debug, Clone)]
@@ -315,41 +316,25 @@ pub fn run_pipeline(
         true,
     );
 
-    // Select n_dom and record the first-pass optimal candidate using distance_model.
-    // Each nd level contributes one representative (first occurrence in descending order).
-    // We pick the nd whose representative has the highest signed distance to the quality
-    // boundary — positive = deep good zone, negative = bad zone.
+    // Re-ranker: pick the best candidate across all levels using trained logistic model.
     let (n_dom, to_print_first_pass) = {
-        let last = relevant_measure.len().saturating_sub(1);
-        let mut best_nd: usize = 0;
-        let mut best_dist: f64 = f64::NEG_INFINITY;
-        let mut best_line = String::new();
-        let mut max_dom: i32 = -1;
-        for line_str in &relevant_measure[..last] {
-            let fields: Vec<&str> = line_str.split('|').collect();
-            if fields.is_empty() {
-                continue;
-            }
-            let nd: i32 = fields[0].trim().parse().unwrap_or(0);
-            if max_dom == -1 {
-                max_dom = nd;
-            }
-            if nd == max_dom {
-                max_dom -= 1;
-                let cr: f64 = fields.get(3).and_then(|f| f.trim().parse().ok()).unwrap_or(0.0);
-                let cpd: f64 = fields.get(5).and_then(|f| f.trim().parse().ok()).unwrap_or(0.0);
-                let dist = crate::sword::distance_model::distance_model(cr, cpd, 1);
-                tracing::debug!("n_dom candidate: nd={} cr={:.4} cpd={:.4} dist={:.4}", nd, cr, cpd, dist);
-                if nd > 0 && dist > best_dist {
-                    best_dist = dist;
-                    best_nd = nd as usize;
-                    best_line = line_str.clone();
-                }
-            }
-        }
-        let n = if best_nd == 0 { 1 } else { best_nd };
-        tracing::info!("Distance-model n_dom selection: n_dom={} dist={:.4}", n, best_dist);
-        (n, best_line)
+        let jsup = crate::sword::junctions::junction_support_map(&measure_strings);
+        let features: Vec<reranker::CandidateFeatures> = measure_lines.iter()
+            .map(|ml| reranker::extract_features(ml, &jsup))
+            .collect();
+        let best_idx = reranker::rerank(&features);
+        let n = if best_idx < measure_lines.len() {
+            measure_lines[best_idx].num_domains
+        } else {
+            1
+        };
+        let line = if best_idx < measure_strings.len() {
+            measure_strings[best_idx].clone()
+        } else {
+            String::new()
+        };
+        tracing::info!("Re-ranker n_dom selection: n_dom={} (candidate_idx={})", n, best_idx);
+        (n, line)
     };
 
     // Second ParseMeasure pass — select assignments around predicted N_dom
