@@ -272,20 +272,42 @@ pub fn run_pipeline(
         true,
     );
 
-    // Prediction model
-    tracing::debug!(
-        "Predicting structural domains from {} measures",
-        relevant_measure.len()
-    );
-    let predictions = prediction_model(&relevant_measure);
-    let predictions_rev: Vec<i32> = predictions.iter().rev().cloned().collect();
-    let mut n_dom = predictions_rev.len() + 1;
-    for (i, &pred) in predictions_rev.iter().enumerate() {
-        if pred == 0 {
-            n_dom = i + 1;
-            break;
+    // Select n_dom and record the first-pass optimal candidate using distance_model.
+    // Each nd level contributes one representative (first occurrence in descending order).
+    // We pick the nd whose representative has the highest signed distance to the quality
+    // boundary — positive = deep good zone, negative = bad zone.
+    let (n_dom, to_print_first_pass) = {
+        let last = relevant_measure.len().saturating_sub(1);
+        let mut best_nd: usize = 0;
+        let mut best_dist: f64 = f64::NEG_INFINITY;
+        let mut best_line = String::new();
+        let mut max_dom: i32 = -1;
+        for line_str in &relevant_measure[..last] {
+            let fields: Vec<&str> = line_str.split('|').collect();
+            if fields.is_empty() {
+                continue;
+            }
+            let nd: i32 = fields[0].trim().parse().unwrap_or(0);
+            if max_dom == -1 {
+                max_dom = nd;
+            }
+            if nd == max_dom {
+                max_dom -= 1;
+                let cr: f64 = fields.get(3).and_then(|f| f.trim().parse().ok()).unwrap_or(0.0);
+                let cpd: f64 = fields.get(5).and_then(|f| f.trim().parse().ok()).unwrap_or(0.0);
+                let dist = crate::sword::distance_model::distance_model(cr, cpd, 1);
+                tracing::debug!("n_dom candidate: nd={} cr={:.4} cpd={:.4} dist={:.4}", nd, cr, cpd, dist);
+                if nd > 0 && dist > best_dist {
+                    best_dist = dist;
+                    best_nd = nd as usize;
+                    best_line = line_str.clone();
+                }
+            }
         }
-    }
+        let n = if best_nd == 0 { 1 } else { best_nd };
+        tracing::info!("Distance-model n_dom selection: n_dom={} dist={:.4}", n, best_dist);
+        (n, best_line)
+    };
 
     // Second ParseMeasure pass — select assignments around predicted N_dom
     tracing::debug!("Selecting domain assignments around N_dom={}", n_dom);
@@ -369,6 +391,12 @@ pub fn run_pipeline(
                 break;
             }
         }
+    }
+    // Fallback: the second-pass distance filter (dist < 0.2) excludes deeply good-zone
+    // candidates. If the optimal was filtered out, use the first-pass representative.
+    if to_print.is_empty() {
+        tracing::debug!("to_print empty after second pass; using first-pass representative for nd={}", n_dom);
+        to_print = to_print_first_pass;
     }
 
     // Quality and display
