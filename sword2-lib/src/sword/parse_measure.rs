@@ -117,7 +117,6 @@ fn parse_measure_with_diff(
                 if fields.len() > 5 {
                     let cr: f64 = fields[3].parse().unwrap_or(0.0);
                     let cpd: f64 = fields[5].parse().unwrap_or(0.0);
-                    // EXPERIMENT: signed like Perl
                     if distance_model::distance_model(cr, cpd, 1) < max_dist {
                         temp_measure.push(line.clone());
                     }
@@ -202,7 +201,6 @@ fn parse_measure_with_diff(
             if fields.len() > 5 {
                 let cr: f64 = fields[3].parse().unwrap_or(0.0);
                 let cpd: f64 = fields[5].parse().unwrap_or(0.0);
-                // EXPERIMENT: signed like Perl
                 if distance_model::distance_model(cr, cpd, 1) < max_dist {
                     temp_measure.push(line.clone());
                 }

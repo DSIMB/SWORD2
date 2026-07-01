@@ -251,11 +251,7 @@ struct PeelingResultsSummary<'a> {
 }
 
 fn aul_percent(z_score: f64) -> i32 {
-    if z_score.abs() >= 1.0 {
-        ((1.0 - (1.0 / (z_score * z_score))) * 100.0) as i32
-    } else {
-        0
-    }
+    crate::energy::aul_percent_for_z(z_score)
 }
 
 fn build_summary<'a>(

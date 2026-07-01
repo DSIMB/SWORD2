@@ -25,12 +25,20 @@ pub struct EnergyResult {
 impl EnergyResult {
     /// Calculate the AUL (Autonomy Unit Level) percentage from the Z-score.
     ///
-    /// AUL = (1 - 1/Z²) × 100 when |Z| >= 1, else 0.
+    /// AUL = (1 - 1/Z²) × 100 when Z <= -1, else 0.
     pub fn aul_percent(&self) -> i32 {
         match self.z_score {
-            Some(z) if z.abs() >= 1.0 => ((1.0 - 1.0 / (z * z)) * 100.0) as i32,
-            _ => 0,
+            Some(z) => aul_percent_for_z(z),
+            None => 0,
         }
+    }
+}
+
+pub(crate) fn aul_percent_for_z(z: f64) -> i32 {
+    if z <= -1.0 {
+        ((1.0 - 1.0 / (z * z)) * 100.0) as i32
+    } else {
+        0
     }
 }
 
@@ -270,7 +278,13 @@ mod tests {
             energy: Some(-10.0),
             z_score: Some(2.0),
         };
-        assert_eq!(r.aul_percent(), 75);
+        assert_eq!(r.aul_percent(), 0);
+
+        let favorable = EnergyResult {
+            energy: Some(-10.0),
+            z_score: Some(-2.0),
+        };
+        assert_eq!(favorable.aul_percent(), 75);
 
         let r2 = EnergyResult {
             energy: Some(-1.0),
@@ -283,5 +297,12 @@ mod tests {
             z_score: None,
         };
         assert_eq!(r3.aul_percent(), 0);
+    }
+
+    #[test]
+    fn aul_formula_only_rewards_favorable_negative_z_scores() {
+        assert_eq!(aul_percent_for_z(2.0), 0);
+        assert_eq!(aul_percent_for_z(-0.5), 0);
+        assert_eq!(aul_percent_for_z(-2.0), 75);
     }
 }
