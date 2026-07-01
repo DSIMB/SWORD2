@@ -24,7 +24,6 @@ pub mod compute_measure;
 pub mod distance_model;
 pub mod junctions;
 pub mod parse_measure;
-mod reranker;
 
 /// Configuration for a SWORD2 run.
 #[derive(Debug, Clone)]
@@ -231,16 +230,13 @@ pub fn run_pipeline(
             if !file_existed {
                 let _ = writeln!(
                     f,
-                    "chain_id,output_dir,num_domains,min_size,max_cr,density_min,mean_density,n_discontinuous,size_balance,largest_domain_frac,mean_junction_support,delineation"
+                    "chain_id,output_dir,num_domains,min_size,max_cr,density_min,mean_density,delineation"
                 );
             }
-            // Compute junction support map once per chain (across all candidates)
-            let jsup_map = crate::sword::junctions::junction_support_map(&measure_strings);
             for ml in &measure_lines {
-                let cf = reranker::extract_features(ml, &jsup_map);
                 let _ = writeln!(
                     f,
-                    "{},{},{},{},{:.6},{:.6},{:.6},{},{:.6},{:.6},{:.6},\"{}\"",
+                    "{},{},{},{},{:.6},{:.6},{:.6},\"{}\"",
                     pdb_name,
                     results_dir.display(),
                     ml.num_domains,
@@ -248,10 +244,6 @@ pub fn run_pipeline(
                     ml.max_cr,
                     ml.density_min,
                     ml.mean_density,
-                    cf.n_discontinuous as usize,
-                    cf.size_balance,
-                    cf.largest_domain_frac,
-                    cf.mean_junction_support,
                     ml.delineation.trim(),
                 );
             }
@@ -284,8 +276,6 @@ pub fn run_pipeline(
     // Each nd level contributes one representative (first occurrence in descending order).
     // We pick the nd whose representative has the highest signed distance to the quality
     // boundary — positive = deep good zone, negative = bad zone.
-    // NOTE: a logistic re-ranker was prototyped (reranker.rs) but reverted after CATH-663
-    // benchmarking showed regression (NDO 0.719 vs 0.777, d_count_acc 0.424 vs 0.670).
     let (n_dom, to_print_first_pass) = {
         let last = relevant_measure.len().saturating_sub(1);
         let mut best_nd: usize = 0;
@@ -424,6 +414,65 @@ pub fn run_pipeline(
     let results = parse_sword_output(&output_lines)?;
 
     Ok((output_lines, results))
+}
+
+/// Linear prediction model for optimal number of domains.
+///
+/// Port of `prediction_model()` from SWORD Perl script.
+fn prediction_model(relevant_measure: &[String]) -> Vec<i32> {
+    let mut predictions = Vec::new();
+    let mut max_dom: i32 = -1;
+
+    let last = relevant_measure.len().saturating_sub(1);
+    for line_str in &relevant_measure[..last] {
+        let fields: Vec<&str> = line_str.split('|').collect();
+        if fields.is_empty() {
+            continue;
+        }
+
+        let nd: i32 = fields[0].trim().parse().unwrap_or(0);
+        if max_dom == -1 {
+            max_dom = nd;
+        }
+
+        if nd == max_dom {
+            max_dom -= 1;
+
+            let cr: f64 = if fields.len() > 3 {
+                fields[3].trim().parse().unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            let obs_cpd: f64 = if fields.len() > 5 {
+                fields[5].trim().parse().unwrap_or(0.0)
+            } else {
+                0.0
+            };
+
+            // Model parameters
+            let diag_intercept: f64 = 2.818831;
+            let diag_slope: f64 = 3.582524;
+            let diag_inter_v: f64 = 0.09434462;
+            let horizontal_lim: f64 = 3.166823;
+            let vertical_lim: f64 = 0.231845;
+
+            let theo_cpd = if cr <= diag_inter_v {
+                horizontal_lim
+            } else if cr >= vertical_lim {
+                10000.0
+            } else {
+                cr * diag_slope + diag_intercept
+            };
+
+            if theo_cpd - obs_cpd > 0.0 {
+                predictions.push(0);
+            } else {
+                predictions.push(1);
+            }
+        }
+    }
+
+    predictions
 }
 
 /// Generate quality and display output lines.
@@ -717,4 +766,15 @@ mod tests {
         assert_eq!(compute_cindex(&[1]), "+");
     }
 
+    #[test]
+    fn test_prediction_model() {
+        // With CR below threshold and obs_CPD below theo → prediction = 0
+        let lines = vec![
+            "5|30|...|0.05|...|2.5|0.5".to_string(),
+            "4|30|...|0.05|...|2.5|0.5".to_string(),
+            "".to_string(),
+        ];
+        let preds = prediction_model(&lines);
+        assert!(!preds.is_empty());
+    }
 }

@@ -81,43 +81,6 @@ pub fn calculate_junction_consistencies(sword_lines: &[String]) -> String {
     output
 }
 
-/// Returns a map from junction position to raw support score (count / total_lines).
-/// Mirrors the logic of `calculate_junction_consistencies` but returns structured data.
-pub fn junction_support_map(sword_lines: &[String]) -> std::collections::HashMap<i32, f64> {
-    let mut counts: std::collections::HashMap<i32, i32> = std::collections::HashMap::new();
-    let mut total: i32 = 0;
-
-    for line in sword_lines {
-        let parts: Vec<&str> = line.split('|').collect();
-        if parts.len() < 3 {
-            continue;
-        }
-        let ndom_str = parts[0].trim();
-        if ndom_str.parse::<usize>().is_err() {
-            continue;
-        }
-        let delineation = parts[2].trim();
-        total += 1;
-        for domain in delineation.split_whitespace() {
-            if let Some(pos) = domain.find('-') {
-                if let Ok(j) = domain[..pos].parse::<i32>() {
-                    *counts.entry(j).or_insert(0) += 1;
-                }
-            }
-            if let Some(pos) = domain.rfind('-') {
-                if let Ok(j) = domain[pos + 1..].parse::<i32>() {
-                    *counts.entry(j).or_insert(0) += 1;
-                }
-            }
-        }
-    }
-
-    if total == 0 {
-        return std::collections::HashMap::new();
-    }
-    counts.into_iter().map(|(k, v)| (k, v as f64 / total as f64)).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,21 +112,5 @@ mod tests {
         let result = calculate_junction_consistencies(&lines);
         // Should only have header lines, no junction data
         assert!(!result.contains("100"));
-    }
-
-    #[test]
-    fn junction_support_map_basic() {
-        let lines = vec![
-            "2 | 10 | 0-49 50-99 | 1.0 | ** |".to_string(),
-            "2 | 10 | 0-49 50-99 | 1.0 | * |".to_string(),
-            "2 | 10 | 0-69 70-99 | 1.0 | * |".to_string(),
-        ];
-        let map = junction_support_map(&lines);
-        // position 0 appears in all 3 → 1.0, position 99 appears in all 3 → 1.0
-        // position 49 appears in 2 → 2/3, position 50 in 2 → 2/3
-        // position 69 appears in 1 → 1/3, position 70 in 1 → 1/3
-        assert!((map[&0] - 1.0).abs() < 1e-9);
-        assert!((map[&99] - 1.0).abs() < 1e-9);
-        assert!((map[&49] - 2.0/3.0).abs() < 1e-9);
     }
 }
