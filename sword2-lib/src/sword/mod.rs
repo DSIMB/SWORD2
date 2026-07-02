@@ -19,6 +19,7 @@ static ASS_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\d{1,}\s+\|").unw
 
 use crate::output::Partitioning;
 
+pub(crate) mod candidate_features;
 pub mod compute_jones;
 pub mod compute_measure;
 pub mod distance_model;
