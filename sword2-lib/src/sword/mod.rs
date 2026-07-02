@@ -25,6 +25,7 @@ pub mod compute_measure;
 pub mod distance_model;
 pub mod junctions;
 pub mod parse_measure;
+pub(crate) mod reranker;
 
 /// Configuration for a SWORD2 run.
 #[derive(Debug, Clone)]
@@ -424,14 +425,77 @@ pub fn run_pipeline(
         }
     }
 
-    let mut to_print = String::new();
-    for rm in &relevant_measure2 {
-        let fields: Vec<&str> = rm.split('|').collect();
-        if !fields.is_empty() {
-            let n: usize = fields[0].trim().parse().unwrap_or(0);
-            if n == n_dom {
-                to_print = rm.clone();
-                break;
+    let mut to_print = if config.use_pairwise_reranker && relevant_measure2.len() > 1 {
+        let ss_types: &[crate::peeling::algorithm::SsType] = peeling_output
+            .as_ref()
+            .map(|po| po.ss_types.as_slice())
+            .unwrap_or(&[]);
+        let pdb_path_str = pdb_file_dst.to_string_lossy().to_string();
+
+        let mut raw_dels: Vec<String> = Vec::new();
+        let mut remapped_dels: Vec<String> = Vec::new();
+        let mut parsed: Vec<(usize, usize, f64, f64, f64)> = Vec::new();
+        for rm in &relevant_measure2 {
+            let fields: Vec<&str> = rm.split('|').collect();
+            if fields.len() < 6 {
+                continue;
+            }
+            let nd: usize = fields[0].trim().parse().unwrap_or(0);
+            let min_size: usize = fields[1].trim().parse().unwrap_or(0);
+            let raw_del = fields[2].trim().to_string();
+            let max_cr: f64 = fields[3].trim().parse().unwrap_or(0.0);
+            let density_min: f64 = fields[4].trim().parse().unwrap_or(0.0);
+            let mean_density: f64 = fields[5].trim().parse().unwrap_or(0.0);
+            remapped_dels.push(remap_residue_numbers(&raw_del, &tab_num));
+            raw_dels.push(raw_del);
+            parsed.push((nd, min_size, max_cr, density_min, mean_density));
+        }
+
+        let inputs: Vec<reranker::CandidateInput> = parsed
+            .iter()
+            .zip(raw_dels.iter())
+            .zip(remapped_dels.iter())
+            .map(|((&(nd, min_size, max_cr, density_min, mean_density), raw), remapped)| {
+                reranker::CandidateInput {
+                    num_domains: nd,
+                    min_size,
+                    max_cr,
+                    density_min,
+                    mean_density,
+                    raw_delineation: raw,
+                    remapped_delineation: remapped,
+                }
+            })
+            .collect();
+
+        if inputs.is_empty() {
+            String::new()
+        } else {
+            let winner = reranker::rerank(
+                &inputs,
+                ss_types,
+                config.energy_config.as_ref(),
+                &pdb_path_str,
+                &config.chain_id,
+            );
+            relevant_measure2[winner].clone()
+        }
+    } else {
+        String::new()
+    };
+
+    if to_print.is_empty() {
+        // Legacy distance_model-based selection (also the fallback when the
+        // reranker is disabled, has <2 candidates, or all candidates failed
+        // to parse above).
+        for rm in &relevant_measure2 {
+            let fields: Vec<&str> = rm.split('|').collect();
+            if !fields.is_empty() {
+                let n: usize = fields[0].trim().parse().unwrap_or(0);
+                if n == n_dom {
+                    to_print = rm.clone();
+                    break;
+                }
             }
         }
     }
