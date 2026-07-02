@@ -622,6 +622,9 @@ pub struct PeelingOutput {
     pub final_pu_delineation: Vec<(usize, usize, usize)>,
     /// Original residue numbers from DSSP (tab_true_num equivalent).
     pub true_nums: Vec<i32>,
+    /// Per-residue secondary structure, 0-indexed, same index space as
+    /// `final_pu_delineation` start/end values and `MeasureLine.delineation`.
+    pub(crate) ss_types: Vec<SsType>,
 }
 
 impl PeelingOutput {
@@ -728,7 +731,7 @@ pub fn run_peeling(
     let ind = n - 1; // C code uses 0-based, ind = number of residues - 1
 
     // Step 2: Parse DSSP for secondary structure and cutting mask
-    let (_ss_types, true_nums, cutting_mask) = parse_dssp_for_peeling(dssp_path, n, config)?;
+    let (ss_types, true_nums, cutting_mask) = parse_dssp_for_peeling(dssp_path, n, config)?;
 
     // Step 3: Initialize PU array
     // pu[iteration][pu_index] = [start, end]
@@ -911,6 +914,7 @@ pub fn run_peeling(
         final_pu_contacts: last_pu_contacts,
         final_pu_delineation: last_pu_delineation,
         true_nums,
+        ss_types,
     })
 }
 
@@ -985,6 +989,39 @@ mod tests {
     }
 
     #[test]
+    fn test_run_peeling_exposes_ss_types() {
+        let dir = tempdir().unwrap();
+        let dssp_path = dir.path().join("test.dssp");
+
+        let mut content = format!("{:<128}\n", "  # RESIDUE AA STRUCTURE");
+        for i in 1..=3usize {
+            content.push_str(&dssp_line(i, i as i32, 'A', ' '));
+            content.push('\n');
+        }
+        for i in 4..=7usize {
+            content.push_str(&dssp_line(i, i as i32, 'A', 'H'));
+            content.push('\n');
+        }
+        for i in 8..=10usize {
+            content.push_str(&dssp_line(i, i as i32, 'A', ' '));
+            content.push('\n');
+        }
+        std::fs::write(&dssp_path, &content).unwrap();
+
+        // Simple extended-chain CA coordinates, 3.8 A apart along x — only the
+        // ss_types passthrough is under test here, not realistic PU geometry.
+        let ca_coords: Vec<[f64; 3]> = (0..10).map(|i| [i as f64 * 3.8, 0.0, 0.0]).collect();
+
+        let config = PeelingConfig::default();
+        let output = run_peeling(&ca_coords, &dssp_path, &config).unwrap();
+
+        assert_eq!(output.ss_types.len(), 10);
+        assert!(output.ss_types[..3].iter().all(|s| *s == SsType::Coil));
+        assert!(output.ss_types[3..7].iter().all(|s| *s == SsType::Helix));
+        assert!(output.ss_types[7..].iter().all(|s| *s == SsType::Coil));
+    }
+
+    #[test]
     fn test_write_peeling_log_extends_missing_true_numbers() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("Peeling.log");
@@ -1011,6 +1048,7 @@ mod tests {
             final_pu_contacts: vec![],
             final_pu_delineation: vec![],
             true_nums: vec![1, 2, 3],
+            ss_types: vec![],
         };
 
         output.write_peeling_log(&path).unwrap();
