@@ -13,4 +13,12 @@ target/
 .DS_Store
 
 data/
-benchmark/
+benchmark/cache/
+benchmark/results*
+# Re-include benchmark/data/ itself so the file-level exception below can
+# apply — the generic `data/` rule above matches at any depth otherwise.
+!benchmark/data/
+benchmark/data/*
+# Small trained-weights artifact, embedded into the Rust binary at compile
+# time via include_str! (sword2-lib/src/sword/reranker.rs) — must be tracked.
+!benchmark/data/pairwise_reranker_weights.json

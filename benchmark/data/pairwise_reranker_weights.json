@@ -1,0 +1,23 @@
+{
+  "features": [
+    "num_domains",
+    "min_size",
+    "max_cr",
+    "density_min",
+    "mean_density",
+    "boundary_coil_fraction",
+    "energy_z",
+    "modal_count_distance"
+  ],
+  "weights": [
+    -0.51489778336166,
+    0.5148977879957408,
+    -0.5148977541841224,
+    0.5148977679147279,
+    0.514897778212682,
+    0.5148977756381947,
+    -0.5148977859361492,
+    -0.51489778336166
+  ],
+  "bias": 0.0
+}
