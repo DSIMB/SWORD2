@@ -64,9 +64,80 @@ pub fn modal_count_distance(num_domains: usize, modal: usize) -> f64 {
     (num_domains as f64 - modal as f64).abs()
 }
 
+/// Pseudo-energy Z-score for one candidate's full domain assignment (all
+/// domains' residues together), used to rescore the already-shortlisted
+/// candidates. `remapped_delineation` must use original PDB residue numbers
+/// (i.e. already passed through `remap_residue_numbers`), unlike
+/// `boundary_coil_fraction`'s `raw_delineation`.
+pub fn candidate_energy_z_score(
+    energy_config: &crate::energy::EnergyConfig,
+    pdb_path: &str,
+    chain: &str,
+    remapped_delineation: &str,
+) -> Option<f64> {
+    let mut residues = String::new();
+    for domain in remapped_delineation.trim().split_whitespace() {
+        for segment in domain.split(';') {
+            let parts: Vec<&str> = segment.split('-').collect();
+            if parts.len() != 2 {
+                continue;
+            }
+            let (Ok(start), Ok(end)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>()) else {
+                continue;
+            };
+            let list = crate::energy::build_residue_list((start, end), chain);
+            if !residues.is_empty() {
+                residues.push(',');
+            }
+            residues.push_str(&list);
+        }
+    }
+    if residues.is_empty() {
+        return None;
+    }
+    crate::energy::get_energy_and_z_score(energy_config, pdb_path, Some(&residues))
+        .ok()
+        .and_then(|r| r.z_score)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_candidate_energy_z_score_returns_finite_value() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let pdb_path = dir.path().join("frag.pdb");
+        let mut f = std::fs::File::create(&pdb_path).unwrap();
+        // Residues 1-2 of 1JX4_A backbone atoms — see sword2-lib/tests/dssp_golden.rs
+        // for the full fixture and provenance.
+        writeln!(f, "ATOM      1  N   ILE A   1      46.170  17.543  13.913  1.00 33.83           N").unwrap();
+        writeln!(f, "ATOM      2  CA  ILE A   1      45.665  16.827  12.751  1.00 32.01           C").unwrap();
+        writeln!(f, "ATOM      3  C   ILE A   1      44.396  16.160  13.297  1.00 29.09           C").unwrap();
+        writeln!(f, "ATOM      4  O   ILE A   1      44.466  15.419  14.274  1.00 27.71           O").unwrap();
+        writeln!(f, "ATOM      9  N   VAL A   2      43.247  16.494  12.713  1.00 28.04           N").unwrap();
+        writeln!(f, "ATOM     10  CA  VAL A   2      41.973  15.941  13.134  1.00 26.25           C").unwrap();
+        writeln!(f, "ATOM     11  C   VAL A   2      41.475  15.044  12.028  1.00 27.46           C").unwrap();
+        writeln!(f, "ATOM     12  O   VAL A   2      41.543  15.426  10.857  1.00 26.95           O").unwrap();
+        drop(f);
+
+        let bin_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../bin");
+        let mut ec = crate::energy::EnergyConfig::from_bin_dir(bin_dir);
+        ec.num_shuffles = 20; // keep the test fast; production reranking uses 200
+        ec.preload().unwrap();
+
+        let z = candidate_energy_z_score(&ec, pdb_path.to_str().unwrap(), "A", "1-2");
+        assert!(z.is_some(), "expected a Z-score for a 2-residue fragment");
+        assert!(z.unwrap().is_finite());
+    }
+
+    #[test]
+    fn test_candidate_energy_z_score_empty_delineation_is_none() {
+        let bin_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../bin");
+        let ec = crate::energy::EnergyConfig::from_bin_dir(bin_dir);
+        assert_eq!(candidate_energy_z_score(&ec, "/nonexistent.pdb", "A", ""), None);
+    }
 
     #[test]
     fn test_modal_num_domains_picks_most_frequent() {

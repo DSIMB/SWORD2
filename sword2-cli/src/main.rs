@@ -55,6 +55,12 @@ struct Cli {
     #[arg(short = 'E', long)]
     energies: bool,
 
+    /// Use the pairwise-trained reranker (energy Z-score + boundary secondary
+    /// structure) to pick the winning partition instead of the legacy
+    /// distance_model selection. Off by default; benchmark before enabling.
+    #[arg(long)]
+    use_pairwise_reranker: bool,
+
     /// Enable generation of contact probability matrix plots
     #[arg(short = 'P', long)]
     plots: bool,
@@ -632,12 +638,23 @@ fn process_entry(
     // Step 4: Run the SWORD pipeline (DSSP is pure Rust, no compilation needed)
     reporter.step("SWORD pipeline");
     tracing::debug!("Launch SWORD pipeline");
+
+    // Reduced-shuffle energy config for candidate rescoring/training dump —
+    // separate from the `-E` display config below (which uses cli.zscore_shuffles,
+    // default 2000). Construction is free (potentials load lazily on first use),
+    // so this is built unconditionally without affecting default runtime.
+    let mut rerank_energy_config = energy::EnergyConfig::from_bin_dir(&bin_dir.to_string_lossy());
+    rerank_energy_config.num_shuffles = 200;
+
     let config = sword::SwordConfig {
         compute_energies: cli.energies,
         generate_plots: cli.plots,
         num_threads,
         output_dir: results_dir.to_string_lossy().to_string(),
         max_alternatives: 9,
+        energy_config: Some(rerank_energy_config),
+        chain_id: chain_id.to_string(),
+        use_pairwise_reranker: cli.use_pairwise_reranker,
     };
 
     let (sword_output, sword_results) = sword::run_pipeline(&input_pdb, &pdb_id_chain, &config)

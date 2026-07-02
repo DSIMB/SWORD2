@@ -39,6 +39,17 @@ pub struct SwordConfig {
     pub output_dir: String,
     /// Max alternative assignments (3, 9, or 15).
     pub max_alternatives: usize,
+    /// Reduced-shuffle energy config used for candidate rescoring and the
+    /// training dump — separate from the `-E` display-time energy config,
+    /// which main.rs builds independently at the full shuffle count. `None`
+    /// disables energy-based rescoring entirely (dump rows omit `energy_z`,
+    /// `use_pairwise_reranker` falls back to distance_model-only scoring).
+    pub energy_config: Option<crate::energy::EnergyConfig>,
+    /// PDB chain letter (e.g. "A"), needed to build energy residue lists.
+    pub chain_id: String,
+    /// Use the pairwise-trained reranker to pick the winning candidate
+    /// instead of the legacy distance_model-based selection. Off by default.
+    pub use_pairwise_reranker: bool,
 }
 
 impl Default for SwordConfig {
@@ -49,6 +60,9 @@ impl Default for SwordConfig {
             num_threads: num_cpus::get(),
             output_dir: ".".to_string(),
             max_alternatives: 9,
+            energy_config: None,
+            chain_id: "A".to_string(),
+            use_pairwise_reranker: false,
         }
     }
 }
