@@ -46,9 +46,48 @@ pub fn boundary_coil_fraction(raw_delineation: &str, ss_types: &[SsType]) -> f64
     }
 }
 
+/// Most frequent `num_domains` value across one chain's own candidate set.
+/// Ties broken toward the smaller count for determinism.
+pub fn modal_num_domains(counts: &[usize]) -> usize {
+    let mut freq: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+    for &nd in counts {
+        *freq.entry(nd).or_insert(0) += 1;
+    }
+    freq.into_iter()
+        .max_by_key(|&(nd, count)| (count, std::cmp::Reverse(nd)))
+        .map(|(nd, _)| nd)
+        .unwrap_or(0)
+}
+
+/// Absolute distance of a candidate's domain count from its chain's modal count.
+pub fn modal_count_distance(num_domains: usize, modal: usize) -> f64 {
+    (num_domains as f64 - modal as f64).abs()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_modal_num_domains_picks_most_frequent() {
+        assert_eq!(modal_num_domains(&[2, 3, 3, 3, 4, 5]), 3);
+    }
+
+    #[test]
+    fn test_modal_num_domains_ties_break_smaller() {
+        assert_eq!(modal_num_domains(&[2, 2, 5, 5]), 2);
+    }
+
+    #[test]
+    fn test_modal_num_domains_empty_is_zero() {
+        assert_eq!(modal_num_domains(&[]), 0);
+    }
+
+    #[test]
+    fn test_modal_count_distance() {
+        assert_eq!(modal_count_distance(5, 3), 2.0);
+        assert_eq!(modal_count_distance(3, 3), 0.0);
+    }
 
     #[test]
     fn test_boundary_coil_fraction_all_coil() {
