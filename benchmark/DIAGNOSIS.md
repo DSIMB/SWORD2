@@ -201,3 +201,30 @@ reranker:
    close, decisive pairs — not average pairwise accuracy.
 5. **Ceiling of this whole effort is the 0.896 oracle.** Beating that requires
    improving candidate *generation*, which is out of scope here.
+
+---
+
+## Count-calibration A/B (2026-07-03)
+
+Task: test the analytical `--use-count-calibration` selector on held-out CATH-663
+after fitting `expected_ndom = 1.236372 + 0.003362 * n_residues` on CATH-17287.
+Baseline is the default off path (`sword2-rust` optimal): NDO 0.777158,
+d_count_acc 0.669683, mean count bias -0.413273.
+
+| lambda | NDO | delta NDO | d_count_acc | count bias | boundary_f1_20 | changed partitions |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0.02 | 0.778688 | +0.001530 | 0.675716 | -0.401207 | 0.625887 | 15 |
+| 0.05 | 0.784445 | +0.007287 | 0.708899 | -0.360483 | 0.640423 | 44 |
+| **0.10** | **0.788930** | **+0.011772** | **0.749623** | **-0.277526** | **0.659504** | **100** |
+| 0.20 | 0.786871 | +0.009714 | 0.775264 | -0.197587 | 0.673316 | 151 |
+
+Winning lambda by mean NDO is 0.10. Paired bootstrap CI for the NDO delta is
+**[+0.006996, +0.016661]**, and per-entry win/tie/loss is **69/564/30**. The
+d_count_acc delta is **+0.079940** with paired bootstrap CI **[+0.055807,
++0.104072]**.
+
+Gate decision: keep the flag off by default. The paired result is clearly
+positive, but the literal absolute-mean NDO gate does not clear: lambda 0.10's
+mean NDO CI is **[0.773935, 0.803858]**, whose lower bound is below
+baseline mean - 0.002 (= 0.775158). The module and CLI flag remain useful for
+experimentation, but default output stays unchanged.
