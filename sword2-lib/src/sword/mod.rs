@@ -345,15 +345,15 @@ pub fn run_pipeline(
         let mut parsed_rows: Vec<(usize, usize, f64, f64, f64, String, String)> = Vec::new();
         for rm in &relevant_measure2 {
             let fields: Vec<&str> = rm.split('|').collect();
-            if fields.len() < 6 {
+            if fields.len() < 7 {
                 continue;
             }
             let nd: usize = fields[0].trim().parse().unwrap_or(0);
             let min_size: usize = fields[1].trim().parse().unwrap_or(0);
             let raw_del = fields[2].trim().to_string();
             let max_cr: f64 = fields[3].trim().parse().unwrap_or(0.0);
-            let density_min: f64 = fields[4].trim().parse().unwrap_or(0.0);
-            let mean_density: f64 = fields[5].trim().parse().unwrap_or(0.0);
+            let density_min: f64 = fields[5].trim().parse().unwrap_or(0.0);
+            let mean_density: f64 = fields[6].trim().parse().unwrap_or(0.0);
             let remapped_del = remap_residue_numbers(&raw_del, &tab_num);
             parsed_rows.push((nd, min_size, max_cr, density_min, mean_density, raw_del, remapped_del));
         }
@@ -437,15 +437,15 @@ pub fn run_pipeline(
         let mut parsed: Vec<(usize, usize, f64, f64, f64)> = Vec::new();
         for rm in &relevant_measure2 {
             let fields: Vec<&str> = rm.split('|').collect();
-            if fields.len() < 6 {
+            if fields.len() < 7 {
                 continue;
             }
             let nd: usize = fields[0].trim().parse().unwrap_or(0);
             let min_size: usize = fields[1].trim().parse().unwrap_or(0);
             let raw_del = fields[2].trim().to_string();
             let max_cr: f64 = fields[3].trim().parse().unwrap_or(0.0);
-            let density_min: f64 = fields[4].trim().parse().unwrap_or(0.0);
-            let mean_density: f64 = fields[5].trim().parse().unwrap_or(0.0);
+            let density_min: f64 = fields[5].trim().parse().unwrap_or(0.0);
+            let mean_density: f64 = fields[6].trim().parse().unwrap_or(0.0);
             remapped_dels.push(remap_residue_numbers(&raw_del, &tab_num));
             raw_dels.push(raw_del);
             parsed.push((nd, min_size, max_cr, density_min, mean_density));
