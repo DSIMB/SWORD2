@@ -55,8 +55,13 @@ mod tests {
         let c = CountCalibration { intercept: 1.232, len_coef: 0.00348, lambda: 0.05 };
         // ~290 residues -> ~2.24 domains
         assert!((c.expected_num_domains(290) - 2.2412).abs() < 1e-3);
-        // a tiny chain never drops below 1.0 (clamp test; with these constants formula gives ~1.235)
+        // a tiny chain never drops below 1.0 (with these constants the raw formula
+        // already exceeds 1.0, so this assertion alone doesn't exercise the clamp)
         assert!(c.expected_num_domains(1) >= 1.0);
+
+        // genuinely exercises the clamp: raw formula is exactly 0.0, must clamp to 1.0
+        let tiny = CountCalibration { intercept: 0.0, len_coef: 0.0, lambda: 0.05 };
+        assert_eq!(tiny.expected_num_domains(0), 1.0);
     }
 
     #[test]
