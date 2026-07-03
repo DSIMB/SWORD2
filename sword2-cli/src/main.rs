@@ -61,6 +61,14 @@ struct Cli {
     #[arg(long)]
     use_pairwise_reranker: bool,
 
+    /// Bias domain-count selection toward a length-predicted count (experimental)
+    #[arg(long)]
+    use_count_calibration: bool,
+
+    /// Penalty weight for count calibration (default: fitted constant)
+    #[arg(long)]
+    count_lambda: Option<f64>,
+
     /// Enable generation of contact probability matrix plots
     #[arg(short = 'P', long)]
     plots: bool,
@@ -655,6 +663,8 @@ fn process_entry(
         energy_config: Some(rerank_energy_config),
         chain_id: chain_id.to_string(),
         use_pairwise_reranker: cli.use_pairwise_reranker,
+        use_count_calibration: cli.use_count_calibration,
+        count_lambda: cli.count_lambda,
     };
 
     let (sword_output, sword_results) = sword::run_pipeline(&input_pdb, &pdb_id_chain, &config)
@@ -909,7 +919,13 @@ fn process_entry(
     }
     reporter.step_done("Junctions & cleanup", None);
 
-    output::write_stdout_summary(&pdb_id_chain, chain_id, &sword_results, &energies, cli.format);
+    output::write_stdout_summary(
+        &pdb_id_chain,
+        chain_id,
+        &sword_results,
+        &energies,
+        cli.format,
+    );
 
     let elapsed = start.elapsed();
     reporter.finish(&pdb_id_chain, n_domains, prot_len, elapsed, &results_dir);
@@ -935,7 +951,11 @@ fn main() -> Result<()> {
         output::write_tsv_header();
     }
 
-    let num_threads = if cli.threads == 0 { num_cpus::get() } else { cli.threads };
+    let num_threads = if cli.threads == 0 {
+        num_cpus::get()
+    } else {
+        cli.threads
+    };
 
     let base_dir = if let Some(ref bd) = cli.install_dir {
         bd.clone()
@@ -948,7 +968,11 @@ fn main() -> Result<()> {
                     Some(p)
                 } else {
                     p.parent().and_then(|pp| {
-                        if pp.join("bin").exists() { Some(pp.to_path_buf()) } else { None }
+                        if pp.join("bin").exists() {
+                            Some(pp.to_path_buf())
+                        } else {
+                            None
+                        }
                     })
                 }
             })
@@ -976,7 +1000,14 @@ fn main() -> Result<()> {
         let mut n_err = 0usize;
         for entry in &entries {
             let mut reporter = Reporter::new(cli.verbosity, cli.quiet);
-            match process_entry(&entry, &cli, &mut reporter, &bin_dir, &output_dir, num_threads) {
+            match process_entry(
+                &entry,
+                &cli,
+                &mut reporter,
+                &bin_dir,
+                &output_dir,
+                num_threads,
+            ) {
                 Ok(()) => n_ok += 1,
                 Err(e) => {
                     n_err += 1;
@@ -1009,7 +1040,14 @@ fn main() -> Result<()> {
             chain: cli.chain.as_ref().and_then(|s| s.chars().next()),
         };
         let mut reporter = Reporter::new(cli.verbosity, cli.quiet);
-        process_entry(&entry, &cli, &mut reporter, &bin_dir, &output_dir, num_threads)?;
+        process_entry(
+            &entry,
+            &cli,
+            &mut reporter,
+            &bin_dir,
+            &output_dir,
+            num_threads,
+        )?;
     }
 
     Ok(())

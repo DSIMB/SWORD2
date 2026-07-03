@@ -52,6 +52,10 @@ pub struct SwordConfig {
     /// Use the pairwise-trained reranker to pick the winning candidate
     /// instead of the legacy distance_model-based selection. Off by default.
     pub use_pairwise_reranker: bool,
+    /// Bias N_dom selection toward a length-predicted domain count.
+    pub use_count_calibration: bool,
+    /// Override the calibration penalty weight (for A/B sweeps); None = fitted default.
+    pub count_lambda: Option<f64>,
 }
 
 impl Default for SwordConfig {
@@ -65,6 +69,8 @@ impl Default for SwordConfig {
             energy_config: None,
             chain_id: "A".to_string(),
             use_pairwise_reranker: false,
+            use_count_calibration: false,
+            count_lambda: None,
         }
     }
 }
@@ -266,6 +272,13 @@ pub fn run_pipeline(
         let mut best_dist: f64 = f64::NEG_INFINITY;
         let mut best_line = String::new();
         let mut max_dom: i32 = -1;
+        let calibration = if config.use_count_calibration {
+            let c =
+                crate::sword::count_calibration::CountCalibration::with_lambda(config.count_lambda);
+            Some((c, c.expected_num_domains(tab_num.len())))
+        } else {
+            None
+        };
         for line_str in &relevant_measure[..last] {
             let fields: Vec<&str> = line_str.split('|').collect();
             if fields.is_empty() {
@@ -277,10 +290,26 @@ pub fn run_pipeline(
             }
             if nd == max_dom {
                 max_dom -= 1;
-                let cr: f64 = fields.get(3).and_then(|f| f.trim().parse().ok()).unwrap_or(0.0);
-                let cpd: f64 = fields.get(5).and_then(|f| f.trim().parse().ok()).unwrap_or(0.0);
-                let dist = crate::sword::distance_model::distance_model(cr, cpd, 1);
-                tracing::debug!("n_dom candidate: nd={} cr={:.4} cpd={:.4} dist={:.4}", nd, cr, cpd, dist);
+                let cr: f64 = fields
+                    .get(3)
+                    .and_then(|f| f.trim().parse().ok())
+                    .unwrap_or(0.0);
+                let cpd: f64 = fields
+                    .get(5)
+                    .and_then(|f| f.trim().parse().ok())
+                    .unwrap_or(0.0);
+                let dist_raw = crate::sword::distance_model::distance_model(cr, cpd, 1);
+                let dist = match calibration {
+                    Some((ref c, expected)) => c.adjusted_score(dist_raw, nd as usize, expected),
+                    None => dist_raw,
+                };
+                tracing::debug!(
+                    "n_dom candidate: nd={} cr={:.4} cpd={:.4} dist={:.4}",
+                    nd,
+                    cr,
+                    cpd,
+                    dist
+                );
                 if nd > 0 && dist > best_dist {
                     best_dist = dist;
                     best_nd = nd as usize;
@@ -289,7 +318,11 @@ pub fn run_pipeline(
             }
         }
         let n = if best_nd == 0 { 1 } else { best_nd };
-        tracing::info!("Distance-model n_dom selection: n_dom={} dist={:.4}", n, best_dist);
+        tracing::info!(
+            "Distance-model n_dom selection: n_dom={} dist={:.4}",
+            n,
+            best_dist
+        );
         (n, best_line)
     };
 
@@ -356,7 +389,15 @@ pub fn run_pipeline(
             let density_min: f64 = fields[5].trim().parse().unwrap_or(0.0);
             let mean_density: f64 = fields[6].trim().parse().unwrap_or(0.0);
             let remapped_del = remap_residue_numbers(&raw_del, &tab_num);
-            parsed_rows.push((nd, min_size, max_cr, density_min, mean_density, raw_del, remapped_del));
+            parsed_rows.push((
+                nd,
+                min_size,
+                max_cr,
+                density_min,
+                mean_density,
+                raw_del,
+                remapped_del,
+            ));
         }
 
         let modal = candidate_features::modal_num_domains(
@@ -364,26 +405,49 @@ pub fn run_pipeline(
         );
 
         let file_existed = std::path::Path::new(&dump_path).exists();
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&dump_path) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&dump_path)
+        {
             if !file_existed {
                 let _ = writeln!(
                     f,
                     "chain_id,output_dir,num_domains,min_size,max_cr,density_min,mean_density,delineation,boundary_coil_fraction,energy_z,modal_count_distance"
                 );
             }
-            for (nd, min_size, max_cr, density_min, mean_density, raw_del, remapped_del) in &parsed_rows {
+            for (nd, min_size, max_cr, density_min, mean_density, raw_del, remapped_del) in
+                &parsed_rows
+            {
                 let row = candidate_features::build_dump_row(
-                    *nd, *min_size, *max_cr, *density_min, *mean_density,
-                    raw_del, remapped_del, ss_types,
-                    config.energy_config.as_ref(), &pdb_path_str, &config.chain_id, modal,
+                    *nd,
+                    *min_size,
+                    *max_cr,
+                    *density_min,
+                    *mean_density,
+                    raw_del,
+                    remapped_del,
+                    ss_types,
+                    config.energy_config.as_ref(),
+                    &pdb_path_str,
+                    &config.chain_id,
+                    modal,
                 );
                 let energy_z_str = row.energy_z.map(|z| z.to_string()).unwrap_or_default();
                 let _ = writeln!(
                     f,
                     "{},{},{},{},{:.6},{:.6},{:.6},\"{}\",{:.6},{},{:.1}",
-                    pdb_name, results_dir.display(),
-                    row.num_domains, row.min_size, row.max_cr, row.density_min, row.mean_density,
-                    row.delineation, row.boundary_coil_fraction, energy_z_str, row.modal_count_distance,
+                    pdb_name,
+                    results_dir.display(),
+                    row.num_domains,
+                    row.min_size,
+                    row.max_cr,
+                    row.density_min,
+                    row.mean_density,
+                    row.delineation,
+                    row.boundary_coil_fraction,
+                    energy_z_str,
+                    row.modal_count_distance,
                 );
             }
         }
@@ -456,17 +520,19 @@ pub fn run_pipeline(
             .iter()
             .zip(raw_dels.iter())
             .zip(remapped_dels.iter())
-            .map(|((&(nd, min_size, max_cr, density_min, mean_density), raw), remapped)| {
-                reranker::CandidateInput {
-                    num_domains: nd,
-                    min_size,
-                    max_cr,
-                    density_min,
-                    mean_density,
-                    raw_delineation: raw,
-                    remapped_delineation: remapped,
-                }
-            })
+            .map(
+                |((&(nd, min_size, max_cr, density_min, mean_density), raw), remapped)| {
+                    reranker::CandidateInput {
+                        num_domains: nd,
+                        min_size,
+                        max_cr,
+                        density_min,
+                        mean_density,
+                        raw_delineation: raw,
+                        remapped_delineation: remapped,
+                    }
+                },
+            )
             .collect();
 
         if inputs.is_empty() {
@@ -503,7 +569,10 @@ pub fn run_pipeline(
     // Fallback: the second-pass distance filter (dist < 0.2) excludes deeply good-zone
     // candidates. If the optimal was filtered out, use the first-pass representative.
     if to_print.is_empty() {
-        tracing::debug!("to_print empty after second pass; using first-pass representative for nd={}", n_dom);
+        tracing::debug!(
+            "to_print empty after second pass; using first-pass representative for nd={}",
+            n_dom
+        );
         to_print = to_print_first_pass;
     }
 
@@ -884,5 +953,51 @@ mod tests {
         ];
         let preds = prediction_model(&lines);
         assert!(!preds.is_empty());
+    }
+
+    #[test]
+    fn count_calibration_defaults_to_off() {
+        let config = SwordConfig::default();
+        assert!(!config.use_count_calibration);
+        assert_eq!(config.count_lambda, None);
+    }
+
+    #[test]
+    fn calibration_off_matches_raw_distance_argmax() {
+        use crate::sword::count_calibration::CountCalibration;
+        use crate::sword::distance_model::distance_model;
+
+        // three level representatives: (nd, cr, cpd)
+        let reps = [(2usize, 0.15, 3.3), (3, 0.21, 3.1), (5, 0.46, 2.7)];
+
+        // raw argmax (what ships today)
+        let raw_best = reps
+            .iter()
+            .max_by(|a, b| {
+                distance_model(a.1, a.2, 1)
+                    .partial_cmp(&distance_model(b.1, b.2, 1))
+                    .unwrap()
+            })
+            .unwrap()
+            .0;
+
+        // lambda = 0 must reproduce the raw argmax exactly
+        let c = CountCalibration {
+            intercept: 1.2,
+            len_coef: 0.0035,
+            lambda: 0.0,
+        };
+        let expected = c.expected_num_domains(300);
+        let calib_best = reps
+            .iter()
+            .max_by(|a, b| {
+                c.adjusted_score(distance_model(a.1, a.2, 1), a.0, expected)
+                    .partial_cmp(&c.adjusted_score(distance_model(b.1, b.2, 1), b.0, expected))
+                    .unwrap()
+            })
+            .unwrap()
+            .0;
+
+        assert_eq!(raw_best, calib_best);
     }
 }
