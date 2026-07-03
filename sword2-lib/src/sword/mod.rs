@@ -22,6 +22,7 @@ use crate::output::Partitioning;
 pub(crate) mod candidate_features;
 pub mod compute_jones;
 pub mod compute_measure;
+pub mod count_calibration;
 pub mod distance_model;
 pub mod junctions;
 pub mod parse_measure;
