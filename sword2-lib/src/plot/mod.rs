@@ -623,6 +623,10 @@ mod tests {
                 boundaries: vec![vec![(1, 100)], vec![(101, 200)]],
                 average_k: 3.5,
                 quality: "*****".to_string(),
+                sphericity_p: None,
+                density_p: None,
+                interface_p: None,
+                geometry_score: None,
             },
             SwordPartition {
                 nb_domains: 2,
@@ -630,6 +634,10 @@ mod tests {
                 boundaries: vec![vec![(1, 100)], vec![(101, 200)]],
                 average_k: 3.0,
                 quality: "****".to_string(),
+                sphericity_p: None,
+                density_p: None,
+                interface_p: None,
+                geometry_score: None,
             },
             SwordPartition {
                 nb_domains: 3,
@@ -637,6 +645,10 @@ mod tests {
                 boundaries: vec![vec![(1, 50)], vec![(51, 150)], vec![(151, 200)]],
                 average_k: 2.0,
                 quality: "***".to_string(),
+                sphericity_p: None,
+                density_p: None,
+                interface_p: None,
+                geometry_score: None,
             },
         ];
 

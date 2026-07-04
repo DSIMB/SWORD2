@@ -57,6 +57,14 @@ pub struct SwordConfig {
     pub use_count_calibration: bool,
     /// Override the calibration penalty weight (for A/B sweeps); None = fitted default.
     pub count_lambda: Option<f64>,
+    /// Reorder the winning candidate using the analytical "ideal sphere"
+    /// geometry criteria (sphericity/density/interface-fraction z-scores).
+    /// Off by default — geometry criteria are always computed and displayed
+    /// regardless of this flag, but only change the pick when set.
+    pub use_geometry_metrics: bool,
+    /// Override the geometry selection penalty weight (for A/B sweeps);
+    /// None = `DEFAULT_GEOMETRY_LAMBDA`.
+    pub geometry_lambda: Option<f64>,
 }
 
 impl Default for SwordConfig {
@@ -72,9 +80,18 @@ impl Default for SwordConfig {
             use_pairwise_reranker: false,
             use_count_calibration: false,
             count_lambda: None,
+            use_geometry_metrics: false,
+            geometry_lambda: None,
         }
     }
 }
+
+/// Default weight for the geometry-score penalty in opt-in candidate
+/// reordering (`score = dist_model - lambda * geometry_score`). Provisional —
+/// unlike `count_calibration`'s fitted lambda, this hasn't had an A/B sweep
+/// against a benchmark yet; override via `SwordConfig::geometry_lambda` or
+/// `--geometry-lambda` while tuning.
+const DEFAULT_GEOMETRY_LAMBDA: f64 = 0.1;
 
 /// Raw parsed results from the SWORD pipeline.
 #[derive(Debug, Clone)]
@@ -98,6 +115,18 @@ pub struct SwordPartition {
     pub average_k: f64,
     /// Quality indicator (e.g., "*****").
     pub quality: String,
+    /// Upper-tail p-value of the worst domain's sphericity (kappa^2) vs. the
+    /// CATH reference; small = anomalously elongated. Always computed.
+    pub sphericity_p: Option<f64>,
+    /// Lower-tail p-value of the worst domain's Ca density vs. the CATH
+    /// reference; small = anomalously loose/non-compact. Always computed.
+    pub density_p: Option<f64>,
+    /// Upper-tail p-value of the widest adjacent-domain interface fraction
+    /// vs. the CATH reference; small = anomalously wide (likely over-split).
+    /// `None` for single-domain partitions.
+    pub interface_p: Option<f64>,
+    /// Combined analytical geometry penalty (see `geometry_metrics::GeometryReport`).
+    pub geometry_score: Option<f64>,
 }
 
 /// Run the complete SWORD pipeline (pure Rust, no Perl).
@@ -131,25 +160,28 @@ pub fn run_pipeline(
         crate::dssp::run_dssp(&pdb_file_dst, &dssp_file, &s2d_file, pdb_name)?;
     }
 
+    // Extract CA coordinates from the clean PDB. Needed for Peeling (when it
+    // runs) and, regardless of whether Peeling was cached, for the
+    // geometry_metrics criteria computed later — so this is hoisted out of
+    // the cache-hit guard below rather than only computed on a Peeling run.
+    let pdb_struct = crate::pdb::parse_pdb(&pdb_file_dst)
+        .with_context(|| format!("Failed to parse clean PDB: {}", pdb_file_dst.display()))?;
+    let ca_coords: Vec<[f64; 3]> = pdb_struct
+        .first_model()
+        .map(|m| {
+            m.chains
+                .iter()
+                .flat_map(|c| c.residues.iter())
+                .filter_map(|r| r.get_ca())
+                .map(|a| [a.coord.x, a.coord.y, a.coord.z])
+                .collect()
+        })
+        .unwrap_or_default();
+
     // Step 2: Run Peeling (native Rust)
     let pu_delineation_file = intermediate_dir.join("pu_delineation.mtx");
     let peeling_output = if !pu_delineation_file.exists() {
         tracing::debug!("Running Peeling on {}", pdb_file_dst.display());
-
-        // Extract CA coordinates from the clean PDB
-        let pdb_struct = crate::pdb::parse_pdb(&pdb_file_dst)
-            .with_context(|| format!("Failed to parse clean PDB: {}", pdb_file_dst.display()))?;
-        let ca_coords: Vec<[f64; 3]> = pdb_struct
-            .first_model()
-            .map(|m| {
-                m.chains
-                    .iter()
-                    .flat_map(|c| c.residues.iter())
-                    .filter_map(|r| r.get_ca())
-                    .map(|a| [a.coord.x, a.coord.y, a.coord.z])
-                    .collect()
-            })
-            .unwrap_or_default();
 
         let peeling_config = crate::peeling::PeelingConfig::default();
         let output = crate::peeling::run_peeling(&ca_coords, &dssp_file, &peeling_config)?;
@@ -218,6 +250,10 @@ pub fn run_pipeline(
                 boundaries: vec![vec![(first, last)]],
                 average_k: 0.0,
                 quality: "n/a".to_string(),
+                sphericity_p: None,
+                density_p: None,
+                interface_p: None,
+                geometry_score: None,
             }],
         };
         return Ok((vec![line], results));
@@ -361,6 +397,13 @@ pub fn run_pipeline(
         alt_l,
         true,
     );
+
+    // Analytical "ideal sphere" geometry criteria (sphericity, density,
+    // inter-domain interface fraction): always computable from ca_coords
+    // alone, used purely as a decision aid for display unless
+    // `use_geometry_metrics` opts into using them to reorder the pick.
+    // Independent of, and untouched by, the pairwise reranker branch below.
+    let geometry_reference = geometry_metrics::ReferenceDistributions::embedded();
 
     // Training dump: set SWORD2_DUMP_CANDIDATES=/path/to/output.csv to record the
     // same alt_b/alt_l shortlist the pairwise reranker scores at inference time,
@@ -552,6 +595,34 @@ pub fn run_pipeline(
         String::new()
     };
 
+    if to_print.is_empty() && config.use_geometry_metrics && relevant_measure2.len() > 1 {
+        // Analytical opt-in reordering: score = dist_model - lambda * G,
+        // independent of (and evaluated after) the pairwise reranker above.
+        let lambda_geo = config.geometry_lambda.unwrap_or(DEFAULT_GEOMETRY_LAMBDA);
+        let mut best_idx: Option<usize> = None;
+        let mut best_score = f64::NEG_INFINITY;
+        for (i, rm) in relevant_measure2.iter().enumerate() {
+            let fields: Vec<&str> = rm.split('|').collect();
+            if fields.len() < 7 {
+                continue;
+            }
+            let cr: f64 = fields[3].trim().parse().unwrap_or(0.0);
+            let cpd: f64 = fields[5].trim().parse().unwrap_or(0.0);
+            let dist = distance_model::distance_model(cr, cpd, 1);
+            let penalty = geometry_report_for_raw_delineation(fields[2].trim(), &ca_coords, geometry_reference)
+                .map(|r| r.geometry_score)
+                .unwrap_or(0.0);
+            let score = dist - lambda_geo * penalty;
+            if score > best_score {
+                best_score = score;
+                best_idx = Some(i);
+            }
+        }
+        if let Some(idx) = best_idx {
+            to_print = relevant_measure2[idx].clone();
+        }
+    }
+
     if to_print.is_empty() {
         // Legacy distance_model-based selection (also the fallback when the
         // reranker is disabled, has <2 candidates, or all candidates failed
@@ -578,14 +649,15 @@ pub fn run_pipeline(
     }
 
     // Quality and display
+    let geometry_ctx = GeometryContext { ca_coords: &ca_coords, reference: geometry_reference };
     let output_lines = quality_and_display(
-        pdb_name,
         &tab_num,
         &to_print,
         n_dom,
         &relevant_measure2,
         alt_b,
         alt_l,
+        &geometry_ctx,
     );
 
     // Parse into structured results
@@ -653,17 +725,24 @@ fn prediction_model(relevant_measure: &[String]) -> Vec<i32> {
     predictions
 }
 
+/// Bundles what the geometry criteria need to be computed during display:
+/// Cα coordinates plus the reference distributions to score against.
+struct GeometryContext<'a> {
+    ca_coords: &'a [[f64; 3]],
+    reference: &'a geometry_metrics::ReferenceDistributions,
+}
+
 /// Generate quality and display output lines.
 ///
 /// Port of `quality_and_display()` from SWORD Perl script.
 fn quality_and_display(
-    _pdb_name: &str,
     tab_num: &[i32],
     to_print: &str,
     n_dom: usize,
     relevant_measure: &[String],
     alt_b: usize,
     alt_l: usize,
+    geometry_ctx: &GeometryContext,
 ) -> Vec<String> {
     let mut output = Vec::new();
     let mut globqual: Vec<usize> = Vec::new();
@@ -691,15 +770,22 @@ fn quality_and_display(
     let delineation = remap_residue_numbers(to_print_fields[2].trim(), tab_num);
     let avg_k: f64 = to_print_fields[6].trim().parse().unwrap_or(0.0);
 
+    let geometry = geometry_report_for_raw_delineation(
+        to_print_fields[2].trim(),
+        geometry_ctx.ca_coords,
+        geometry_ctx.reference,
+    );
+
     // Output: ambiguity will be computed at the end
     // Header
     output.push(format!(
-        "{:<2}|{:<3}|{:>60}|{:>12.6}|{:>10}|",
+        "{:<2}|{:<3}|{:>60}|{:>12.6}|{:>10}|{}|",
         to_print_fields[0].trim(),
         to_print_fields[1].trim(),
         delineation,
         avg_k,
         calc_print,
+        format_geometry_fields(geometry.as_ref()),
     ));
 
     if calc_print != "n/a" {
@@ -733,13 +819,19 @@ fn quality_and_display(
 
                 if alt_quality != "n/a" && (this_k - optimal_k).abs() > 1e-10 {
                     let alt_del = remap_residue_numbers(fields[2].trim(), tab_num);
+                    let alt_geometry = geometry_report_for_raw_delineation(
+                        fields[2].trim(),
+                        geometry_ctx.ca_coords,
+                        geometry_ctx.reference,
+                    );
                     output.push(format!(
-                        "{:<2}|{:<3}|{:>60}|{:>12.6}|{:>10}|",
+                        "{:<2}|{:<3}|{:>60}|{:>12.6}|{:>10}|{}|",
                         fields[0].trim(),
                         fields[1].trim(),
                         alt_del,
                         this_k,
                         alt_quality,
+                        format_geometry_fields(alt_geometry.as_ref()),
                     ));
 
                     if alt_quality != "n/a" {
@@ -758,6 +850,41 @@ fn quality_and_display(
     final_output.extend(output);
 
     final_output
+}
+
+/// Parse a raw (0-based) delineation string and compute its geometry report,
+/// or `None` if there are no usable Cα coordinates or domains to score.
+fn geometry_report_for_raw_delineation(
+    raw_delineation: &str,
+    ca_coords: &[[f64; 3]],
+    reference: &geometry_metrics::ReferenceDistributions,
+) -> Option<geometry_metrics::GeometryReport> {
+    if ca_coords.is_empty() {
+        return None;
+    }
+    let domains = geometry_metrics::parse_domain_indices(raw_delineation);
+    if domains.is_empty() {
+        return None;
+    }
+    Some(geometry_metrics::geometry_report(ca_coords, &domains, reference))
+}
+
+/// Format a geometry report as four `|`-delimited fields (sphericity_p,
+/// density_p, interface_p, geometry_score), `n/a` where not applicable —
+/// appended to display lines alongside the existing quality star rating.
+fn format_geometry_fields(report: Option<&geometry_metrics::GeometryReport>) -> String {
+    match report {
+        Some(r) => format!(
+            "{:.4}|{:.4}|{}|{:.4}",
+            r.sphericity_p(),
+            r.density_p(),
+            r.interface_p()
+                .map(|p| format!("{:.4}", p))
+                .unwrap_or_else(|| "n/a".to_string()),
+            r.geometry_score,
+        ),
+        None => "n/a|n/a|n/a|n/a".to_string(),
+    }
 }
 
 /// Remap renumbered residue positions in a delineation string to original numbering.
@@ -852,6 +979,12 @@ pub fn parse_sword_output(output: &[String]) -> Result<SwordResults> {
 
             let average_k: f64 = parts[3].trim().parse().unwrap_or(0.0);
             let quality = parts[4].trim().to_string();
+            // Geometry fields (sphericity_p, density_p, interface_p, geometry_score) are
+            // appended after quality by quality_and_display; absent on older-format lines.
+            let sphericity_p = parts.get(5).and_then(|s| s.parse::<f64>().ok());
+            let density_p = parts.get(6).and_then(|s| s.parse::<f64>().ok());
+            let interface_p = parts.get(7).and_then(|s| s.parse::<f64>().ok());
+            let geometry_score = parts.get(8).and_then(|s| s.parse::<f64>().ok());
 
             domains.push(SwordPartition {
                 nb_domains,
@@ -859,6 +992,10 @@ pub fn parse_sword_output(output: &[String]) -> Result<SwordResults> {
                 boundaries,
                 average_k,
                 quality,
+                sphericity_p,
+                density_p,
+                interface_p,
+                geometry_score,
             });
         }
     }
@@ -888,6 +1025,10 @@ pub fn results_to_partitionings(results: &SwordResults) -> Vec<Partitioning> {
                 domains,
                 energy: None,
                 z_score: None,
+                sphericity_p: part.sphericity_p,
+                density_p: part.density_p,
+                interface_p: part.interface_p,
+                geometry_score: part.geometry_score,
             }
         })
         .collect()

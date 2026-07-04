@@ -69,6 +69,17 @@ struct Cli {
     #[arg(long)]
     count_lambda: Option<f64>,
 
+    /// Reorder the winning candidate using analytical "ideal sphere" geometry
+    /// criteria (sphericity, density, inter-domain interface fraction).
+    /// These criteria are always computed and shown in the output regardless
+    /// of this flag; it only changes which candidate gets picked.
+    #[arg(long)]
+    use_geometry_metrics: bool,
+
+    /// Penalty weight for geometry-based reordering (default: provisional constant)
+    #[arg(long)]
+    geometry_lambda: Option<f64>,
+
     /// Enable generation of contact probability matrix plots
     #[arg(short = 'P', long)]
     plots: bool,
@@ -665,6 +676,8 @@ fn process_entry(
         use_pairwise_reranker: cli.use_pairwise_reranker,
         use_count_calibration: cli.use_count_calibration,
         count_lambda: cli.count_lambda,
+        use_geometry_metrics: cli.use_geometry_metrics,
+        geometry_lambda: cli.geometry_lambda,
     };
 
     let (sword_output, sword_results) = sword::run_pipeline(&input_pdb, &pdb_id_chain, &config)

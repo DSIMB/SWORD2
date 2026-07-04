@@ -57,6 +57,17 @@ pub struct Partitioning {
     pub energy: Option<f64>,
     /// Z-score (if calculated).
     pub z_score: Option<f64>,
+    /// Upper-tail p-value of the worst domain's sphericity vs. the CATH
+    /// reference (see `sword::geometry_metrics`); always computed.
+    pub sphericity_p: Option<f64>,
+    /// Lower-tail p-value of the worst domain's Ca density vs. the CATH
+    /// reference; always computed.
+    pub density_p: Option<f64>,
+    /// Upper-tail p-value of the widest adjacent-domain interface fraction;
+    /// `None` for single-domain partitions.
+    pub interface_p: Option<f64>,
+    /// Combined analytical geometry penalty.
+    pub geometry_score: Option<f64>,
 }
 
 /// Write partitioning results as JSON to a file.
@@ -88,6 +99,13 @@ pub fn write_text<W: Write>(partitionings: &[Partitioning], writer: &mut W) -> R
         if let Some(z_score) = part.z_score {
             writeln!(writer, "  Z-score: {:.4}", z_score)?;
         }
+        write_geometry_text_lines(
+            writer,
+            part.sphericity_p,
+            part.density_p,
+            part.interface_p,
+            part.geometry_score,
+        )?;
         writeln!(writer)?;
     }
     Ok(())
@@ -127,6 +145,13 @@ pub fn write_sword_summary(
         let nb_bars = quality_as_nb_bars(&part.quality);
         writeln!(f, "Quality: {}", "*".repeat(nb_bars))?;
         writeln!(f, "Nb. domains: {}", part.boundaries.len())?;
+        write_geometry_text_lines(
+            &mut f,
+            part.sphericity_p,
+            part.density_p,
+            part.interface_p,
+            part.geometry_score,
+        )?;
 
         for (j, domain) in part.boundaries.iter().enumerate() {
             if !disable_energies {
@@ -204,6 +229,10 @@ pub fn write_sword_summary_json(
             "Nb. domains".to_string(),
             serde_json::Value::Number(serde_json::Number::from(part.boundaries.len())),
         );
+        insert_optional_f64(&mut alt_part_json, "Sphericity p-value", part.sphericity_p);
+        insert_optional_f64(&mut alt_part_json, "Density p-value", part.density_p);
+        insert_optional_f64(&mut alt_part_json, "Interface p-value", part.interface_p);
+        insert_optional_f64(&mut alt_part_json, "Geometry score", part.geometry_score);
 
         let mut domains_json = serde_json::Map::new();
         for (j, domain) in part.boundaries.iter().enumerate() {
@@ -340,5 +369,39 @@ fn format_energy(energy: Option<&EnergyResult>) -> (i32, String) {
             (aul, z_str)
         }
         None => (0, "n/a".to_string()),
+    }
+}
+
+/// Write the analytical "ideal sphere" geometry criteria as text lines, one
+/// per metric present (silently omitted when `None` — e.g. interface_p for a
+/// single-domain partition, or all four when geometry_metrics wasn't run).
+fn write_geometry_text_lines<W: Write>(
+    writer: &mut W,
+    sphericity_p: Option<f64>,
+    density_p: Option<f64>,
+    interface_p: Option<f64>,
+    geometry_score: Option<f64>,
+) -> Result<()> {
+    if let Some(p) = sphericity_p {
+        writeln!(writer, "  Sphericity p-value: {:.4}", p)?;
+    }
+    if let Some(p) = density_p {
+        writeln!(writer, "  Density p-value: {:.4}", p)?;
+    }
+    if let Some(p) = interface_p {
+        writeln!(writer, "  Interface p-value: {:.4}", p)?;
+    }
+    if let Some(score) = geometry_score {
+        writeln!(writer, "  Geometry score: {:.4}", score)?;
+    }
+    Ok(())
+}
+
+/// Insert an optional f64 field into a JSON map, omitting it entirely when `None`.
+fn insert_optional_f64(map: &mut serde_json::Map<String, serde_json::Value>, key: &str, value: Option<f64>) {
+    if let Some(v) = value {
+        if let Some(num) = serde_json::Number::from_f64(v) {
+            map.insert(key.to_string(), serde_json::Value::Number(num));
+        }
     }
 }
