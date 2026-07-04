@@ -1,0 +1,8 @@
+{
+  "_comment": "PROVISIONAL placeholder constants. Replace by running `python -m benchmark.fit_geometry_reference` (fits on CATH-17287, evaluates on held-out CATH-663) — see that script for methodology. Do not hand-tune these beyond illustrative placeholders.",
+  "sphericity": { "mu": 0.25, "sigma": 0.12 },
+  "log_density_residual": { "mu": 0.0, "sigma": 0.25 },
+  "interface_fraction": { "mu": 0.15, "sigma": 0.10 },
+  "density_power_law": { "a": 2.84, "b": 0.38 },
+  "gamma": 0.05
+}
