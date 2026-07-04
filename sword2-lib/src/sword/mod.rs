@@ -24,6 +24,7 @@ pub mod compute_jones;
 pub mod compute_measure;
 pub mod count_calibration;
 pub mod distance_model;
+pub mod geometry_metrics;
 pub mod junctions;
 pub mod parse_measure;
 pub(crate) mod reranker;
