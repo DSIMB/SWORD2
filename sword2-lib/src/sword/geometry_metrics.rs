@@ -222,11 +222,40 @@ pub fn parse_domain_indices(raw_delineation: &str) -> Vec<Vec<usize>> {
         .collect()
 }
 
-/// Fitted Gaussian `N(mu, sigma)` for one geometric residual.
+/// A transform applied to a raw metric value before comparing it against a
+/// fitted Gaussian, chosen offline (per metric) by whichever makes the
+/// reference sample closer to normal — see `benchmark/fit_geometry_reference.py`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Transform {
+    Identity,
+    /// `ln(max(x, epsilon))` — only sensible for non-negative raw metrics.
+    Log,
+}
+
+impl Transform {
+    fn apply(self, x: f64) -> f64 {
+        match self {
+            Transform::Identity => x,
+            Transform::Log => x.max(1e-12).ln(),
+        }
+    }
+}
+
+/// Fitted Gaussian `N(mu, sigma)` for one (possibly transformed) geometric
+/// residual.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct GaussianParams {
+    pub transform: Transform,
     pub mu: f64,
     pub sigma: f64,
+}
+
+impl GaussianParams {
+    /// z-score of `raw_value` after applying this metric's fitted transform.
+    pub fn z(&self, raw_value: f64) -> f64 {
+        (self.transform.apply(raw_value) - self.mu) / self.sigma
+    }
 }
 
 /// Fitted `R_ideal(N) = a * N^b` domain-size-to-radius scaling law.
@@ -263,7 +292,7 @@ impl ReferenceDistributions {
 
     /// z-score of a domain's kappa^2 against the reference sphericity Gaussian.
     pub fn sphericity_z(&self, kappa2: f64) -> f64 {
-        (kappa2 - self.sphericity.mu) / self.sphericity.sigma
+        self.sphericity.z(kappa2)
     }
 
     /// Expected Ca density for a domain of `n` residues under the fitted
@@ -274,16 +303,18 @@ impl ReferenceDistributions {
     }
 
     /// z-score of a domain's log-density residual (`ln density - ln ideal`)
-    /// against the reference.
+    /// against the reference. The residual is already log-domain by
+    /// construction and can be negative, so its own `transform` is expected
+    /// to always be `identity`.
     pub fn density_z(&self, n: usize, density: f64) -> f64 {
         let ideal = self.ideal_density(n).max(1e-12);
         let delta = density.max(1e-12).ln() - ideal.ln();
-        (delta - self.log_density_residual.mu) / self.log_density_residual.sigma
+        self.log_density_residual.z(delta)
     }
 
     /// z-score of an inter-domain interface fraction against the reference.
     pub fn interface_z(&self, fraction: f64) -> f64 {
-        (fraction - self.interface_fraction.mu) / self.interface_fraction.sigma
+        self.interface_fraction.z(fraction)
     }
 }
 
@@ -436,12 +467,32 @@ mod tests {
 
     fn test_reference() -> ReferenceDistributions {
         ReferenceDistributions {
-            sphericity: GaussianParams { mu: 0.3, sigma: 0.1 },
-            log_density_residual: GaussianParams { mu: 0.0, sigma: 0.2 },
-            interface_fraction: GaussianParams { mu: 0.2, sigma: 0.1 },
+            sphericity: GaussianParams { transform: Transform::Identity, mu: 0.3, sigma: 0.1 },
+            log_density_residual: GaussianParams {
+                transform: Transform::Identity,
+                mu: 0.0,
+                sigma: 0.2,
+            },
+            interface_fraction: GaussianParams {
+                transform: Transform::Identity,
+                mu: 0.2,
+                sigma: 0.1,
+            },
             density_power_law: DensityPowerLaw { a: 3.0, b: 0.4 },
             gamma: 0.05,
         }
+    }
+
+    #[test]
+    fn log_transform_applies_ln_with_epsilon_floor() {
+        let g = GaussianParams { transform: Transform::Log, mu: 0.0, sigma: 1.0 };
+        // ln(1.0) == 0.0 == mu -> z == 0
+        assert!(g.z(1.0).abs() < EPS);
+        // ln(e) == 1.0 -> z == 1
+        assert!((g.z(std::f64::consts::E) - 1.0).abs() < EPS);
+        // non-positive input is floored, not -inf/NaN
+        assert!(g.z(0.0).is_finite());
+        assert!(g.z(-5.0).is_finite());
     }
 
     #[test]
