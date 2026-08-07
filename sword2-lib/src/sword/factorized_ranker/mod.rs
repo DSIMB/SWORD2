@@ -1,12 +1,18 @@
+pub(crate) mod features;
 pub(crate) mod lattice;
 pub(crate) mod partition;
+pub(crate) mod schema;
+
+use std::sync::OnceLock;
 
 use crate::dssp::DsspChain;
 use crate::peeling::algorithm::IterationResult;
 use crate::peeling::contact_matrix::ContactMatrix;
 use crate::sword::compute_measure::MeasureProvenance;
 
+use self::features::ContactFeatureCache;
 use self::partition::FeatureError;
+use self::schema::FeatureMask;
 
 #[allow(dead_code)]
 pub(crate) struct StructuralContext<'a> {
@@ -16,16 +22,20 @@ pub(crate) struct StructuralContext<'a> {
     pub iterations: &'a [IterationResult],
     pub measure_provenance: &'a [MeasureProvenance],
     pub dssp_index_for_residue: Vec<usize>,
+    pub contact_feature_cache: OnceLock<ContactFeatureCache>,
 }
 
 impl StructuralContext<'_> {
     #[allow(dead_code)]
-    pub(crate) fn validate(&self) -> Result<(), FeatureError> {
+    pub(crate) fn validate(&self, mask: FeatureMask) -> Result<(), FeatureError> {
         let mapped_dssp_indices: Vec<usize> = (1..=self.dssp.len)
             .filter(|&index| self.dssp.get(index).aa != '!')
             .collect();
         let chain_len = self.ca_coords.len();
 
+        if chain_len == 0 {
+            return Err(FeatureError::MissingContext("empty chain"));
+        }
         if mapped_dssp_indices.len() != chain_len || self.contacts.len() != chain_len {
             return Err(FeatureError::MissingContext("DSSP/chain length mismatch"));
         }
@@ -34,8 +44,11 @@ impl StructuralContext<'_> {
                 "DSSP residue mapping mismatch",
             ));
         }
-        if self.iterations.is_empty() {
+        if (mask.global_count || mask.relative_hierarchy) && self.iterations.is_empty() {
             return Err(FeatureError::MissingContext("Peeling iterations"));
+        }
+        if mask.relative_hierarchy && self.measure_provenance.is_empty() {
+            return Err(FeatureError::MissingContext("measure provenance"));
         }
         if self
             .ca_coords
@@ -45,11 +58,49 @@ impl StructuralContext<'_> {
         {
             return Err(FeatureError::NonFinite("CA coordinates"));
         }
-        if (0..chain_len)
-            .any(|row| (0..chain_len).any(|column| !self.contacts.get(row, column).is_finite()))
-        {
-            return Err(FeatureError::NonFinite("contact probability"));
+        if let Some(cache) = self.contact_feature_cache.get() {
+            cache.validate()?;
+        } else {
+            for row in 0..chain_len {
+                for column in 0..chain_len {
+                    let probability = self.contacts.get(row, column);
+                    if !probability.is_finite() {
+                        return Err(FeatureError::NonFinite("contact probability"));
+                    }
+                    if !(0.0..=1.0).contains(&probability) {
+                        return Err(FeatureError::MissingContext(
+                            "contact probability outside [0, 1]",
+                        ));
+                    }
+                    if (probability - self.contacts.get(column, row)).abs() > 1e-12 {
+                        return Err(FeatureError::MissingContext("asymmetric contact matrix"));
+                    }
+                }
+            }
         }
+        if mask.boundary_local || mask.discontinuity {
+            for &dssp_index in &self.dssp_index_for_residue {
+                let residue = self.dssp.get(dssp_index);
+                if mask.boundary_local && (!residue.kappa.is_finite() || !residue.alpha.is_finite())
+                {
+                    return Err(FeatureError::NonFinite("DSSP angle"));
+                }
+                if mask.boundary_local {
+                    for bond in residue.acceptor.iter().chain(residue.donor.iter()) {
+                        if bond.residue > self.dssp.len {
+                            return Err(FeatureError::MissingContext("DSSP hydrogen bond partner"));
+                        }
+                    }
+                }
+                for partner in residue.partner {
+                    if partner > self.dssp.len {
+                        return Err(FeatureError::MissingContext("DSSP bridge partner"));
+                    }
+                }
+            }
+        }
+
+        let _ = mask.domain_conditioned;
 
         Ok(())
     }
@@ -61,6 +112,7 @@ pub(crate) fn prepare_factorized_context<'a>(
     dssp: Option<&'a DsspChain>,
     iterations: &'a [IterationResult],
     typed_evidence: Option<(&'a ContactMatrix, &'a [MeasureProvenance])>,
+    mask: FeatureMask,
 ) -> Result<StructuralContext<'a>, FeatureError> {
     let (ca_coords, dssp, (contacts, measure_provenance)) = match (ca_coords, dssp, typed_evidence)
     {
@@ -83,14 +135,18 @@ pub(crate) fn prepare_factorized_context<'a>(
         iterations,
         measure_provenance,
         dssp_index_for_residue,
+        contact_feature_cache: OnceLock::new(),
     };
-    context.validate()?;
+    context
+        .contact_feature_cache
+        .get_or_init(|| ContactFeatureCache::new(context.contacts));
+    context.validate(mask)?;
     Ok(context)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{prepare_factorized_context, StructuralContext};
+    use super::{prepare_factorized_context, FeatureMask, StructuralContext};
     use crate::dssp::DsspChain;
     use crate::peeling::algorithm::IterationResult;
     use crate::peeling::contact_matrix::ContactMatrix;
@@ -131,6 +187,7 @@ mod tests {
             iterations,
             measure_provenance: &[],
             dssp_index_for_residue: Vec::new(),
+            contact_feature_cache: std::sync::OnceLock::new(),
         }
     }
 
@@ -138,14 +195,39 @@ mod tests {
     fn context_rejects_dimension_mismatch() {
         let context = synthetic_context_with_lengths(8, 7, 8);
         assert!(matches!(
-            context.validate(),
+            context.validate(FeatureMask::all()),
             Err(FeatureError::MissingContext("DSSP/chain length mismatch"))
         ));
     }
 
     #[test]
     fn unavailable_typed_cache_requests_whole_chain_fallback() {
-        let result = prepare_factorized_context(None, None, &[], None);
+        let result = prepare_factorized_context(None, None, &[], None, FeatureMask::all());
         assert!(matches!(result, Err(FeatureError::MissingContext(_))));
+    }
+
+    #[test]
+    fn preparation_uses_caller_feature_mask() {
+        let ca_coords = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        let mut dssp = DsspChain::new();
+        dssp.push(Default::default());
+        dssp.push(Default::default());
+        let contacts = ContactMatrix::from_ca_coords(&ca_coords, 6.0, 1.5);
+        let mask = FeatureMask {
+            global_count: false,
+            domain_conditioned: true,
+            boundary_local: false,
+            relative_hierarchy: false,
+            discontinuity: false,
+        };
+
+        assert!(prepare_factorized_context(
+            Some(&ca_coords),
+            Some(&dssp),
+            &[],
+            Some((&contacts, &[])),
+            mask,
+        )
+        .is_ok());
     }
 }
