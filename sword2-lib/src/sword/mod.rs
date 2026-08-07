@@ -24,6 +24,7 @@ pub mod compute_jones;
 pub mod compute_measure;
 pub mod count_calibration;
 pub mod distance_model;
+pub(crate) mod factorized_ranker;
 pub mod geometry_metrics;
 pub mod junctions;
 pub mod parse_measure;
@@ -92,6 +93,14 @@ impl Default for SwordConfig {
 /// against a benchmark yet; override via `SwordConfig::geometry_lambda` or
 /// `--geometry-lambda` while tuning.
 const DEFAULT_GEOMETRY_LAMBDA: f64 = 0.1;
+
+fn factorized_first_pass_indices(
+    measures: &[compute_measure::MeasureLine],
+    dir_data: &str,
+    pdb_name: &str,
+) -> Vec<usize> {
+    parse_measure::parse_measure_indices(measures, dir_data, pdb_name, false, 0, 3, 3, true)
+}
 
 /// Raw parsed results from the SWORD pipeline.
 #[derive(Debug, Clone)]
@@ -275,8 +284,6 @@ pub fn run_pipeline(
         compute_measure::compute_measure(&contact_matrix_file, &pu_delineation_file, 0.0001)
     };
 
-    let measure_strings: Vec<String> = measure_lines.iter().map(|ml| ml.to_line()).collect();
-
     // DEBUG: count measure lines per domain count
     {
         let mut counts: std::collections::BTreeMap<usize, usize> =
@@ -287,9 +294,9 @@ pub fn run_pipeline(
         tracing::info!("ComputeMeasure lines per domain count: {:?}", counts);
     }
 
-    // First ParseMeasure pass — get all relevant measures
-    let relevant_measure = parse_measure::parse_measure(
-        &measure_strings,
+    // Legacy first-pass selection follows the configured alternative settings.
+    let legacy_first_pass_indices = parse_measure::parse_measure_indices(
+        &measure_lines,
         &results_dir.join("intermediate").to_string_lossy(),
         pdb_name,
         false,
@@ -298,70 +305,39 @@ pub fn run_pipeline(
         alt_l,
         true,
     );
+    let relevant_measure: Vec<String> = legacy_first_pass_indices
+        .iter()
+        .filter_map(|&index| measure_lines.get(index))
+        .map(compute_measure::MeasureLine::to_line)
+        .collect();
 
-    // Select n_dom and record the first-pass optimal candidate using distance_model.
-    // Each nd level contributes one representative (first occurrence in descending order).
-    // We pick the nd whose representative has the highest signed distance to the quality
-    // boundary — positive = deep good zone, negative = bad zone.
-    let (n_dom, to_print_first_pass) = {
-        let last = relevant_measure.len().saturating_sub(1);
-        let mut best_nd: usize = 0;
-        let mut best_dist: f64 = f64::NEG_INFINITY;
-        let mut best_line = String::new();
-        let mut max_dom: i32 = -1;
-        let calibration = if config.use_count_calibration {
-            let c =
-                crate::sword::count_calibration::CountCalibration::with_lambda(config.count_lambda);
-            Some((c, c.expected_num_domains(tab_num.len())))
-        } else {
-            None
-        };
-        for line_str in &relevant_measure[..last] {
-            let fields: Vec<&str> = line_str.split('|').collect();
-            if fields.is_empty() {
-                continue;
-            }
-            let nd: i32 = fields[0].trim().parse().unwrap_or(0);
-            if max_dom == -1 {
-                max_dom = nd;
-            }
-            if nd == max_dom {
-                max_dom -= 1;
-                let cr: f64 = fields
-                    .get(3)
-                    .and_then(|f| f.trim().parse().ok())
-                    .unwrap_or(0.0);
-                let cpd: f64 = fields
-                    .get(5)
-                    .and_then(|f| f.trim().parse().ok())
-                    .unwrap_or(0.0);
-                let dist_raw = crate::sword::distance_model::distance_model(cr, cpd, 1);
-                let dist = match calibration {
-                    Some((ref c, expected)) => c.adjusted_score(dist_raw, nd as usize, expected),
-                    None => dist_raw,
-                };
-                tracing::debug!(
-                    "n_dom candidate: nd={} cr={:.4} cpd={:.4} dist={:.4}",
-                    nd,
-                    cr,
-                    cpd,
-                    dist
-                );
-                if nd > 0 && dist > best_dist {
-                    best_dist = dist;
-                    best_nd = nd as usize;
-                    best_line = line_str.clone();
-                }
-            }
-        }
-        let n = if best_nd == 0 { 1 } else { best_nd };
-        tracing::info!(
-            "Distance-model n_dom selection: n_dom={} dist={:.4}",
-            n,
-            best_dist
-        );
-        (n, best_line)
-    };
+    // The factorized lattice is always built from its fixed (3, 3) first
+    // pass, independently of the legacy output-alternative configuration.
+    let factorized_indices = factorized_first_pass_indices(
+        &measure_lines,
+        &results_dir.join("intermediate").to_string_lossy(),
+        pdb_name,
+    );
+    let _candidate_lattice = factorized_ranker::lattice::CandidateLattice::from_first_pass(
+        &measure_lines,
+        &factorized_indices,
+        tab_num.len(),
+    )
+    .map_err(|error| anyhow::anyhow!(error))?;
+
+    let first_pass_measures: Vec<compute_measure::MeasureLine> = legacy_first_pass_indices
+        .iter()
+        .filter_map(|&index| measure_lines.get(index).cloned())
+        .collect();
+    let legacy_selection = factorized_ranker::lattice::select_legacy(
+        &first_pass_measures,
+        tab_num.len(),
+        config.use_count_calibration,
+        config.count_lambda,
+    );
+    let n_dom = legacy_selection.num_domains;
+    let to_print_first_pass = legacy_selection.measure_line;
+    tracing::info!("Distance-model n_dom selection: n_dom={}", n_dom);
 
     // Second ParseMeasure pass — select assignments around predicted N_dom
     tracing::debug!("Selecting domain assignments around N_dom={}", n_dom);
@@ -388,7 +364,7 @@ pub fn run_pipeline(
     }
 
     let relevant_measure2 = parse_measure::parse_measure(
-        &measure_strings,
+        &measure_lines,
         &results_dir.join("intermediate").to_string_lossy(),
         pdb_name,
         true,
@@ -1038,6 +1014,18 @@ pub fn results_to_partitionings(results: &SwordResults) -> Vec<Partitioning> {
 mod tests {
     use super::*;
 
+    fn measure_line(num_domains: usize) -> compute_measure::MeasureLine {
+        compute_measure::MeasureLine {
+            num_domains,
+            min_size: 1,
+            delineation: "0-1".to_string(),
+            max_cr: 0.1,
+            mean_cr: 0.0,
+            density_min: 3.0,
+            mean_density: 3.0,
+        }
+    }
+
     #[test]
     fn test_parse_sword_output_basic() {
         let output = vec![
@@ -1102,6 +1090,19 @@ mod tests {
         let config = SwordConfig::default();
         assert!(!config.use_count_calibration);
         assert_eq!(config.count_lambda, None);
+    }
+
+    #[test]
+    fn factorized_first_pass_uses_fixed_shortlist_parameters() {
+        let measures: Vec<compute_measure::MeasureLine> = [7, 6, 5, 4, 3, 2, 1]
+            .into_iter()
+            .flat_map(|num_domains| (0..4).map(move |_| measure_line(num_domains)))
+            .collect();
+        let fixed = factorized_first_pass_indices(&measures, "", "test");
+        let configured = parse_measure::parse_measure_indices(
+            &measures, "", "test", false, 0, 1, 3, true,
+        );
+        assert_ne!(fixed, configured);
     }
 
     #[test]

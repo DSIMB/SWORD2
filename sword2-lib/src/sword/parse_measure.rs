@@ -5,6 +5,7 @@
 //! the predicted optimal number of domains.
 
 use super::compute_jones;
+use super::compute_measure::MeasureLine;
 use super::distance_model;
 
 /// Filter measure lines to select relevant domain assignments.
@@ -21,6 +22,33 @@ use super::distance_model;
 /// Returns the filtered measure lines.
 #[allow(clippy::too_many_arguments)]
 pub fn parse_measure(
+    measure_lines: &[MeasureLine],
+    dir_data: &str,
+    pdb: &str,
+    option_alt_dist: bool,
+    n_dom: usize,
+    alt_b: usize,
+    alt_l: usize,
+    option_alt_diff: bool,
+) -> Vec<String> {
+    parse_measure_indices(
+        measure_lines,
+        dir_data,
+        pdb,
+        option_alt_dist,
+        n_dom,
+        alt_b,
+        alt_l,
+        option_alt_diff,
+    )
+    .into_iter()
+    .filter_map(|index| measure_lines.get(index))
+    .map(MeasureLine::to_line)
+    .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_measure_strings(
     measure_lines: &[String],
     dir_data: &str,
     pdb: &str,
@@ -55,6 +83,43 @@ pub fn parse_measure(
             max_dist,
         )
     }
+}
+
+/// Run ParseMeasure's legacy filtering while retaining indexes into the
+/// original typed measure corpus.
+#[allow(clippy::too_many_arguments)]
+pub fn parse_measure_indices(
+    measure_lines: &[MeasureLine],
+    dir_data: &str,
+    pdb: &str,
+    option_alt_dist: bool,
+    n_dom: usize,
+    alt_b: usize,
+    alt_l: usize,
+    option_alt_diff: bool,
+) -> Vec<usize> {
+    const INDEX_SEPARATOR: char = '\u{1f}';
+    let rendered: Vec<String> = measure_lines.iter().map(MeasureLine::to_line).collect();
+    let tagged: Vec<String> = rendered
+        .iter()
+        .enumerate()
+        .map(|(index, line)| format!("{line}{INDEX_SEPARATOR}{index}"))
+        .collect();
+    let selected = parse_measure_strings(
+        &tagged,
+        dir_data,
+        pdb,
+        option_alt_dist,
+        n_dom,
+        alt_b,
+        alt_l,
+        option_alt_diff,
+    );
+    selected
+        .iter()
+        .filter_map(|line| line.rsplit_once(INDEX_SEPARATOR))
+        .filter_map(|(_, index)| index.parse().ok())
+        .collect()
 }
 
 fn get_num_domains(line: &str) -> usize {
@@ -306,9 +371,49 @@ fn parse_measure_simple(
 mod tests {
     use super::*;
 
+    fn measure(num_domains: usize, delineation: &str) -> MeasureLine {
+        MeasureLine {
+            num_domains,
+            min_size: 1,
+            delineation: delineation.to_string(),
+            max_cr: 0.1,
+            mean_cr: 0.0,
+            density_min: 3.0,
+            mean_density: 3.0,
+        }
+    }
+
     #[test]
     fn test_get_num_domains() {
         assert_eq!(get_num_domains(" 5|30|..."), 5);
         assert_eq!(get_num_domains("12|30|..."), 12);
+    }
+
+    #[test]
+    fn parse_measure_indices_preserves_source_indices_and_formatting() {
+        let measures = vec![measure(3, "0 1 2"), measure(2, "0 1-2"), measure(1, "0-2")];
+        let indices = parse_measure_indices(&measures, "", "test", false, 0, 1, 3, false);
+        assert_eq!(indices, vec![0, 1, 2]);
+        let lines = parse_measure(&measures, "", "test", false, 0, 1, 3, false);
+        assert_eq!(
+            lines,
+            measures
+                .iter()
+                .map(MeasureLine::to_line)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn parse_measure_indices_distinguishes_identical_rendered_lines() {
+        let measures = vec![
+            measure(3, "0 1 2"),
+            measure(3, "0 1 2"),
+            measure(2, "0 1-2"),
+        ];
+        assert_eq!(
+            parse_measure_indices(&measures, "", "test", false, 0, 1, 3, false),
+            vec![1, 0, 2]
+        );
     }
 }

@@ -45,6 +45,22 @@ impl MeasureLine {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct MeasureProvenance {
+    pub canonical_pu_key: String,
+    pub incoming_merge_qualities: Vec<f64>,
+    pub outgoing_merge_qualities: Vec<f64>,
+    pub distinct_parent_keys: Vec<String>,
+    pub hierarchy_path_count: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct MeasureCorpus {
+    pub lines: Vec<MeasureLine>,
+    /// Same length/order as `lines`; provenance[i] describes lines[i].
+    pub provenance: Vec<MeasureProvenance>,
+}
+
 /// PU information.
 #[derive(Debug, Clone)]
 struct PuInfo {
@@ -112,7 +128,7 @@ pub fn compute_measure(file_contact: &Path, file_pu: &Path, _cutoff_pdp: f64) ->
 
     let pu_sizes: Vec<f64> = pu_list.iter().map(|p| p.size as f64).collect();
 
-    compute_measure_core(tab_matrix, pu_sizes, pu_start_end, total_size)
+    compute_measure_core(tab_matrix, pu_sizes, pu_start_end, total_size).lines
 }
 
 /// Run ComputeMeasure from in-memory peeling data (no file I/O).
@@ -123,8 +139,18 @@ pub fn compute_measure_from_data(
     pu_contacts: &[(usize, usize, f64)],
     pu_delineation: &[(usize, usize, usize)],
 ) -> Vec<MeasureLine> {
+    compute_measure_from_data_with_provenance(pu_contacts, pu_delineation).lines
+}
+
+pub fn compute_measure_from_data_with_provenance(
+    pu_contacts: &[(usize, usize, f64)],
+    pu_delineation: &[(usize, usize, usize)],
+) -> MeasureCorpus {
     if pu_delineation.is_empty() {
-        return Vec::new();
+        return MeasureCorpus {
+            lines: Vec::new(),
+            provenance: Vec::new(),
+        };
     }
 
     // Build the same internal structures as the file-based function
@@ -167,7 +193,7 @@ fn compute_measure_core(
     pu_sizes: Vec<f64>,
     pu_start_end: BTreeMap<usize, (i32, i32)>,
     total_size: usize,
-) -> Vec<MeasureLine> {
+) -> MeasureCorpus {
     let max_number_results: usize = 500;
     let cutoff_size_domain: usize = 30;
     let n_pus = pu_sizes.len();
@@ -176,12 +202,26 @@ fn compute_measure_core(
     let initial_domains: Vec<String> = (1..=n_pus).map(|i| i.to_string()).collect();
 
     // Compute initial measure
-    let mut output_lines: Vec<MeasureLine> = Vec::new();
+    let mut corpus = MeasureCorpus {
+        lines: Vec::new(),
+        provenance: Vec::new(),
+    };
+    let initial_key = canonical_pu_key(&initial_domains);
+    let mut output_keys = vec![initial_key.clone()];
+    let mut provenance_by_key = HashMap::new();
+    provenance_by_key.insert(
+        initial_key.clone(),
+        MeasureProvenance {
+            canonical_pu_key: initial_key,
+            hierarchy_path_count: 1,
+            ..MeasureProvenance::default()
+        },
+    );
 
     let (min_size_1, max_cr_1, _mean_cr_1, density_min_1, mean_density_1) =
         measure_domain(&initial_domains, &tab_matrix, &pu_sizes);
     let delineation_1 = print_domain(&initial_domains, &pu_start_end);
-    output_lines.push(MeasureLine {
+    corpus.lines.push(MeasureLine {
         num_domains: initial_domains.len(),
         min_size: min_size_1,
         delineation: delineation_1,
@@ -190,6 +230,12 @@ fn compute_measure_core(
         density_min: density_min_1,
         mean_density: mean_density_1,
     });
+    corpus.provenance.push(
+        provenance_by_key
+            .get(&canonical_pu_key(&initial_domains))
+            .cloned()
+            .expect("initial provenance is present"),
+    );
 
     // 4) Iterative merging
     let mut all_tab_domains: Vec<Vec<String>> = vec![initial_domains];
@@ -224,7 +270,42 @@ fn compute_measure_core(
             sort_domain_fragments(&mut result.new_domains);
         }
 
-        // Sort results by ratio_pdp (descending) and take top N
+        // Aggregate genealogy from every merge before the legacy expansion
+        // limit discards low-ranked representatives.
+        for (child_key, results) in group_merge_results(&all_results) {
+            let mut parent_keys = BTreeMap::new();
+            let mut incoming_merge_qualities = Vec::new();
+            for result in results {
+                parent_keys.insert(result.parent_key.clone(), ());
+                if result.ratio_pdp.is_finite() {
+                    incoming_merge_qualities.push(result.ratio_pdp);
+                    if let Some(parent) = provenance_by_key.get_mut(&result.parent_key) {
+                        parent.outgoing_merge_qualities.push(result.ratio_pdp);
+                    }
+                }
+            }
+            let distinct_parent_keys: Vec<String> = parent_keys.into_keys().collect();
+            let hierarchy_path_count = distinct_parent_keys.iter().fold(0u64, |count, key| {
+                count.saturating_add(
+                    provenance_by_key
+                        .get(key)
+                        .map(|provenance| provenance.hierarchy_path_count)
+                        .unwrap_or(0),
+                )
+            });
+            provenance_by_key.insert(
+                child_key.clone(),
+                MeasureProvenance {
+                    canonical_pu_key: child_key,
+                    incoming_merge_qualities,
+                    outgoing_merge_qualities: Vec::new(),
+                    distinct_parent_keys,
+                    hierarchy_path_count,
+                },
+            );
+        }
+
+        // Preserve the legacy top-N expansion and output representatives.
         all_results.sort_by(|a, b| {
             b.ratio_pdp
                 .partial_cmp(&a.ratio_pdp)
@@ -232,21 +313,17 @@ fn compute_measure_core(
         });
         all_results.truncate(max_number_results + 1);
 
-        // Compute measures and produce output for this merging level
+        // Compute measures and produce output for this merging level.
         let mut new_all_tab_domains: Vec<Vec<String>> = Vec::new();
-        let mut seen_delineations: HashSet<String> = HashSet::new();
-        let mut level_lines: Vec<(f64, MeasureLine, Vec<String>)> = Vec::new();
+        let grouped_results = group_merge_results(&all_results);
 
-        for result in &all_results {
-            let print_dom = merge_dom(&print_domain(&result.new_domains, &pu_start_end));
-
-            if seen_delineations.contains(&print_dom) {
-                continue;
-            }
-            seen_delineations.insert(print_dom.clone());
+        let mut level_lines: Vec<(f64, MeasureLine, Vec<String>, String)> = Vec::new();
+        for (child_key, results) in grouped_results {
+            let first = results[0];
+            let print_dom = merge_dom(&print_domain(&first.new_domains, &pu_start_end));
 
             let (min_sz, max_cr, _mean_cr, den_min, mean_den) =
-                measure_domain(&result.new_domains, &tab_matrix, &pu_sizes);
+                measure_domain(&first.new_domains, &tab_matrix, &pu_sizes);
 
             level_lines.push((
                 mean_den,
@@ -259,7 +336,8 @@ fn compute_measure_core(
                     density_min: den_min,
                     mean_density: mean_den,
                 },
-                result.new_domains.clone(),
+                first.new_domains.clone(),
+                child_key,
             ));
         }
 
@@ -269,10 +347,17 @@ fn compute_measure_core(
         let limit_number_of_domains = total_size.div_ceil(cutoff_size_domain);
         let mut count = 0;
 
-        for (_, ml, doms) in &level_lines {
+        for (_, ml, doms, key) in &level_lines {
             new_all_tab_domains.push(doms.clone());
             if number_domains <= limit_number_of_domains {
-                output_lines.push(ml.clone());
+                corpus.lines.push(ml.clone());
+                corpus.provenance.push(
+                    provenance_by_key
+                        .get(key)
+                        .cloned()
+                        .expect("child provenance is present"),
+                );
+                output_keys.push(key.clone());
                 count += 1;
                 if count > max_number_results {
                     break;
@@ -292,7 +377,16 @@ fn compute_measure_core(
         }
     }
 
-    output_lines
+    corpus.provenance = output_keys
+        .iter()
+        .map(|key| {
+            provenance_by_key
+                .get(key)
+                .cloned()
+                .expect("output provenance is present")
+        })
+        .collect();
+    corpus
 }
 
 /// Result of attempting to merge two PUs.
@@ -300,6 +394,7 @@ fn compute_measure_core(
 struct MergeResult {
     new_domains: Vec<String>,
     ratio_pdp: f64,
+    parent_key: String,
 }
 
 /// Try all pair-wise merges of domains and return candidate results.
@@ -357,6 +452,7 @@ fn compute_merge_pu(
                 results.push(MergeResult {
                     new_domains,
                     ratio_pdp,
+                    parent_key: canonical_pu_key(domains),
                 });
             }
         }
@@ -486,6 +582,62 @@ fn parse_sub_domains(dom: &str) -> Vec<usize> {
     dom.split(';')
         .filter_map(|s| s.trim().parse::<usize>().ok().map(|v| v.saturating_sub(1)))
         .collect()
+}
+
+fn canonical_pu_key(domains: &[String]) -> String {
+    let mut canonical_domains: Vec<Vec<usize>> = domains
+        .iter()
+        .map(|domain| {
+            let mut pu_ids: Vec<usize> = domain
+                .split(';')
+                .filter_map(|part| part.parse::<usize>().ok())
+                .collect();
+            pu_ids.sort_unstable();
+            pu_ids
+        })
+        .collect();
+    canonical_domains.sort_by_key(|domain| domain.first().copied().unwrap_or(usize::MAX));
+    canonical_domains
+        .iter()
+        .map(|domain| {
+            domain
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(";")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn group_merge_results(results: &[MergeResult]) -> Vec<(String, Vec<&MergeResult>)> {
+    let mut groups: Vec<(String, Vec<&MergeResult>)> = Vec::new();
+    let mut positions: HashMap<String, usize> = HashMap::new();
+    for result in results {
+        let key = canonical_pu_key(&result.new_domains);
+        if let Some(&position) = positions.get(&key) {
+            groups[position].1.push(result);
+        } else {
+            positions.insert(key.clone(), groups.len());
+            groups.push((key, vec![result]));
+        }
+    }
+    groups
+}
+
+#[allow(dead_code)]
+pub(crate) fn merge_margin(qualities: &[f64]) -> f64 {
+    let mut finite: Vec<f64> = qualities
+        .iter()
+        .copied()
+        .filter(|quality| quality.is_finite())
+        .collect();
+    finite.sort_by(|left, right| right.total_cmp(left));
+    if finite.len() < 2 {
+        0.0
+    } else {
+        finite[0] - finite[1]
+    }
 }
 
 /// Sort domain fragments lexically by first PU number.
@@ -639,5 +791,50 @@ mod tests {
     fn test_parse_sub_domains() {
         assert_eq!(parse_sub_domains("1;3;5"), vec![0, 2, 4]);
         assert_eq!(parse_sub_domains("2"), vec![1]);
+    }
+
+    #[test]
+    fn provenance_retains_parent_quality_and_path() {
+        let corpus = compute_measure_from_data_with_provenance(
+            &[(1, 1, 1.0), (2, 2, 1.0), (1, 2, 0.1), (2, 1, 0.1)],
+            &[(1, 0, 19), (2, 20, 39)],
+        );
+        assert_eq!(corpus.lines.len(), corpus.provenance.len());
+        assert_eq!(corpus.provenance[0].hierarchy_path_count, 1);
+        assert!(!corpus.provenance[0].outgoing_merge_qualities.is_empty());
+        assert_eq!(corpus.provenance[1].distinct_parent_keys, vec!["1 2"]);
+        assert_eq!(corpus.provenance[1].hierarchy_path_count, 1);
+    }
+
+    #[test]
+    fn merge_margin_uses_two_largest_finite_values() {
+        assert_eq!(merge_margin(&[f64::NAN, 0.3, 0.9, 0.5]), 0.4);
+        assert_eq!(merge_margin(&[0.9]), 0.0);
+    }
+
+    #[test]
+    fn full_merge_results_supply_outgoing_provenance_after_legacy_truncation() {
+        let n_pus = 13usize;
+        let contacts: Vec<(usize, usize, f64)> = (1..=n_pus)
+            .flat_map(|left| (1..=n_pus).map(move |right| (left, right, 1.0)))
+            .collect();
+        let delineation: Vec<(usize, usize, usize)> = (1..=n_pus)
+            .map(|id| {
+                let start = (id - 1) * 30;
+                (id, start, start + 29)
+            })
+            .collect();
+        let corpus = compute_measure_from_data_with_provenance(&contacts, &delineation);
+        let first_merge_provenance: Vec<&MeasureProvenance> = corpus
+            .lines
+            .iter()
+            .zip(&corpus.provenance)
+            .filter_map(|(line, provenance)| (line.num_domains == n_pus - 1).then_some(provenance))
+            .collect();
+
+        assert!(first_merge_provenance.len() > 8);
+        assert!(first_merge_provenance
+            .iter()
+            .all(|provenance| !provenance.outgoing_merge_qualities.is_empty()));
     }
 }
