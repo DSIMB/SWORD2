@@ -1,0 +1,20 @@
+[project]
+name = "sword2-benchmark"
+version = "0.1.0"
+description = "Reproducible SWORD2 benchmark harness against Merizo, Chainsaw, and original SWORD2"
+requires-python = ">=3.10"
+dependencies = [
+  "pandas",
+  "numpy",
+  "scipy",
+  "matplotlib",
+  "seaborn",
+  "biopython",
+  "scikit-learn",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
