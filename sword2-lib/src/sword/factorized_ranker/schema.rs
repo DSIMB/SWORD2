@@ -366,6 +366,13 @@ pub(crate) const DISCONTINUITY_FEATURE_NAMES: &[&str] = &[
     "segment_same_domain_sheet_links_max",
 ];
 
+pub(crate) const BOUNDARY_LOCAL_START: usize = BASE_AND_DOMAIN_FEATURE_NAMES.len();
+pub(crate) const BOUNDARY_LOCAL_END: usize =
+    BOUNDARY_LOCAL_START + BOUNDARY_LOCAL_FEATURE_NAMES.len();
+pub(crate) const DISCONTINUITY_START: usize =
+    BOUNDARY_LOCAL_END + RELATIVE_HIERARCHY_FEATURE_NAMES.len();
+pub(crate) const DISCONTINUITY_END: usize = DISCONTINUITY_START + DISCONTINUITY_FEATURE_NAMES.len();
+
 pub(crate) const CANDIDATE_FEATURE_NAMES: &[&str] = &[
     "num_domains",
     "min_size",

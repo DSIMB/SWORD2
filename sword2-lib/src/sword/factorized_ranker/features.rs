@@ -8,11 +8,15 @@ use crate::sword::geometry_metrics::{
     gyration_tensor, principal_radii, radius_of_gyration, sym3x3_eigenvalues,
 };
 
+use super::boundary::extract_boundary_features;
+use super::discontinuity::extract_discontinuity_features;
 use super::lattice::CandidateRecord;
 use super::partition::{Domain, FeatureError, ParsedPartition, Segment};
 use super::schema::{
     CandidateFeatures, FeatureMask, GlobalFeatures, BASE_CANDIDATE_FEATURE_NAMES,
-    CANDIDATE_FEATURE_NAMES, DOMAIN_CONDITIONED_FEATURE_NAMES, GLOBAL_FEATURE_NAMES,
+    BOUNDARY_LOCAL_END, BOUNDARY_LOCAL_FEATURE_NAMES, BOUNDARY_LOCAL_START,
+    CANDIDATE_FEATURE_NAMES, DISCONTINUITY_END, DISCONTINUITY_FEATURE_NAMES, DISCONTINUITY_START,
+    DOMAIN_CONDITIONED_FEATURE_NAMES, GLOBAL_FEATURE_NAMES,
 };
 use super::StructuralContext;
 
@@ -480,6 +484,47 @@ pub(crate) fn extract_candidate_base_and_domain_with_mask(
     })
 }
 
+pub(crate) fn populate_candidate_conditional_features(
+    candidate: &CandidateRecord,
+    features: &mut CandidateFeatures,
+    context: &StructuralContext<'_>,
+    mask: FeatureMask,
+) -> Result<(), FeatureError> {
+    if features.source_index != candidate.source_index
+        || features.canonical != candidate.partition.canonical
+        || features.num_domains != candidate.measure.num_domains
+        || features.values.len() != CANDIDATE_FEATURE_NAMES.len()
+        || BOUNDARY_LOCAL_END - BOUNDARY_LOCAL_START != BOUNDARY_LOCAL_FEATURE_NAMES.len()
+        || DISCONTINUITY_END - DISCONTINUITY_START != DISCONTINUITY_FEATURE_NAMES.len()
+        || DISCONTINUITY_END != CANDIDATE_FEATURE_NAMES.len()
+    {
+        return Err(FeatureError::SchemaMismatch);
+    }
+
+    let discontinuity_values = if mask.discontinuity {
+        let values = extract_discontinuity_features(&candidate.partition, context)?;
+        if values.len() != DISCONTINUITY_FEATURE_NAMES.len() {
+            return Err(FeatureError::SchemaMismatch);
+        }
+        values
+    } else {
+        vec![0.0; DISCONTINUITY_FEATURE_NAMES.len()]
+    };
+    let boundary_values = if mask.boundary_local {
+        let values = extract_boundary_features(&candidate.partition, context)?;
+        if values.len() != BOUNDARY_LOCAL_FEATURE_NAMES.len() {
+            return Err(FeatureError::SchemaMismatch);
+        }
+        values
+    } else {
+        vec![0.0; BOUNDARY_LOCAL_FEATURE_NAMES.len()]
+    };
+
+    features.values[BOUNDARY_LOCAL_START..BOUNDARY_LOCAL_END].copy_from_slice(&boundary_values);
+    features.values[DISCONTINUITY_START..DISCONTINUITY_END].copy_from_slice(&discontinuity_values);
+    Ok(())
+}
+
 fn validate_partition(candidate: &CandidateRecord, chain_len: usize) -> Result<(), FeatureError> {
     if candidate.partition.residue_to_domain.len() != chain_len
         || candidate.partition.domains.is_empty()
@@ -744,8 +789,8 @@ mod tests {
 
     use super::{
         domain_conditioned_values, extract_candidate_base_and_domain,
-        extract_candidate_base_and_domain_with_mask, extract_global_features, DomainMeasures,
-        ShapeMeasures,
+        extract_candidate_base_and_domain_with_mask, extract_global_features,
+        populate_candidate_conditional_features, DomainMeasures, ShapeMeasures,
     };
     use crate::dssp::types::BackboneResidue;
     use crate::dssp::DsspChain;
@@ -756,8 +801,9 @@ mod tests {
     use crate::sword::factorized_ranker::partition::{parse_partition, FeatureError};
     use crate::sword::factorized_ranker::schema::{
         candidate_pair_vector, CandidateFeatures, FeatureMask, BASE_AND_DOMAIN_FEATURE_NAMES,
-        BASE_CANDIDATE_FEATURE_NAMES, BOUNDARY_LOCAL_FEATURE_NAMES, CANDIDATE_FEATURE_NAMES,
-        COUNT_ITEM_FEATURE_NAMES, DISCONTINUITY_FEATURE_NAMES, DOMAIN_CONDITIONED_FEATURE_NAMES,
+        BASE_CANDIDATE_FEATURE_NAMES, BOUNDARY_LOCAL_END, BOUNDARY_LOCAL_FEATURE_NAMES,
+        BOUNDARY_LOCAL_START, CANDIDATE_FEATURE_NAMES, COUNT_ITEM_FEATURE_NAMES, DISCONTINUITY_END,
+        DISCONTINUITY_FEATURE_NAMES, DISCONTINUITY_START, DOMAIN_CONDITIONED_FEATURE_NAMES,
         FEATURE_SCHEMA_VERSION, GLOBAL_FEATURE_NAMES, RELATIVE_HIERARCHY_FEATURE_NAMES,
     };
     use crate::sword::factorized_ranker::StructuralContext;
@@ -1064,6 +1110,191 @@ mod tests {
             [BASE_CANDIDATE_FEATURE_NAMES.len()..BASE_AND_DOMAIN_FEATURE_NAMES.len()]
             .iter()
             .any(|value| *value != 0.0));
+    }
+
+    #[test]
+    fn conditional_population_writes_only_fixed_boundary_and_discontinuity_slots() {
+        let context = fixture_context();
+        let candidate = fixture_candidate();
+        let mut boundary = extract_candidate_base_and_domain(&candidate, &context, 2).unwrap();
+        let base = boundary.values[..BASE_AND_DOMAIN_FEATURE_NAMES.len()].to_vec();
+        populate_candidate_conditional_features(
+            &candidate,
+            &mut boundary,
+            &context,
+            FeatureMask {
+                boundary_local: true,
+                ..base_only_mask()
+            },
+        )
+        .unwrap();
+        assert_eq!(boundary.values.len(), CANDIDATE_FEATURE_NAMES.len());
+        assert_eq!(CANDIDATE_FEATURE_NAMES.len(), 154);
+        assert_eq!(
+            &boundary.values[..BASE_AND_DOMAIN_FEATURE_NAMES.len()],
+            base.as_slice()
+        );
+        assert!(boundary.values[BOUNDARY_LOCAL_START..BOUNDARY_LOCAL_END]
+            .iter()
+            .any(|value| *value != 0.0));
+        assert!(boundary.values[BOUNDARY_LOCAL_END..DISCONTINUITY_START]
+            .iter()
+            .all(|value| *value == 0.0));
+        assert!(boundary.values[DISCONTINUITY_START..DISCONTINUITY_END]
+            .iter()
+            .all(|value| *value == 0.0));
+
+        let discontinuous = CandidateRecord {
+            source_index: 8,
+            measure: MeasureLine {
+                num_domains: 2,
+                min_size: 6,
+                delineation: "0-3;10-13 4-9".into(),
+                max_cr: 0.25,
+                mean_cr: 0.0,
+                density_min: 1.5,
+                mean_density: 2.5,
+            },
+            partition: parse_partition("0-3;10-13 4-9", 14).unwrap(),
+            legacy_distance: 0.0,
+            hierarchy: None,
+        };
+        let mut segment = extract_candidate_base_and_domain(&discontinuous, &context, 2).unwrap();
+        populate_candidate_conditional_features(
+            &discontinuous,
+            &mut segment,
+            &context,
+            FeatureMask {
+                discontinuity: true,
+                ..base_only_mask()
+            },
+        )
+        .unwrap();
+        assert!(segment.values[BOUNDARY_LOCAL_START..BOUNDARY_LOCAL_END]
+            .iter()
+            .all(|value| *value == 0.0));
+        assert!(segment.values[BOUNDARY_LOCAL_END..DISCONTINUITY_START]
+            .iter()
+            .all(|value| *value == 0.0));
+        assert_eq!(segment.values[DISCONTINUITY_START], 1.0);
+        assert_eq!(DISCONTINUITY_END, segment.values.len());
+    }
+
+    #[test]
+    fn disabled_conditional_families_do_not_inspect_their_malformed_evidence() {
+        let candidate = fixture_candidate();
+        let mut boundary_malformed_context = fixture_context();
+        let mut boundary_malformed_dssp = dssp_chain("HHHCCEEECCCCCC");
+        boundary_malformed_dssp.get_mut(1).kappa = f64::NAN;
+        boundary_malformed_dssp.get_mut(1).acceptor[0].residue = usize::MAX;
+        boundary_malformed_context.dssp = Box::leak(Box::new(boundary_malformed_dssp));
+        let mut boundary_masked =
+            extract_candidate_base_and_domain(&candidate, &boundary_malformed_context, 2).unwrap();
+        populate_candidate_conditional_features(
+            &candidate,
+            &mut boundary_masked,
+            &boundary_malformed_context,
+            FeatureMask {
+                discontinuity: true,
+                ..base_only_mask()
+            },
+        )
+        .unwrap();
+        assert!(
+            boundary_masked.values[BOUNDARY_LOCAL_START..BOUNDARY_LOCAL_END]
+                .iter()
+                .all(|value| *value == 0.0)
+        );
+
+        let mut discontinuity_malformed_context = fixture_context();
+        let mut discontinuity_malformed_dssp = dssp_chain("HHHCCEEECCCCCC");
+        discontinuity_malformed_dssp.get_mut(1).partner[0] = usize::MAX;
+        discontinuity_malformed_context.dssp = Box::leak(Box::new(discontinuity_malformed_dssp));
+        let mut discontinuity_masked =
+            extract_candidate_base_and_domain(&candidate, &discontinuity_malformed_context, 2)
+                .unwrap();
+        populate_candidate_conditional_features(
+            &candidate,
+            &mut discontinuity_masked,
+            &discontinuity_malformed_context,
+            base_only_mask(),
+        )
+        .unwrap();
+        assert!(
+            discontinuity_masked.values[DISCONTINUITY_START..DISCONTINUITY_END]
+                .iter()
+                .all(|value| *value == 0.0)
+        );
+    }
+
+    #[test]
+    fn conditional_population_validates_candidate_identity_and_vector_length() {
+        let context = fixture_context();
+        let candidate = fixture_candidate();
+        let mut wrong_identity =
+            extract_candidate_base_and_domain(&candidate, &context, 2).unwrap();
+        wrong_identity.source_index += 1;
+        assert_eq!(
+            populate_candidate_conditional_features(
+                &candidate,
+                &mut wrong_identity,
+                &context,
+                FeatureMask::all(),
+            ),
+            Err(FeatureError::SchemaMismatch)
+        );
+
+        let mut wrong_length = extract_candidate_base_and_domain(&candidate, &context, 2).unwrap();
+        wrong_length.values.pop();
+        assert_eq!(
+            populate_candidate_conditional_features(
+                &candidate,
+                &mut wrong_length,
+                &context,
+                FeatureMask::all(),
+            ),
+            Err(FeatureError::SchemaMismatch)
+        );
+    }
+
+    #[test]
+    fn conditional_population_rolls_back_when_the_second_extractor_fails() {
+        let candidate = fixture_candidate();
+        let mut context = fixture_context();
+        let mut invalid_boundary_dssp = dssp_chain("HHHCCEEECCCCCC");
+        invalid_boundary_dssp.get_mut(1).kappa = f64::NAN;
+        context.dssp = Box::leak(Box::new(invalid_boundary_dssp));
+        assert!(
+            crate::sword::factorized_ranker::discontinuity::extract_discontinuity_features(
+                &candidate.partition,
+                &context,
+            )
+            .is_ok()
+        );
+
+        let mut features = extract_candidate_base_and_domain(&candidate, &context, 2).unwrap();
+        for (index, value) in features.values[BOUNDARY_LOCAL_START..DISCONTINUITY_END]
+            .iter_mut()
+            .enumerate()
+        {
+            *value = index as f64 + 0.25;
+        }
+        let before = features.values.clone();
+
+        assert_eq!(
+            populate_candidate_conditional_features(
+                &candidate,
+                &mut features,
+                &context,
+                FeatureMask {
+                    boundary_local: true,
+                    discontinuity: true,
+                    ..base_only_mask()
+                },
+            ),
+            Err(FeatureError::NonFinite("DSSP angle"))
+        );
+        assert_eq!(features.values, before);
     }
 
     #[test]

@@ -1,3 +1,5 @@
+pub(crate) mod boundary;
+pub(crate) mod discontinuity;
 pub(crate) mod features;
 pub(crate) mod lattice;
 pub(crate) mod partition;
