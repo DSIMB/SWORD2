@@ -103,10 +103,45 @@ def test_global_features_use_exact_geometry_dssp_and_count_formulas():
     assert values["chain_coil_fraction"] == pytest.approx(1.0 / 6.0)
     assert values["chain_helix_blocks"] == 1.0
     assert values["chain_strand_blocks"] == 1.0
-    assert values["chain_count_hist_2"] == 2.0
-    assert values["chain_count_hist_4"] == 1.0
-    assert values["chain_count_hist_21_plus"] == 1.0
+    assert values["chain_count_hist_2"] == 0.5
+    assert values["chain_count_hist_4"] == 0.25
+    assert values["chain_count_hist_21_plus"] == 0.25
     assert values["chain_modal_count"] == 2.0
+    assert all(math.isfinite(value) for value in values.values())
+
+
+def test_global_count_histogram_is_a_normalized_candidate_fraction():
+    values = compute_global_features(
+        _octahedron(),
+        np.zeros((6, 6), dtype=float),
+        _dssp("CCCCCC"),
+        PeelingSummary(n_levels=0, finest_pu_count=0),
+        [2, 2, 4, 21],
+    )
+
+    histogram_total = sum(
+        values[f"chain_count_hist_{count}"] for count in range(1, 21)
+    ) + values["chain_count_hist_21_plus"]
+    assert histogram_total == pytest.approx(1.0)
+    assert values["chain_count_hist_2"] == 0.5
+    assert values["chain_count_hist_4"] == 0.25
+    assert values["chain_count_hist_21_plus"] == 0.25
+
+
+def test_empty_candidate_count_histogram_is_finite_and_zero():
+    values = compute_global_features(
+        _octahedron(),
+        np.zeros((6, 6), dtype=float),
+        _dssp("CCCCCC"),
+        PeelingSummary(n_levels=0, finest_pu_count=0),
+        [],
+    )
+
+    histogram = [
+        values[f"chain_count_hist_{count}"] for count in range(1, 21)
+    ] + [values["chain_count_hist_21_plus"]]
+    assert histogram == [0.0] * 21
+    assert values["chain_modal_count"] == 0.0
     assert all(math.isfinite(value) for value in values.values())
 
 

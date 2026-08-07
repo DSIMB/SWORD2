@@ -197,8 +197,11 @@ def compute_global_features(
         "chain_finest_pus": peeling.finest_pu_count,
         "chain_candidate_total": len(counts),
         "chain_available_count_total": len(set(counts)),
-        **{f"chain_count_hist_{value}": histogram[value] for value in histogram},
-        "chain_count_hist_21_plus": overflow,
+        **{
+            f"chain_count_hist_{value}": histogram[value] / len(counts) if counts else 0.0
+            for value in histogram
+        },
+        "chain_count_hist_21_plus": overflow / len(counts) if counts else 0.0,
         "chain_modal_count": modal_count,
     }
     return _ordered_finite(GLOBAL_FEATURES, values)
