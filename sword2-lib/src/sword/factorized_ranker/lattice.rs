@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::sword::compute_measure::MeasureLine;
+use crate::peeling::algorithm::IterationResult;
+use crate::sword::compute_measure::{MeasureLine, MeasureProvenance};
 use crate::sword::count_calibration::CountCalibration;
 use crate::sword::distance_model;
 
@@ -76,6 +77,87 @@ impl CandidateLattice {
         }
 
         Ok(Self { candidates, groups })
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn attach_hierarchy(
+        &mut self,
+        provenance: &[MeasureProvenance],
+        iterations: &[IterationResult],
+    ) -> Result<(), FeatureError> {
+        if iterations.is_empty() {
+            return Err(FeatureError::MissingContext("Peeling iterations"));
+        }
+
+        for candidate in &mut self.candidates {
+            let provenance = provenance
+                .get(candidate.source_index)
+                .ok_or(FeatureError::MissingContext("measure provenance"))?;
+            let boundaries = partition_boundaries(&candidate.partition);
+            let matching_levels: Vec<usize> = iterations
+                .iter()
+                .enumerate()
+                .filter_map(|(level, iteration)| {
+                    let pu_ends: BTreeSet<usize> = iteration
+                        .pu_boundaries
+                        .iter()
+                        .map(|boundary| boundary[1])
+                        .collect();
+                    boundaries
+                        .iter()
+                        .all(|boundary| pu_ends.contains(boundary))
+                        .then_some(level)
+                })
+                .collect();
+            let first_appearance_level =
+                matching_levels
+                    .first()
+                    .copied()
+                    .ok_or(FeatureError::MissingContext(
+                        "candidate boundary absent from Peeling hierarchy",
+                    ))?;
+            let persistence_levels = matching_levels
+                .iter()
+                .filter(|&&level| level >= first_appearance_level)
+                .count();
+
+            candidate.hierarchy = Some(HierarchyEvidence {
+                first_appearance_level,
+                persistence_levels,
+                parent_merge_margin: merge_margin(&provenance.incoming_merge_qualities),
+                child_merge_margin: merge_margin(&provenance.outgoing_merge_qualities),
+                hierarchy_path_count: provenance.hierarchy_path_count,
+            });
+        }
+
+        Ok(())
+    }
+}
+
+fn partition_boundaries(partition: &ParsedPartition) -> Vec<usize> {
+    let mut segments: Vec<_> = partition
+        .domains
+        .iter()
+        .flat_map(|domain| domain.segments.iter())
+        .collect();
+    segments.sort_by_key(|segment| segment.start);
+    segments
+        .iter()
+        .take(segments.len().saturating_sub(1))
+        .map(|segment| segment.end)
+        .collect()
+}
+
+fn merge_margin(qualities: &[f64]) -> f64 {
+    let mut finite: Vec<f64> = qualities
+        .iter()
+        .copied()
+        .filter(|quality| quality.is_finite())
+        .collect();
+    finite.sort_by(|left, right| right.total_cmp(left));
+    match finite.as_slice() {
+        [largest, second_largest, ..] => largest - second_largest,
+        _ => 0.0,
     }
 }
 
@@ -157,6 +239,8 @@ fn rendered_legacy_distance(measure: &MeasureLine) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::peeling::algorithm::IterationResult;
+    use crate::sword::compute_measure::MeasureProvenance;
     use crate::sword::distance_model;
 
     fn measure(
@@ -274,5 +358,44 @@ mod tests {
         assert_eq!(old.0, 2);
         assert_eq!(new.num_domains, old.0);
         assert_eq!(new.measure_line, old.1);
+    }
+
+    #[test]
+    fn hierarchy_attachment_uses_merge_provenance_and_pu_boundaries() {
+        let measures = vec![measure(2, "0-3 4-7", 0.1, 3.0)];
+        let mut lattice = CandidateLattice::from_first_pass(&measures, &[0], 8).unwrap();
+        let provenance = vec![MeasureProvenance {
+            incoming_merge_qualities: vec![0.1, 0.4],
+            outgoing_merge_qualities: vec![0.2, 0.8],
+            hierarchy_path_count: 4,
+            ..MeasureProvenance::default()
+        }];
+        let iterations = vec![
+            IterationResult {
+                max_cr: 0.0,
+                min_density: 0.0,
+                ci: 0.0,
+                r: 0.0,
+                num_pus: 2,
+                pu_boundaries: vec![[0, 3], [4, 7]],
+            },
+            IterationResult {
+                max_cr: 0.0,
+                min_density: 0.0,
+                ci: 0.0,
+                r: 0.0,
+                num_pus: 3,
+                pu_boundaries: vec![[0, 1], [2, 3], [4, 7]],
+            },
+        ];
+
+        lattice.attach_hierarchy(&provenance, &iterations).unwrap();
+
+        let evidence = lattice.candidates[0].hierarchy.as_ref().unwrap();
+        assert_eq!(evidence.first_appearance_level, 0);
+        assert_eq!(evidence.persistence_levels, 2);
+        assert!((evidence.parent_merge_margin - 0.3).abs() < 1e-12);
+        assert!((evidence.child_merge_margin - 0.6).abs() < 1e-12);
+        assert_eq!(evidence.hierarchy_path_count, 4);
     }
 }

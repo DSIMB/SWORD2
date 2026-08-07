@@ -163,11 +163,18 @@ pub fn run_pipeline(
 
     // Step 1: Run DSSP (pure Rust)
     let dssp_file = intermediate_dir.join(format!("{}.dssp", pdb_name));
-    if !dssp_file.exists() {
+    let dssp_result = if !dssp_file.exists() {
         tracing::debug!("Running DSSP on {}", pdb_file_dst.display());
         let s2d_file = intermediate_dir.join(format!("{}.s2d", pdb_name));
-        crate::dssp::run_dssp(&pdb_file_dst, &dssp_file, &s2d_file, pdb_name)?;
-    }
+        Some(crate::dssp::run_dssp(
+            &pdb_file_dst,
+            &dssp_file,
+            &s2d_file,
+            pdb_name,
+        )?)
+    } else {
+        None
+    };
 
     // Extract CA coordinates from the clean PDB. Needed for Peeling (when it
     // runs) and, regardless of whether Peeling was cached, for the
@@ -277,18 +284,27 @@ pub fn run_pipeline(
 
     // Run ComputeMeasure (in-memory if peeling output available, file-based if cached)
     tracing::debug!("Computing criteria for PUs merging");
-    let measure_lines = if let Some(ref po) = peeling_output {
-        compute_measure::compute_measure_from_data(&po.final_pu_contacts, &po.final_pu_delineation)
-    } else {
+    let measure_corpus = peeling_output.as_ref().map(|po| {
+        compute_measure::compute_measure_from_data_with_provenance(
+            &po.final_pu_contacts,
+            &po.final_pu_delineation,
+        )
+    });
+    let cached_measure_lines = measure_corpus.is_none().then(|| {
         let contact_matrix_file = intermediate_dir.join("pu_contact.mtx");
         compute_measure::compute_measure(&contact_matrix_file, &pu_delineation_file, 0.0001)
-    };
+    });
+    let measure_lines = measure_corpus
+        .as_ref()
+        .map(|corpus| corpus.lines.as_slice())
+        .or_else(|| cached_measure_lines.as_deref())
+        .expect("a fresh or cached measure corpus is always available");
 
     // DEBUG: count measure lines per domain count
     {
         let mut counts: std::collections::BTreeMap<usize, usize> =
             std::collections::BTreeMap::new();
-        for ml in &measure_lines {
+        for ml in measure_lines {
             *counts.entry(ml.num_domains).or_insert(0) += 1;
         }
         tracing::info!("ComputeMeasure lines per domain count: {:?}", counts);
@@ -318,12 +334,32 @@ pub fn run_pipeline(
         &results_dir.join("intermediate").to_string_lossy(),
         pdb_name,
     );
-    let _candidate_lattice = factorized_ranker::lattice::CandidateLattice::from_first_pass(
+    let mut candidate_lattice = factorized_ranker::lattice::CandidateLattice::from_first_pass(
         &measure_lines,
         &factorized_indices,
         tab_num.len(),
     )
     .map_err(|error| anyhow::anyhow!(error))?;
+    let _factorized_context = match (
+        dssp_result.as_ref(),
+        peeling_output.as_ref(),
+        measure_corpus.as_ref(),
+    ) {
+        (Some(dssp), Some(peeling), Some(corpus)) => Some(
+            factorized_ranker::prepare_factorized_context(
+                Some(&ca_coords),
+                Some(&dssp.chain),
+                &peeling.iterations,
+                Some((&peeling.contact_matrix, &corpus.provenance)),
+            )
+            .and_then(|context| {
+                candidate_lattice
+                    .attach_hierarchy(context.measure_provenance, context.iterations)?;
+                Ok(context)
+            }),
+        ),
+        _ => None,
+    };
 
     let first_pass_measures: Vec<compute_measure::MeasureLine> = legacy_first_pass_indices
         .iter()
