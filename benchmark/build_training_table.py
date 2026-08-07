@@ -31,21 +31,30 @@ import statistics
 import sys
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
-from benchmark.datasets import load_dataset, read_merizo_csv, strip_cath_labels
+from benchmark.candidate_geometry import CANDIDATE_GEOMETRY_FIELDS
+from benchmark.datasets import CathEntry, load_dataset, read_merizo_csv
+from benchmark.factorized_ranker.integrity import (
+    IntegrityError,
+    RejectionCode,
+    RejectionRecord,
+    map_cath_reference,
+    validate_partition,
+)
 from benchmark.metrics import score_choppings
-from benchmark.numbering import map_author_chopping, numbering_from_pdb
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger(__name__)
+REPO = Path(__file__).resolve().parents[1]
 
 # Set by _init_worker in each subprocess
-_worker_ref: dict[str, tuple[str, str, int]] | None = None
+_worker_ref: dict[str, CathEntry] | None = None
+_worker_chain_cache_dir: Path | None = None
 
-FIELDNAMES = [
-    "chain_id",
+BASE_CANDIDATE_FIELDS = [
     "num_domains",
     "min_size",
     "max_cr",
@@ -55,6 +64,12 @@ FIELDNAMES = [
     "boundary_coil_fraction",
     "energy_z",
     "modal_count_distance",
+]
+
+FIELDNAMES = [
+    "chain_id",
+    *BASE_CANDIDATE_FIELDS,
+    *CANDIDATE_GEOMETRY_FIELDS,
     "n_true_domains",
     "n_pred_domains",
     "ndo",
@@ -65,6 +80,26 @@ FIELDNAMES = [
     "S",
     "is_oracle_s",
 ]
+
+REJECTION_FIELDNAMES = ["chain_id", "scope", "code", "detail", "delineation"]
+
+REQUIRED_NUMERIC_CANDIDATE_FIELDS = [
+    "num_domains",
+    "min_size",
+    "max_cr",
+    "density_min",
+    "mean_density",
+    "boundary_coil_fraction",
+    "modal_count_distance",
+    *CANDIDATE_GEOMETRY_FIELDS,
+]
+REQUIRED_CANDIDATE_COLUMNS = {"delineation", *REQUIRED_NUMERIC_CANDIDATE_FIELDS}
+
+
+@dataclass(frozen=True)
+class ScoredChain:
+    rows: list[dict[str, Any]]
+    rejections: list[RejectionRecord]
 
 
 def delineation_to_chopping(delineation: str) -> str:
@@ -80,39 +115,53 @@ def delineation_to_chopping(delineation: str) -> str:
     )
 
 
-def _load_reference(reference_arg: str) -> dict[str, tuple[str, str, int]]:
+def _load_reference(reference_arg: str) -> dict[str, CathEntry]:
     """Load reference choppings, indexed by both CATH entry_id and dump chain_id formats."""
     if Path(reference_arg).exists():
         entries = read_merizo_csv(Path(reference_arg), dataset="custom")
     else:
         entries = load_dataset(reference_arg)
-    ref: dict[str, tuple[str, str, int]] = {}
+    ref: dict[str, CathEntry] = {}
+
+    def add_alias(alias: str, entry: CathEntry) -> None:
+        previous = ref.get(alias)
+        if previous is not None and previous != entry:
+            raise ValueError(
+                f"reference alias collision for {alias!r}: "
+                f"{previous.entry_id!r} and {entry.entry_id!r}"
+            )
+        ref[alias] = entry
+
     for e in entries:
-        val = (e.chain_id, e.chopping, e.n_residues)
-        ref[e.entry_id] = val                           # "12e8H"
-        ref[f"{e.pdb_id.upper()}_{e.chain_id}"] = val  # "12E8_H"
+        add_alias(e.entry_id, e)                           # "12e8H"
+        add_alias(f"{e.pdb_id.upper()}_{e.chain_id}", e)  # "12E8_H"
     return ref
 
 
-def _true_chopping_for_chain(
-    raw_chopping: str,
+def _find_pdb(
+    output_dir: Path | None,
     chain_id: str,
-    pdb_path: Path | None,
-) -> tuple[str, int]:
-    """Convert CATH author chopping to 0-based sequential chopping. Returns (chopping, n_res)."""
-    stripped = strip_cath_labels(raw_chopping)
-    if pdb_path is not None and pdb_path.exists():
-        try:
-            numbering = numbering_from_pdb(pdb_path, chain_id=chain_id)
-            true_chop = map_author_chopping(stripped, numbering, chain_id=chain_id)
-            return true_chop, numbering.n_residues
-        except Exception as exc:
-            log.debug("PDB numbering failed for %s: %s", pdb_path, exc)
-    return stripped, 0
+    chain_cache_dir: Path | None = None,
+    canonical_entry_id: str | None = None,
+) -> Path | None:
+    """Find the canonical structure used to map CATH author numbers.
 
-
-def _find_pdb(output_dir: Path, chain_id: str) -> Path | None:
-    for name in [chain_id, chain_id.lower()]:
+    The benchmark cache is preferred because it persists after temporary SWORD
+    output directories are removed and is also what the benchmark scorer uses.
+    """
+    names = list(dict.fromkeys([canonical_entry_id, chain_id, chain_id.lower()]))
+    if chain_cache_dir is not None:
+        for name in names:
+            if name is None:
+                continue
+            cached = chain_cache_dir / f"{name}.pdb"
+            if cached.exists():
+                return cached
+    if output_dir is None:
+        return None
+    for name in names:
+        if name is None:
+            continue
         p = output_dir / "intermediate" / f"{name}.pdb"
         if p.exists():
             return p
@@ -122,109 +171,380 @@ def _find_pdb(output_dir: Path, chain_id: str) -> Path | None:
 def _score_candidates(
     chain_id: str,
     candidates: list[dict[str, str]],
-    reference: dict[str, tuple[str, str, int]],
-) -> list[dict[str, Any]]:
-    """Score all candidates for one chain. Returns list of output row dicts."""
+    reference: dict[str, CathEntry],
+    chain_cache_dir: Path | None = None,
+) -> ScoredChain:
+    """Score valid candidates for one chain and explain every exclusion."""
     if chain_id not in reference:
-        return []
+        return ScoredChain(
+            rows=[],
+            rejections=[
+                RejectionRecord(
+                    chain_id=chain_id,
+                    scope="chain",
+                    code=RejectionCode.MISSING_REFERENCE,
+                    detail="chain is absent from the reference dataset",
+                )
+            ],
+        )
 
-    ref_chain_id, raw_chopping, ref_n_res = reference[chain_id]
+    entry = reference[chain_id]
+    canonical_chain_id = entry.entry_id
 
-    output_dir = Path(candidates[0].get("output_dir", "")) if candidates else Path()
-    pdb_path = _find_pdb(output_dir, chain_id)
-    true_chop, n_res = _true_chopping_for_chain(raw_chopping, ref_chain_id, pdb_path)
-    if n_res == 0:
-        n_res = ref_n_res
+    if not candidates:
+        return ScoredChain(
+            rows=[],
+            rejections=[
+                RejectionRecord(
+                    chain_id=canonical_chain_id,
+                    scope="chain",
+                    code=RejectionCode.SCHEMA_MISMATCH,
+                    detail="candidate dump contains no rows",
+                )
+            ],
+        )
 
-    scored: list[tuple[dict[str, str], float, Any]] = []
+    raw_output_dir = candidates[0].get("output_dir", "").strip()
+    output_dir = Path(raw_output_dir) if raw_output_dir else None
+    pdb_path = _find_pdb(
+        output_dir,
+        chain_id,
+        chain_cache_dir,
+        canonical_entry_id=entry.entry_id,
+    )
+    if pdb_path is None:
+        return ScoredChain(
+            rows=[],
+            rejections=[
+                RejectionRecord(
+                    chain_id=canonical_chain_id,
+                    scope="chain",
+                    code=RejectionCode.MISSING_CHAIN_PDB,
+                    detail="canonical chain PDB is unavailable",
+                )
+            ],
+        )
+
+    try:
+        canonical_reference = map_cath_reference(entry, pdb_path)
+    except IntegrityError as exc:
+        return ScoredChain(
+            rows=[],
+            rejections=[
+                RejectionRecord(
+                    chain_id=canonical_chain_id,
+                    scope="chain",
+                    code=exc.code,
+                    detail=exc.detail,
+                )
+            ],
+        )
+    except Exception as exc:
+        return ScoredChain(
+            rows=[],
+            rejections=[
+                RejectionRecord(
+                    chain_id=canonical_chain_id,
+                    scope="chain",
+                    code=RejectionCode.AUTHOR_MAPPING_FAILED,
+                    detail=f"unexpected mapping failure ({type(exc).__name__})",
+                )
+            ],
+        )
+
+    scored: list[tuple[dict[str, str], str, str, float, Any]] = []
+    rejections: list[RejectionRecord] = []
 
     for row in candidates:
         raw_del = row.get("delineation")
-        if not raw_del:
-            continue
-        delineation = raw_del.strip().strip('"')
-        if not delineation:
+        delineation = raw_del.strip().strip('"') if raw_del else ""
+
+        invalid_field: str | None = None
+        for field in REQUIRED_NUMERIC_CANDIDATE_FIELDS:
+            raw_value = row.get(field, "")
+            try:
+                value = float(raw_value)
+            except (TypeError, ValueError):
+                invalid_field = field
+                break
+            if not math.isfinite(value):
+                invalid_field = field
+                break
+        raw_energy = row.get("energy_z", "")
+        normalized_energy = raw_energy or ""
+        if raw_energy not in (None, ""):
+            try:
+                energy = float(raw_energy)
+            except (TypeError, ValueError):
+                normalized_energy = ""
+            else:
+                if not math.isfinite(energy):
+                    normalized_energy = ""
+        if invalid_field is not None:
+            rejections.append(
+                RejectionRecord(
+                    chain_id=canonical_chain_id,
+                    scope="candidate",
+                    code=RejectionCode.NONFINITE_FEATURE,
+                    detail=f"feature {invalid_field!r} is missing or non-finite",
+                    delineation=delineation or None,
+                )
+            )
             continue
 
-        pred_chop = delineation_to_chopping(delineation)
+        declared_value = float(row["num_domains"])
+        if not declared_value.is_integer() or declared_value <= 0:
+            rejections.append(
+                RejectionRecord(
+                    chain_id=canonical_chain_id,
+                    scope="candidate",
+                    code=RejectionCode.CANDIDATE_DOMAIN_COUNT_MISMATCH,
+                    detail="declared domain count is not a positive integer",
+                    delineation=delineation or None,
+                )
+            )
+            continue
+        declared_domains = int(declared_value)
+
+        try:
+            partition = validate_partition(
+                delineation,
+                n_residues=canonical_reference.n_residues,
+                declared_domains=declared_domains,
+            )
+        except IntegrityError as exc:
+            rejections.append(
+                RejectionRecord(
+                    chain_id=canonical_chain_id,
+                    scope="candidate",
+                    code=exc.code,
+                    detail=exc.detail,
+                    delineation=delineation or None,
+                )
+            )
+            continue
+
+        pred_chop = delineation_to_chopping(partition.canonical_delineation)
         try:
             with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
-                metrics = score_choppings(true_chop, pred_chop, n_res=n_res if n_res > 0 else None)
-        except Exception:
+                metrics = score_choppings(
+                    canonical_reference.chopping,
+                    pred_chop,
+                    n_res=canonical_reference.n_residues,
+                )
+        except Exception as exc:
+            rejections.append(
+                RejectionRecord(
+                    chain_id=canonical_chain_id,
+                    scope="candidate",
+                    code=RejectionCode.SCORING_FAILED,
+                    detail=f"partition scoring failed ({type(exc).__name__})",
+                    delineation=partition.canonical_delineation,
+                )
+            )
             continue
 
         count_term = 1.0 / (1.0 + abs(metrics.n_pred_domains - metrics.n_true_domains))
-        vals = [metrics.ndo, metrics.iou, metrics.boundary_f1_10, metrics.matched_dice, count_term]
-        finite = [v for v in vals if not math.isnan(v)]
-        s_val = statistics.mean(finite) if finite else 0.0
-        scored.append((row, s_val, metrics))
+        vals = [
+            metrics.ndo,
+            metrics.iou,
+            metrics.boundary_f1_10,
+            metrics.matched_dice,
+            metrics.d_count_acc,
+            count_term,
+        ]
+        if not all(math.isfinite(value) for value in vals):
+            rejections.append(
+                RejectionRecord(
+                    chain_id=canonical_chain_id,
+                    scope="candidate",
+                    code=RejectionCode.SCORING_FAILED,
+                    detail="partition scoring produced a non-finite metric",
+                    delineation=partition.canonical_delineation,
+                )
+            )
+            continue
+        s_val = statistics.mean(vals[:4] + [count_term])
+        scored.append(
+            (
+                row,
+                partition.canonical_delineation,
+                normalized_energy,
+                s_val,
+                metrics,
+            )
+        )
 
     if not scored:
-        return []
+        return ScoredChain(rows=[], rejections=rejections)
 
-    best_s = max(s for _, s, _ in scored)
+    best_s = max(s for _, _, _, s, _ in scored)
 
     rows: list[dict[str, Any]] = []
-    for row, s_val, metrics in scored:
-        rows.append({
-            "chain_id": chain_id,
-            "num_domains": row["num_domains"],
-            "min_size": row["min_size"],
-            "max_cr": row["max_cr"],
-            "density_min": row["density_min"],
-            "mean_density": row["mean_density"],
-            "delineation": row.get("delineation", "").strip().strip('"'),
-            "boundary_coil_fraction": row.get("boundary_coil_fraction", ""),
-            "energy_z": row.get("energy_z", ""),
-            "modal_count_distance": row.get("modal_count_distance", ""),
-            "n_true_domains": metrics.n_true_domains,
-            "n_pred_domains": metrics.n_pred_domains,
-            "ndo": metrics.ndo,
-            "iou": metrics.iou,
-            "boundary_f1_10": metrics.boundary_f1_10,
-            "matched_dice": metrics.matched_dice,
-            "d_count_acc": metrics.d_count_acc,
-            "S": s_val,
-            "is_oracle_s": 1 if abs(s_val - best_s) < 1e-9 else 0,
-        })
-    return rows
+    for row, canonical_delineation, normalized_energy, s_val, metrics in scored:
+        candidate_fields = {
+            field: row.get(field, "") for field in BASE_CANDIDATE_FIELDS
+        }
+        candidate_fields["delineation"] = canonical_delineation
+        candidate_fields["energy_z"] = normalized_energy
+        rows.append(
+            {
+                "chain_id": canonical_chain_id,
+                **candidate_fields,
+                **{
+                    field: row.get(field, "")
+                    for field in CANDIDATE_GEOMETRY_FIELDS
+                },
+                "n_true_domains": metrics.n_true_domains,
+                "n_pred_domains": metrics.n_pred_domains,
+                "ndo": metrics.ndo,
+                "iou": metrics.iou,
+                "boundary_f1_10": metrics.boundary_f1_10,
+                "matched_dice": metrics.matched_dice,
+                "d_count_acc": metrics.d_count_acc,
+                "S": s_val,
+                "is_oracle_s": 1 if abs(s_val - best_s) < 1e-9 else 0,
+            }
+        )
+    return ScoredChain(rows=rows, rejections=rejections)
 
 
 # ---------------------------------------------------------------------------
 # Multiprocessing worker (per-chain file)
 # ---------------------------------------------------------------------------
 
-def _init_worker(ref: dict[str, tuple[str, str, int]]) -> None:
-    global _worker_ref
+def _init_worker(ref: dict[str, CathEntry], chain_cache_dir: Path | None) -> None:
+    global _worker_ref, _worker_chain_cache_dir
     _worker_ref = ref
+    _worker_chain_cache_dir = chain_cache_dir
 
 
-def _score_chain_file(part_file: Path) -> list[dict[str, Any]] | None:
+def _score_chain_file(part_file: Path) -> ScoredChain:
     """Worker entry point: process one per-chain dump CSV file."""
     global _worker_ref
     chain_id = part_file.stem  # entry_id = filename without .csv
 
     try:
         with part_file.open(newline="") as f:
-            candidates = list(csv.DictReader(f))
-    except Exception:
-        return None
+            reader = csv.DictReader(f)
+            fieldnames = set(reader.fieldnames or [])
+            missing = sorted(REQUIRED_CANDIDATE_COLUMNS - fieldnames)
+            candidates = list(reader) if not missing else []
+    except Exception as exc:
+        return ScoredChain(
+            rows=[],
+            rejections=[
+                RejectionRecord(
+                    chain_id=chain_id,
+                    scope="chain",
+                    code=RejectionCode.SCHEMA_MISMATCH,
+                    detail=f"could not read candidate CSV ({type(exc).__name__})",
+                )
+            ],
+        )
+
+    if missing:
+        return ScoredChain(
+            rows=[],
+            rejections=[
+                RejectionRecord(
+                    chain_id=chain_id,
+                    scope="chain",
+                    code=RejectionCode.SCHEMA_MISMATCH,
+                    detail=f"candidate CSV is missing columns: {', '.join(missing)}",
+                )
+            ],
+        )
 
     if not candidates:
-        return None
+        return ScoredChain(
+            rows=[],
+            rejections=[
+                RejectionRecord(
+                    chain_id=chain_id,
+                    scope="chain",
+                    code=RejectionCode.SCHEMA_MISMATCH,
+                    detail="candidate dump contains no rows",
+                )
+            ],
+        )
 
-    return _score_candidates(chain_id, candidates, _worker_ref)  # type: ignore[arg-type]
+    observed_ids = {
+        value.strip()
+        for row in candidates
+        for field in ("chain_id", "entry_id")
+        if (value := row.get(field, "")) and value.strip()
+    }
+    if observed_ids and observed_ids != {chain_id}:
+        return ScoredChain(
+            rows=[],
+            rejections=[
+                RejectionRecord(
+                    chain_id=chain_id,
+                    scope="chain",
+                    code=RejectionCode.SCHEMA_MISMATCH,
+                    detail="candidate row identity disagrees with part filename",
+                )
+            ],
+        )
+
+    if _worker_ref is None:
+        raise RuntimeError("training-table worker was not initialized")
+    return _score_candidates(
+        chain_id,
+        candidates,
+        _worker_ref,
+        chain_cache_dir=_worker_chain_cache_dir,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Main processing functions
 # ---------------------------------------------------------------------------
 
+def write_rejections(path: Path, records: Sequence[RejectionRecord]) -> None:
+    """Write a stable rejection manifest shared by both input modes."""
+    ordered = sorted(
+        records,
+        key=lambda record: (
+            record.chain_id,
+            record.scope,
+            record.code.value,
+            record.delineation or "",
+            record.detail,
+        ),
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=REJECTION_FIELDNAMES,
+            lineterminator="\n",
+        )
+        writer.writeheader()
+        for record in ordered:
+            writer.writerow(
+                {
+                    "chain_id": record.chain_id,
+                    "scope": record.scope,
+                    "code": record.code.value,
+                    "detail": record.detail,
+                    "delineation": record.delineation or "",
+                }
+            )
+
+
+def _default_rejections_path(output_path: Path) -> Path:
+    return output_path.with_suffix(".rejections.csv")
+
+
 def build_from_dump_dir(
     dump_dir: Path,
-    reference: dict[str, tuple[str, str, int]],
+    reference: dict[str, CathEntry],
     output_path: Path,
     workers: int = 8,
+    chain_cache_dir: Path | None = None,
+    rejections_path: Path | None = None,
 ) -> None:
     """Stream per-chain dump files from a directory — fast, low-memory."""
     part_files = sorted(dump_dir.glob("*.csv"))
@@ -232,6 +552,7 @@ def build_from_dump_dir(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     n_chains = n_rows = n_skipped = 0
+    rejections: list[RejectionRecord] = []
 
     with output_path.open("w", newline="") as dst:
         writer = csv.DictWriter(dst, fieldnames=FIELDNAMES)
@@ -240,15 +561,16 @@ def build_from_dump_dir(
         with ProcessPoolExecutor(
             max_workers=workers,
             initializer=_init_worker,
-            initargs=(reference,),
+            initargs=(reference, chain_cache_dir),
         ) as pool:
-            for chain_rows in pool.map(_score_chain_file, part_files, chunksize=20):
-                if not chain_rows:
+            for result in pool.map(_score_chain_file, part_files, chunksize=20):
+                rejections.extend(result.rejections)
+                if not result.rows:
                     n_skipped += 1
                 else:
                     n_chains += 1
-                    n_rows += len(chain_rows)
-                    for row in chain_rows:
+                    n_rows += len(result.rows)
+                    for row in result.rows:
                         writer.writerow(row)
 
                 done = n_chains + n_skipped
@@ -258,27 +580,68 @@ def build_from_dump_dir(
                         done, len(part_files), n_chains, n_skipped, n_rows,
                     )
 
-    log.info("Done: %d chains scored, %d skipped, %d rows written", n_chains, n_skipped, n_rows)
+    rejection_output = rejections_path or _default_rejections_path(output_path)
+    write_rejections(rejection_output, rejections)
+    log.info(
+        "Done: %d chains scored, %d skipped, %d rows written, %d rejections",
+        n_chains,
+        n_skipped,
+        n_rows,
+        len(rejections),
+    )
 
 
 def build_from_dump_csv(
     dump_path: Path,
-    reference: dict[str, tuple[str, str, int]],
+    reference: dict[str, CathEntry],
     output_path: Path,
+    chain_cache_dir: Path | None = None,
+    rejections_path: Path | None = None,
 ) -> None:
     """Process a merged dump CSV — streaming groupby (lower RAM than list+sort)."""
-    from itertools import groupby
-
     log.info("Reading dump CSV: %s", dump_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     n_chains = n_rows = n_skipped = 0
+    rejections: list[RejectionRecord] = []
 
     # Collect rows grouped by chain_id using a dict (single linear pass, no sort)
     chain_buckets: dict[str, list[dict[str, str]]] = {}
     with dump_path.open(newline="") as src:
-        for row in csv.DictReader(src):
-            cid = row.get("chain_id", "")
-            if cid:
+        reader = csv.DictReader(src)
+        fieldnames = set(reader.fieldnames or [])
+        identity_fields = fieldnames.intersection({"chain_id", "entry_id"})
+        missing = sorted(REQUIRED_CANDIDATE_COLUMNS - fieldnames)
+        if not identity_fields:
+            rejections.append(
+                RejectionRecord(
+                    chain_id="",
+                    scope="chain",
+                    code=RejectionCode.SCHEMA_MISMATCH,
+                    detail="dump CSV has no chain_id or entry_id column",
+                )
+            )
+        elif missing:
+            rejections.append(
+                RejectionRecord(
+                    chain_id="",
+                    scope="chain",
+                    code=RejectionCode.SCHEMA_MISMATCH,
+                    detail=f"dump CSV is missing columns: {', '.join(missing)}",
+                )
+            )
+        else:
+            for row_number, row in enumerate(reader, start=2):
+                cid = (row.get("chain_id") or row.get("entry_id") or "").strip()
+                if not cid:
+                    rejections.append(
+                        RejectionRecord(
+                            chain_id="",
+                            scope="chain",
+                            code=RejectionCode.SCHEMA_MISMATCH,
+                            detail=f"dump row {row_number} has no chain identity",
+                        )
+                    )
+                    continue
                 chain_buckets.setdefault(cid, []).append(row)
 
     log.info("Loaded %d chains from dump", len(chain_buckets))
@@ -287,12 +650,19 @@ def build_from_dump_csv(
         writer = csv.DictWriter(dst, fieldnames=FIELDNAMES)
         writer.writeheader()
 
-        for chain_id, candidates in chain_buckets.items():
-            chain_rows = _score_candidates(chain_id, candidates, reference)
-            if chain_rows:
+        for chain_id in sorted(chain_buckets):
+            candidates = chain_buckets[chain_id]
+            result = _score_candidates(
+                chain_id,
+                candidates,
+                reference,
+                chain_cache_dir=chain_cache_dir,
+            )
+            rejections.extend(result.rejections)
+            if result.rows:
                 n_chains += 1
-                n_rows += len(chain_rows)
-                for row in chain_rows:
+                n_rows += len(result.rows)
+                for row in result.rows:
                     writer.writerow(row)
             else:
                 n_skipped += 1
@@ -304,7 +674,15 @@ def build_from_dump_csv(
                     done, len(chain_buckets), n_chains, n_skipped, n_rows,
                 )
 
-    log.info("Done: %d chains scored, %d skipped, %d rows written", n_chains, n_skipped, n_rows)
+    rejection_output = rejections_path or _default_rejections_path(output_path)
+    write_rejections(rejection_output, rejections)
+    log.info(
+        "Done: %d chains scored, %d skipped, %d rows written, %d rejections",
+        n_chains,
+        n_skipped,
+        n_rows,
+        len(rejections),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +697,18 @@ def main() -> int:
     parser.add_argument("--reference", default="cath17287",
                         help="Named dataset or path to Merizo CSV (default: cath17287)")
     parser.add_argument("--output", type=Path, default=Path("benchmark/data/training_table.csv"))
+    parser.add_argument(
+        "--rejections",
+        type=Path,
+        default=None,
+        help="Rejected chains/candidates CSV (default: <output stem>.rejections.csv)",
+    )
+    parser.add_argument(
+        "--chain-cache-dir",
+        type=Path,
+        default=REPO / "benchmark/cache/chains",
+        help="Canonical single-chain PDB cache used to map CATH author residue numbers",
+    )
     parser.add_argument("--workers", type=int, default=8,
                         help="Parallel workers when using --dump-dir (default: 8)")
     parser.add_argument("--verbose", action="store_true")
@@ -332,9 +722,22 @@ def main() -> int:
     log.info("Reference: %d entries (dual-keyed)", len(reference))
 
     if args.dump_dir:
-        build_from_dump_dir(args.dump_dir, reference, args.output, workers=args.workers)
+        build_from_dump_dir(
+            args.dump_dir,
+            reference,
+            args.output,
+            workers=args.workers,
+            chain_cache_dir=args.chain_cache_dir,
+            rejections_path=args.rejections,
+        )
     else:
-        build_from_dump_csv(args.dump, reference, args.output)
+        build_from_dump_csv(
+            args.dump,
+            reference,
+            args.output,
+            chain_cache_dir=args.chain_cache_dir,
+            rejections_path=args.rejections,
+        )
 
     return 0
 
