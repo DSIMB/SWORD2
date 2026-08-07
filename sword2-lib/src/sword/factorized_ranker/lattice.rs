@@ -124,8 +124,16 @@ impl CandidateLattice {
             candidate.hierarchy = Some(HierarchyEvidence {
                 first_appearance_level,
                 persistence_levels,
-                parent_merge_margin: merge_margin(&provenance.incoming_merge_qualities),
-                child_merge_margin: merge_margin(&provenance.outgoing_merge_qualities),
+                parent_merge_margin: merge_margin(
+                    &provenance.incoming_merge_qualities,
+                    "incoming merge quality",
+                    "incoming merge margin",
+                )?,
+                child_merge_margin: merge_margin(
+                    &provenance.outgoing_merge_qualities,
+                    "outgoing merge quality",
+                    "outgoing merge margin",
+                )?,
                 hierarchy_path_count: provenance.hierarchy_path_count,
             });
         }
@@ -148,17 +156,24 @@ fn partition_boundaries(partition: &ParsedPartition) -> Vec<usize> {
         .collect()
 }
 
-fn merge_margin(qualities: &[f64]) -> f64 {
-    let mut finite: Vec<f64> = qualities
-        .iter()
-        .copied()
-        .filter(|quality| quality.is_finite())
-        .collect();
-    finite.sort_by(|left, right| right.total_cmp(left));
-    match finite.as_slice() {
+fn merge_margin(
+    qualities: &[f64],
+    quality_name: &'static str,
+    margin_name: &'static str,
+) -> Result<f64, FeatureError> {
+    if qualities.iter().any(|quality| !quality.is_finite()) {
+        return Err(FeatureError::NonFinite(quality_name));
+    }
+    let mut qualities = qualities.to_vec();
+    qualities.sort_by(|left, right| right.total_cmp(left));
+    let margin = match qualities.as_slice() {
         [largest, second_largest, ..] => largest - second_largest,
         _ => 0.0,
+    };
+    if !margin.is_finite() {
+        return Err(FeatureError::NonFinite(margin_name));
     }
+    Ok(margin)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -397,5 +412,99 @@ mod tests {
         assert!((evidence.parent_merge_margin - 0.3).abs() < 1e-12);
         assert!((evidence.child_merge_margin - 0.6).abs() < 1e-12);
         assert_eq!(evidence.hierarchy_path_count, 4);
+    }
+
+    #[test]
+    fn hierarchy_attachment_rejects_boundaries_absent_from_peeling() {
+        let measures = vec![measure(2, "0-3 4-7", 0.1, 3.0)];
+        let mut lattice = CandidateLattice::from_first_pass(&measures, &[0], 8).unwrap();
+        let iterations = vec![IterationResult {
+            max_cr: 0.0,
+            min_density: 0.0,
+            ci: 0.0,
+            r: 0.0,
+            num_pus: 2,
+            pu_boundaries: vec![[0, 2], [3, 7]],
+        }];
+
+        assert!(matches!(
+            lattice.attach_hierarchy(&[MeasureProvenance::default()], &iterations),
+            Err(FeatureError::MissingContext(
+                "candidate boundary absent from Peeling hierarchy"
+            ))
+        ));
+    }
+
+    #[test]
+    fn hierarchy_attachment_uses_all_discontinuous_segment_boundaries() {
+        let measures = vec![measure(2, "0-1;4-5 2-3;6-7", 0.1, 3.0)];
+        let mut lattice = CandidateLattice::from_first_pass(&measures, &[0], 8).unwrap();
+        let iterations = vec![IterationResult {
+            max_cr: 0.0,
+            min_density: 0.0,
+            ci: 0.0,
+            r: 0.0,
+            num_pus: 4,
+            pu_boundaries: vec![[0, 1], [2, 3], [4, 5], [6, 7]],
+        }];
+
+        lattice
+            .attach_hierarchy(&[MeasureProvenance::default()], &iterations)
+            .unwrap();
+
+        assert_eq!(
+            lattice.candidates[0]
+                .hierarchy
+                .as_ref()
+                .unwrap()
+                .first_appearance_level,
+            0
+        );
+    }
+
+    #[test]
+    fn hierarchy_attachment_rejects_non_finite_merge_qualities() {
+        let measures = vec![measure(2, "0-3 4-7", 0.1, 3.0)];
+        let mut lattice = CandidateLattice::from_first_pass(&measures, &[0], 8).unwrap();
+        let provenance = vec![MeasureProvenance {
+            incoming_merge_qualities: vec![f64::NAN],
+            ..MeasureProvenance::default()
+        }];
+        let iterations = vec![IterationResult {
+            max_cr: 0.0,
+            min_density: 0.0,
+            ci: 0.0,
+            r: 0.0,
+            num_pus: 2,
+            pu_boundaries: vec![[0, 3], [4, 7]],
+        }];
+
+        assert!(matches!(
+            lattice.attach_hierarchy(&provenance, &iterations),
+            Err(FeatureError::NonFinite("incoming merge quality"))
+        ));
+    }
+
+    #[test]
+    fn hierarchy_attachment_rejects_non_finite_merge_margins() {
+        let measures = vec![measure(2, "0-3 4-7", 0.1, 3.0)];
+        let mut lattice = CandidateLattice::from_first_pass(&measures, &[0], 8).unwrap();
+        let provenance = vec![MeasureProvenance {
+            incoming_merge_qualities: vec![f64::MAX, -f64::MAX],
+            ..MeasureProvenance::default()
+        }];
+        let iterations = vec![IterationResult {
+            max_cr: 0.0,
+            min_density: 0.0,
+            ci: 0.0,
+            r: 0.0,
+            num_pus: 2,
+            pu_boundaries: vec![[0, 3], [4, 7]],
+        }];
+
+        assert!(matches!(
+            lattice.attach_hierarchy(&provenance, &iterations),
+            Err(FeatureError::NonFinite("incoming merge margin"))
+        ));
     }
 }

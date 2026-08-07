@@ -163,7 +163,7 @@ pub fn run_pipeline(
 
     // Step 1: Run DSSP (pure Rust)
     let dssp_file = intermediate_dir.join(format!("{}.dssp", pdb_name));
-    let dssp_result = if !dssp_file.exists() {
+    let _dssp_result = if !dssp_file.exists() {
         tracing::debug!("Running DSSP on {}", pdb_file_dst.display());
         let s2d_file = intermediate_dir.join(format!("{}.s2d", pdb_name));
         Some(crate::dssp::run_dssp(
@@ -334,32 +334,12 @@ pub fn run_pipeline(
         &results_dir.join("intermediate").to_string_lossy(),
         pdb_name,
     );
-    let mut candidate_lattice = factorized_ranker::lattice::CandidateLattice::from_first_pass(
+    let _candidate_lattice = factorized_ranker::lattice::CandidateLattice::from_first_pass(
         &measure_lines,
         &factorized_indices,
         tab_num.len(),
     )
     .map_err(|error| anyhow::anyhow!(error))?;
-    let _factorized_context = match (
-        dssp_result.as_ref(),
-        peeling_output.as_ref(),
-        measure_corpus.as_ref(),
-    ) {
-        (Some(dssp), Some(peeling), Some(corpus)) => Some(
-            factorized_ranker::prepare_factorized_context(
-                Some(&ca_coords),
-                Some(&dssp.chain),
-                &peeling.iterations,
-                Some((&peeling.contact_matrix, &corpus.provenance)),
-            )
-            .and_then(|context| {
-                candidate_lattice
-                    .attach_hierarchy(context.measure_provenance, context.iterations)?;
-                Ok(context)
-            }),
-        ),
-        _ => None,
-    };
 
     let first_pass_measures: Vec<compute_measure::MeasureLine> = legacy_first_pass_indices
         .iter()
