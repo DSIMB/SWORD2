@@ -11,9 +11,8 @@ use crate::sword::geometry_metrics::{
 use super::lattice::CandidateRecord;
 use super::partition::{Domain, FeatureError, ParsedPartition, Segment};
 use super::schema::{
-    CandidateFeatures, FeatureMask, GlobalFeatures, BASE_AND_DOMAIN_FEATURE_NAMES,
-    BASE_CANDIDATE_FEATURE_NAMES, CANDIDATE_FEATURE_NAMES, DOMAIN_CONDITIONED_FEATURE_NAMES,
-    GLOBAL_FEATURE_NAMES,
+    CandidateFeatures, FeatureMask, GlobalFeatures, BASE_CANDIDATE_FEATURE_NAMES,
+    CANDIDATE_FEATURE_NAMES, DOMAIN_CONDITIONED_FEATURE_NAMES, GLOBAL_FEATURE_NAMES,
 };
 use super::StructuralContext;
 
@@ -258,7 +257,8 @@ pub(crate) fn extract_global_features(
 
     let n = context.ca_coords.len();
     let indices: Vec<usize> = (0..n).collect();
-    let eigenvalues = sym3x3_eigenvalues(gyration_tensor(context.ca_coords, &indices));
+    let eigenvalues =
+        checked_gyration_eigenvalues(context.ca_coords, &indices, "chain_rg_normalized")?;
     let radii = principal_radii(eigenvalues);
     let (contact_mass, nonlocal_mass, nonlocal_count, weighted_separation) =
         contact_cache.chain_totals(context.contacts);
@@ -328,12 +328,32 @@ pub(crate) fn extract_candidate_base_and_domain(
     context: &StructuralContext<'_>,
     modal_count: usize,
 ) -> Result<CandidateFeatures, FeatureError> {
+    extract_candidate_base_and_domain_with_mask(
+        candidate,
+        context,
+        modal_count,
+        FeatureMask {
+            global_count: false,
+            domain_conditioned: true,
+            boundary_local: false,
+            relative_hierarchy: false,
+            discontinuity: false,
+        },
+    )
+}
+
+pub(crate) fn extract_candidate_base_and_domain_with_mask(
+    candidate: &CandidateRecord,
+    context: &StructuralContext<'_>,
+    modal_count: usize,
+    mask: FeatureMask,
+) -> Result<CandidateFeatures, FeatureError> {
     let cache = context
         .contact_feature_cache
         .get_or_init(|| ContactFeatureCache::new(context.contacts));
     context.validate(FeatureMask {
         global_count: false,
-        domain_conditioned: true,
+        domain_conditioned: mask.domain_conditioned,
         boundary_local: false,
         relative_hierarchy: false,
         discontinuity: false,
@@ -344,15 +364,15 @@ pub(crate) fn extract_candidate_base_and_domain(
         .partition
         .domains
         .iter()
-        .map(|domain| domain_shape(context.ca_coords, &domain.residues))
-        .collect();
+        .map(|domain| domain_shape(context.ca_coords, &domain.residues, "domain_q1_mean"))
+        .collect::<Result<_, _>>()?;
     let sizes: Vec<usize> = candidate
         .partition
         .domains
         .iter()
         .map(|domain| domain.residues.len())
         .collect();
-    let mut external_masses = vec![0.0; sizes.len()];
+    let mut external_masses = mask.domain_conditioned.then(|| vec![0.0; sizes.len()]);
     let mut contact_q_values = Vec::new();
     for left in 0..sizes.len() {
         for right in left + 1..sizes.len() {
@@ -361,26 +381,12 @@ pub(crate) fn extract_candidate_base_and_domain(
                 &candidate.partition.domains[left],
                 &candidate.partition.domains[right],
             );
-            external_masses[left] += mass;
-            external_masses[right] += mass;
+            if let Some(external_masses) = &mut external_masses {
+                external_masses[left] += mass;
+                external_masses[right] += mass;
+            }
             contact_q_values.push(contact_q(mass, sizes[left], sizes[right]));
         }
-    }
-
-    let mut domain_measures = Vec::with_capacity(sizes.len());
-    for (index, domain) in candidate.partition.domains.iter().enumerate() {
-        let (internal_mass, nonlocal_mass, nonlocal_count, weighted_separation) =
-            cache.domain_internal(context.contacts, domain);
-        let external_mass = external_masses[index];
-        domain_measures.push(DomainMeasures {
-            size_fraction: sizes[index] as f64 / context.ca_coords.len() as f64,
-            shape: shapes[index],
-            internal_contact_density: ratio(nonlocal_mass, nonlocal_count),
-            contact_order: ratio(weighted_separation, internal_mass)
-                / context.ca_coords.len() as f64,
-            internal_contact_fraction: ratio(internal_mass, internal_mass + external_mass),
-            conductance: ratio(external_mass, 2.0 * internal_mass + external_mass),
-        });
     }
 
     let segment_sizes: Vec<usize> = candidate
@@ -439,12 +445,31 @@ pub(crate) fn extract_candidate_base_and_domain(
         ),
     ];
     debug_assert_eq!(values.len(), BASE_CANDIDATE_FEATURE_NAMES.len());
-    values.extend(domain_conditioned_values(
-        &candidate.partition,
-        &domain_measures,
-    )?);
-    debug_assert_eq!(values.len(), BASE_AND_DOMAIN_FEATURE_NAMES.len());
+    validate_named(BASE_CANDIDATE_FEATURE_NAMES, &values)?;
     values.resize(CANDIDATE_FEATURE_NAMES.len(), 0.0);
+
+    if let Some(external_masses) = external_masses {
+        let mut domain_measures = Vec::with_capacity(sizes.len());
+        for (index, domain) in candidate.partition.domains.iter().enumerate() {
+            let (internal_mass, nonlocal_mass, nonlocal_count, weighted_separation) =
+                cache.domain_internal(context.contacts, domain);
+            let external_mass = external_masses[index];
+            domain_measures.push(DomainMeasures {
+                size_fraction: sizes[index] as f64 / context.ca_coords.len() as f64,
+                shape: shapes[index],
+                internal_contact_density: ratio(nonlocal_mass, nonlocal_count),
+                contact_order: ratio(weighted_separation, internal_mass)
+                    / context.ca_coords.len() as f64,
+                internal_contact_fraction: ratio(internal_mass, internal_mass + external_mass),
+                conductance: ratio(external_mass, 2.0 * internal_mass + external_mass),
+            });
+        }
+        let domain_values = domain_conditioned_values(&candidate.partition, &domain_measures)?;
+        let domain_start = BASE_CANDIDATE_FEATURE_NAMES.len();
+        let domain_end = domain_start + DOMAIN_CONDITIONED_FEATURE_NAMES.len();
+        values[domain_start..domain_end].copy_from_slice(&domain_values);
+    }
+
     validate_named(CANDIDATE_FEATURE_NAMES, &values)?;
 
     Ok(CandidateFeatures {
@@ -543,17 +568,50 @@ fn domain_conditioned_values(
     Ok(values)
 }
 
-fn domain_shape(coords: &[[f64; 3]], indices: &[usize]) -> ShapeMeasures {
+fn checked_gyration_eigenvalues(
+    coords: &[[f64; 3]],
+    indices: &[usize],
+    feature_name: &'static str,
+) -> Result<[f64; 3], FeatureError> {
+    let tensor = gyration_tensor(coords, indices);
+    if tensor.iter().flatten().any(|value| !value.is_finite()) {
+        return Err(FeatureError::NonFinite(feature_name));
+    }
+
+    // Cardano's closed form squares tensor elements before normalizing them.
+    // Reject magnitudes that can overflow those intermediates even though the
+    // input coordinates and tensor elements themselves are finite.
+    let max_component = tensor
+        .iter()
+        .flatten()
+        .map(|value| value.abs())
+        .fold(0.0, f64::max);
+    if max_component > f64::MAX.sqrt() / 8.0 {
+        return Err(FeatureError::NonFinite(feature_name));
+    }
+
+    let eigenvalues = sym3x3_eigenvalues(tensor);
+    if eigenvalues.iter().any(|value| !value.is_finite()) {
+        return Err(FeatureError::NonFinite(feature_name));
+    }
+    Ok(eigenvalues)
+}
+
+fn domain_shape(
+    coords: &[[f64; 3]],
+    indices: &[usize],
+    feature_name: &'static str,
+) -> Result<ShapeMeasures, FeatureError> {
     if indices.len() < 4 {
-        return ShapeMeasures {
+        return Ok(ShapeMeasures {
             q1: 0.0,
             q2: 0.0,
             q3: 0.0,
             volume_ratio: 0.0,
             relative_density: 0.0,
-        };
+        });
     }
-    let radii = principal_radii(sym3x3_eigenvalues(gyration_tensor(coords, indices)));
+    let radii = principal_radii(checked_gyration_eigenvalues(coords, indices, feature_name)?);
     let c_ideal = (3.0 * V0 / (4.0 * PI)).cbrt();
     let ideal_radius = c_ideal / 5.0f64.sqrt() * (indices.len() as f64).cbrt();
     let q1 = radii[0] / ideal_radius.max(1e-12);
@@ -564,13 +622,13 @@ fn domain_shape(coords: &[[f64; 3]], indices: &[usize]) -> ShapeMeasures {
         * radii[0].max(1e-3)
         * radii[1].max(1e-3)
         * radii[2].max(1e-3);
-    ShapeMeasures {
+    Ok(ShapeMeasures {
         q1,
         q2,
         q3,
         volume_ratio: q1 * q2 * q3,
         relative_density: (indices.len() as f64 / ellipsoid_volume) / RHO_IDEAL,
-    }
+    })
 }
 
 fn contact_q(probability: f64, size_a: usize, size_b: usize) -> f64 {
@@ -684,7 +742,11 @@ fn validate_named(names: &[&'static str], values: &[f64]) -> Result<(), FeatureE
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::{extract_candidate_base_and_domain, extract_global_features};
+    use super::{
+        domain_conditioned_values, extract_candidate_base_and_domain,
+        extract_candidate_base_and_domain_with_mask, extract_global_features, DomainMeasures,
+        ShapeMeasures,
+    };
     use crate::dssp::types::BackboneResidue;
     use crate::dssp::DsspChain;
     use crate::peeling::algorithm::IterationResult;
@@ -794,6 +856,16 @@ mod tests {
             partition: parse_partition("0-3 4-13", 14).unwrap(),
             legacy_distance: 0.0,
             hierarchy: None,
+        }
+    }
+
+    fn base_only_mask() -> FeatureMask {
+        FeatureMask {
+            global_count: false,
+            domain_conditioned: false,
+            boundary_local: false,
+            relative_hierarchy: false,
+            discontinuity: false,
         }
     }
 
@@ -968,6 +1040,86 @@ mod tests {
     }
 
     #[test]
+    fn masked_candidate_extraction_retains_base_and_zeros_domain_slots() {
+        let context = fixture_context();
+        let candidate = fixture_candidate();
+        let full = extract_candidate_base_and_domain(&candidate, &context, 2).unwrap();
+        let masked =
+            extract_candidate_base_and_domain_with_mask(&candidate, &context, 2, base_only_mask())
+                .unwrap();
+
+        assert_eq!(masked.values.len(), CANDIDATE_FEATURE_NAMES.len());
+        assert_eq!(
+            &masked.values[..BASE_CANDIDATE_FEATURE_NAMES.len()],
+            &full.values[..BASE_CANDIDATE_FEATURE_NAMES.len()]
+        );
+        assert!(masked.values
+            [BASE_CANDIDATE_FEATURE_NAMES.len()..BASE_AND_DOMAIN_FEATURE_NAMES.len()]
+            .iter()
+            .all(|value| *value == 0.0));
+        assert!(masked.values[BASE_AND_DOMAIN_FEATURE_NAMES.len()..]
+            .iter()
+            .all(|value| *value == 0.0));
+        assert!(full.values
+            [BASE_CANDIDATE_FEATURE_NAMES.len()..BASE_AND_DOMAIN_FEATURE_NAMES.len()]
+            .iter()
+            .any(|value| *value != 0.0));
+    }
+
+    #[test]
+    fn disabled_domain_family_bypasses_domain_only_validation_and_overflow() {
+        let candidate = fixture_candidate();
+        assert_eq!(
+            domain_conditioned_values(&candidate.partition, &[]),
+            Err(FeatureError::SchemaMismatch)
+        );
+
+        let finite_shape = ShapeMeasures {
+            q1: 1.0,
+            q2: 1.0,
+            q3: 1.0,
+            volume_ratio: 1.0,
+            relative_density: 1.0,
+        };
+        let mut measures = vec![
+            DomainMeasures {
+                size_fraction: 0.25,
+                shape: finite_shape,
+                internal_contact_density: 1.0,
+                contact_order: 1.0,
+                internal_contact_fraction: 1.0,
+                conductance: 1.0,
+            },
+            DomainMeasures {
+                size_fraction: 0.75,
+                shape: finite_shape,
+                internal_contact_density: 1.0,
+                contact_order: 1.0,
+                internal_contact_fraction: 1.0,
+                conductance: 1.0,
+            },
+        ];
+        measures[0].shape.relative_density = f64::MAX;
+        measures[1].shape.relative_density = f64::MIN_POSITIVE;
+        assert_eq!(
+            domain_conditioned_values(&candidate.partition, &measures),
+            Err(FeatureError::NonFinite("smallest_to_largest_density_ratio"))
+        );
+
+        let masked = extract_candidate_base_and_domain_with_mask(
+            &candidate,
+            &fixture_context(),
+            2,
+            base_only_mask(),
+        )
+        .unwrap();
+        assert!(masked.values
+            [BASE_CANDIDATE_FEATURE_NAMES.len()..BASE_AND_DOMAIN_FEATURE_NAMES.len()]
+            .iter()
+            .all(|value| *value == 0.0));
+    }
+
+    #[test]
     fn frozen_schema_lengths_and_family_order_are_exact() {
         assert_eq!(FEATURE_SCHEMA_VERSION, 1);
         assert_eq!(GLOBAL_FEATURE_NAMES.len(), 37);
@@ -1082,6 +1234,68 @@ mod tests {
         assert!(matches!(
             extract_candidate_base_and_domain(&candidate, &fixture_context(), 2),
             Err(FeatureError::NonFinite("max_cr"))
+        ));
+    }
+
+    #[test]
+    fn global_huge_finite_coordinates_fail_closed_without_panicking() {
+        let coords: Vec<[f64; 3]> = (0..8)
+            .map(|index| {
+                if index % 2 == 0 {
+                    [1.0e308, 0.0, 0.0]
+                } else {
+                    [-1.0e308, 0.0, 0.0]
+                }
+            })
+            .collect();
+        let context = context(
+            coords,
+            vec![[0.0, 0.0, 0.0]; 8],
+            0.0,
+            1.0,
+            "CCCCCCCC",
+            vec![iteration(8, 2)],
+            vec![],
+        );
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            extract_global_features(&context, &[2])
+        }));
+        assert!(result.is_ok(), "global extraction panicked");
+        assert!(matches!(
+            result.unwrap(),
+            Err(FeatureError::NonFinite("chain_rg_normalized"))
+        ));
+    }
+
+    #[test]
+    fn candidate_huge_finite_coordinates_fail_closed_without_panicking() {
+        let coords: Vec<[f64; 3]> = (0..14)
+            .map(|index| {
+                if index % 2 == 0 {
+                    [1.0e308, 0.0, 0.0]
+                } else {
+                    [-1.0e308, 0.0, 0.0]
+                }
+            })
+            .collect();
+        let context = context(
+            coords,
+            vec![[0.0, 0.0, 0.0]; 14],
+            0.0,
+            1.0,
+            "CCCCCCCCCCCCCC",
+            vec![iteration(14, 2)],
+            vec![],
+        );
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            extract_candidate_base_and_domain(&fixture_candidate(), &context, 2)
+        }));
+        assert!(result.is_ok(), "candidate extraction panicked");
+        assert!(matches!(
+            result.unwrap(),
+            Err(FeatureError::NonFinite("domain_q1_mean"))
         ));
     }
 }

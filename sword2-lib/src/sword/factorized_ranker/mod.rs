@@ -100,8 +100,6 @@ impl StructuralContext<'_> {
             }
         }
 
-        let _ = mask.domain_conditioned;
-
         Ok(())
     }
 }
