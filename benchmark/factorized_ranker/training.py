@@ -375,6 +375,7 @@ def fit_head(
         learning_rate=params.learning_rate,
         min_samples_leaf=params.min_samples_leaf,
         max_depth=3,
+        criterion="friedman_mse",
         random_state=seed_value,
         loss="log_loss",
     )

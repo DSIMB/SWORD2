@@ -153,6 +153,7 @@ def test_fit_head_uses_exact_approved_model_contract() -> None:
     assert observed["min_samples_leaf"] == 32
     assert observed["max_depth"] == 3
     assert observed["loss"] == "log_loss"
+    assert observed["criterion"] == "friedman_mse"
     assert observed["random_state"] == 37
     assert model.classes_.tolist() == [0, 1]
     assert model.n_features_in_ == 2
