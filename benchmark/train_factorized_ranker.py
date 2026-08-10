@@ -55,8 +55,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("factorized grouped training seed is frozen at 37")
     if (args.count_model_out is None) != (args.candidate_model_out is None):
         parser.error("count and candidate model outputs must be supplied together")
-    if args.count_model_out is not None:
-        parser.error("model artifact export requires Task 12")
     raw_argv = [
         "benchmark.train_factorized_ranker",
         *(sys.argv[1:] if argv is None else argv),
@@ -70,10 +68,87 @@ def main(argv: Sequence[str] | None = None) -> int:
             normalized,
             seed=args.seed,
         )
+        model_hashes: tuple[str, str] | None = None
+        if args.count_model_out is not None and args.candidate_model_out is not None:
+            from benchmark.factorized_ranker.model_artifact import (
+                ModelProvenance,
+                _freeze_classifier,
+                reference_pair_from_batch,
+                write_artifacts,
+            )
+
+            versions = result.cv_report["versions"]
+            if not isinstance(versions, dict):
+                raise ValueError("training report versions are malformed")
+            provenance = ModelProvenance(
+                corpus_manifest_sha256=data.corpus_manifest_sha256,
+                fold_manifest_sha256=data.fold_manifest_sha256,
+                cv_report_sha256=result.artifact_hashes["cv_report.json"],
+                ablation_report_sha256=result.artifact_hashes[
+                    "ablation_report.json"
+                ],
+                oof_predictions_sha256=result.artifact_hashes[
+                    "oof_predictions.csv"
+                ],
+                feature_schema_sha256=str(
+                    result.cv_report["feature_schema_sha256"]
+                ),
+                feature_dump_binary_sha256=str(data.corpus_manifest["binary_sha256"]),
+                source_git_commit=str(data.corpus_manifest["git_commit"]),
+                training_command=tuple(normalized),
+                python_version=str(versions["python"]),
+                numpy_version=str(versions["numpy"]),
+                pandas_version=str(versions["pandas"]),
+                scipy_version=str(versions["scipy"]),
+                sklearn_version=str(versions["scikit_learn"]),
+            )
+            count_reference = reference_pair_from_batch(
+                data.corpus,
+                result.count_batch,
+                "count",
+                result.retained_families,
+            )
+            candidate_reference = reference_pair_from_batch(
+                data.corpus,
+                result.candidate_batch,
+                "candidate",
+                result.retained_families,
+            )
+            count_artifact = _freeze_classifier(
+                result.count_model,
+                "count",
+                result.count_batch.feature_names,
+                result.retained_families,
+                result.count_params,
+                provenance,
+                result.count_batch.x,
+                seed=args.seed,
+                reference_pair=count_reference,
+            )
+            candidate_artifact = _freeze_classifier(
+                result.candidate_model,
+                "candidate",
+                result.candidate_batch.feature_names,
+                result.retained_families,
+                result.candidate_params,
+                provenance,
+                result.candidate_batch.x,
+                seed=args.seed,
+                reference_pair=candidate_reference,
+            )
+            model_hashes = write_artifacts(
+                args.count_model_out,
+                count_artifact,
+                args.candidate_model_out,
+                candidate_artifact,
+            )
     except (OSError, ValueError) as error:
         parser.error(str(error))
     for name in ("oof_predictions.csv", "cv_report.json", "ablation_report.json"):
         print(f"{name} {result.artifact_hashes[name]}")
+    if model_hashes is not None:
+        print(f"count_model.json {model_hashes[0]}")
+        print(f"candidate_model.json {model_hashes[1]}")
     return 0
 
 
