@@ -466,6 +466,41 @@ def test_normalize_raw_rows_preserves_raw_precision_and_complete_counts(
     assert rejections == [rejected]
 
 
+def test_normalize_raw_rows_promotes_all_candidate_failures_to_chain_rejection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    rows = [_exact_raw_row(row, "rawA") for row in _raw_rows()[1:]]
+    candidate_rejections = [
+        RejectionRecord(
+            chain_id="canonicalA",
+            scope="candidate",
+            code=RejectionCode.CANDIDATE_INCOMPLETE_COVERAGE,
+            detail="candidate does not cover every chain residue",
+            delineation=row["canonical_delineation"],
+        )
+        for row in rows
+    ]
+    monkeypatch.setattr(
+        build_factorized_corpus,
+        "_score_candidates",
+        lambda *_args, **_kwargs: ScoredChain(rows=[], rejections=candidate_rejections),
+    )
+
+    chains, counts, candidates, rejections = build_factorized_corpus.normalize_raw_rows(
+        rows, _reference("rawA"), tmp_path
+    )
+
+    assert chains == counts == candidates == []
+    assert rejections[:-1] == candidate_rejections
+    assert rejections[-1] == {
+        "chain_id": "canonicalA",
+        "scope": "chain",
+        "code": "schema_mismatch",
+        "detail": "all candidates were rejected during Task 1 scoring",
+        "delineation": "",
+    }
+
+
 @pytest.mark.parametrize("defect", ["missing", "extra", "duplicate"])
 def test_normalize_raw_rows_rejects_non_bijective_scoring_identity(
     defect: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -580,6 +615,39 @@ def test_provenance_accepts_strict_canonical_equal_form(
     assert build_factorized_corpus._load_and_verify_provenance(
         path, "cath17287", binary
     ) == provenance
+
+
+def test_provenance_accepts_explicit_older_acquisition_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path, binary, provenance = _provenance_fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        build_factorized_corpus,
+        "_expected_git_commit",
+        lambda: "b" * 40,
+    )
+
+    assert build_factorized_corpus._load_and_verify_provenance(
+        path,
+        "cath17287",
+        binary,
+        expected_git_commit=provenance["git_commit"],
+    ) == provenance
+
+
+@pytest.mark.parametrize("expected_commit", ["", "a" * 39, "G" * 40])
+def test_provenance_rejects_invalid_explicit_acquisition_commit(
+    expected_commit: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path, binary, _provenance = _provenance_fixture(tmp_path, monkeypatch)
+
+    with pytest.raises(ValueError, match="expected acquisition Git commit"):
+        build_factorized_corpus._load_and_verify_provenance(
+            path,
+            "cath17287",
+            binary,
+            expected_git_commit=expected_commit,
+        )
 
 
 def test_dump_argv_parser_accepts_separate_form_and_applies_defaults() -> None:

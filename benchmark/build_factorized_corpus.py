@@ -321,6 +321,12 @@ def normalize_raw_rows(
             )
             continue
         if not scored_by_canonical:
+            rejections.append(
+                _schema_rejection(
+                    canonical_chain_id,
+                    "all candidates were rejected during Task 1 scoring",
+                )
+            )
             continue
 
         n_true_values = {int(float(row["n_true_domains"])) for row in scored_by_canonical.values()}
@@ -408,7 +414,13 @@ def _read_rejections(path: Path | None, explicit: bool) -> list[dict[str, str]]:
         return [dict(row) for row in reader]
 
 
-def _load_and_verify_provenance(path: Path, dataset: str, binary: Path) -> dict[str, Any]:
+def _load_and_verify_provenance(
+    path: Path,
+    dataset: str,
+    binary: Path,
+    *,
+    expected_git_commit: str | None = None,
+) -> dict[str, Any]:
     if not path.is_file():
         raise ValueError("acquisition provenance sidecar is missing")
     value = json.loads(path.read_text())
@@ -439,11 +451,20 @@ def _load_and_verify_provenance(path: Path, dataset: str, binary: Path) -> dict[
         raise ValueError("acquisition provenance limit is invalid")
     if type(value.get("resume")) is not bool:
         raise ValueError("acquisition provenance resume is invalid")
+    acquisition_commit = (
+        expected_git_commit if expected_git_commit is not None else _expected_git_commit()
+    )
+    if (
+        not isinstance(acquisition_commit, str)
+        or len(acquisition_commit) not in {40, 64}
+        or any(character not in "0123456789abcdef" for character in acquisition_commit)
+    ):
+        raise ValueError("expected acquisition Git commit is invalid")
     expected = {
         "dataset": dataset,
         "dataset_sha256": _sha256(dataset_path(dataset)),
         "binary_sha256": _sha256(binary),
-        "git_commit": _expected_git_commit(),
+        "git_commit": acquisition_commit,
         "feature_schema_hash": feature_schema_hash(),
     }
     for key, expected_value in expected.items():
@@ -480,6 +501,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--binary", type=Path, default=DEFAULT_BINARY)
     parser.add_argument("--rejections", type=Path, default=None)
+    parser.add_argument("--expected-acquisition-commit", default=None)
     args = parser.parse_args(argv)
 
     if args.dataset != "cath17287":
@@ -488,7 +510,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("SWORD2 binary is unavailable")
 
     provenance = _load_and_verify_provenance(
-        _provenance_path(args.dump, args.dump_dir), args.dataset, args.binary
+        _provenance_path(args.dump, args.dump_dir),
+        args.dataset,
+        args.binary,
+        expected_git_commit=args.expected_acquisition_commit,
     )
     raw_rows = _load_raw(args.dump, args.dump_dir)
     explicit_rejections = args.rejections is not None
@@ -512,7 +537,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "dataset": provenance["dataset"],
         "dataset_sha256": provenance["dataset_sha256"],
         "binary_sha256": provenance["binary_sha256"],
-        "git_commit": provenance["git_commit"],
+        "git_commit": _expected_git_commit(),
         "dump_argv_normalized": provenance["dump_argv_normalized"],
         "build_argv_normalized": normalize_argv(raw_argv),
         "seed": provenance["seed"],
