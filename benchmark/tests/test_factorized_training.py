@@ -442,7 +442,9 @@ def test_fixture_oof_is_complete_and_regrets_decompose() -> None:
     assert hashlib.sha256(oof.csv_bytes).hexdigest() == oof.sha256
 
 
-def test_training_argv_roles_and_task12_guard_are_exact(capsys: pytest.CaptureFixture[str]) -> None:
+def test_training_argv_roles_and_model_outputs_are_all_or_none(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     from benchmark.train_factorized_ranker import main, normalize_training_argv
 
     assert normalize_training_argv(
@@ -477,9 +479,7 @@ def test_training_argv_roles_and_task12_guard_are_exact(capsys: pytest.CaptureFi
                 "unused",
                 "--count-model-out",
                 "count.json",
-                "--candidate-model-out",
-                "candidate.json",
             ]
         )
     assert error.value.code == 2
-    assert "model artifact export requires Task 12" in capsys.readouterr().err
+    assert "must be supplied together" in capsys.readouterr().err
