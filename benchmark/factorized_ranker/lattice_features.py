@@ -60,6 +60,9 @@ def _unique_identities(
     identities = [_identity(row) for row in rows]
     if len(set(identities)) != len(identities):
         raise ValueError("duplicate candidate identity")
+    count_canonicals = [(num_domains, canonical) for _, num_domains, canonical in identities]
+    if len(set(count_canonicals)) != len(count_canonicals):
+        raise ValueError("duplicate candidate canonical delineation for count")
     return identities
 
 
@@ -217,16 +220,16 @@ def build_count_rows(
     modal = min(unique_counts, key=lambda count: (-frequencies[count], count))
     if _finite(chain_features, "chain_modal_count") != float(modal):
         raise ValueError("modal count mismatch")
-    expected_histogram = [0.0] * 21
+    expected_histogram_counts = [0] * 21
     for count, frequency in frequencies.items():
-        expected_histogram[count - 1 if count <= 20 else 20] += frequency / total
-    for index, expected in enumerate(expected_histogram):
+        expected_histogram_counts[count - 1 if count <= 20 else 20] += frequency
+    for index, frequency in enumerate(expected_histogram_counts):
         name = (
             f"chain_count_hist_{index + 1}"
             if index < 20
             else "chain_count_hist_21_plus"
         )
-        if _finite(chain_features, name) != expected:
+        if _finite(chain_features, name) != frequency / total:
             raise ValueError("count histogram mismatch")
 
     grouped: dict[int, list[Mapping[str, object]]] = defaultdict(list)

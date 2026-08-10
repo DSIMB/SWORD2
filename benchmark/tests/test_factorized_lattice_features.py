@@ -106,9 +106,15 @@ def global_fixture(rows):
     values["chain_candidate_total"] = float(len(rows))
     values["chain_available_count_total"] = float(len(frequencies))
     values["chain_modal_count"] = float(modal)
-    for count, frequency in frequencies.items():
+    histogram = [0] * 21
+    for count in counts:
+        histogram[count - 1 if count <= 20 else 20] += 1
+    for index, frequency in enumerate(histogram):
+        if frequency == 0:
+            continue
+        count = index + 1
         suffix = str(count) if count <= 20 else "21_plus"
-        values[f"chain_count_hist_{suffix}"] += frequency / len(rows)
+        values[f"chain_count_hist_{suffix}"] = frequency / len(rows)
     return values
 
 
@@ -347,6 +353,35 @@ def test_count_rows_validate_every_histogram_bin():
         build_count_rows(global_, rows)
 
 
+def test_overflow_histogram_accumulates_integer_frequency_before_normalizing():
+    rows = [
+        candidate_row(
+            index,
+            count,
+            f"count-{count}-candidate-{index}",
+            min_size=1.0,
+            max_cr=index + 1.0,
+            density_min=index + 2.0,
+            boundaries=[],
+        )
+        for index, count in enumerate([2, 2, 21, 22, 22])
+    ]
+    global_ = {name: 0.0 for name in GLOBAL_FEATURES}
+    global_.update(
+        {
+            "chain_candidate_total": 5.0,
+            "chain_available_count_total": 3.0,
+            "chain_count_hist_2": 0.4,
+            "chain_count_hist_21_plus": 0.6,
+            "chain_modal_count": 2.0,
+        }
+    )
+
+    assert [
+        row["count_num_domains"] for row in build_count_rows(global_, rows)
+    ] == [2.0, 21.0, 22.0]
+
+
 @pytest.mark.parametrize("value", [-1.0, 0.5, math.nan, math.inf])
 def test_count_rows_require_integral_finite_global_population_fields(value):
     rows = sibling_rows([1.0, 2.0, 3.0])
@@ -370,6 +405,18 @@ def test_count_rows_reject_duplicate_identity_and_nonfinite_source():
     rows[1]["legacy_distance"] = math.inf
     with pytest.raises(ValueError):
         build_count_rows(global_fixture(rows), rows)
+
+
+def test_duplicate_count_canonical_is_rejected_independent_of_input_order():
+    rows = sibling_rows([1.0, 2.0])
+    rows[1]["canonical_delineation"] = rows[0]["canonical_delineation"]
+    assert rows[0]["source_index"] != rows[1]["source_index"]
+
+    for ordered in (rows, list(reversed(rows))):
+        with pytest.raises(ValueError):
+            add_sibling_relative_features(ordered)
+        with pytest.raises(ValueError):
+            build_count_rows(global_fixture(ordered), ordered)
 
 
 def test_count_summary_order_is_source_major_and_boundary_coil_fraction_is_last():
@@ -407,12 +454,35 @@ def test_count_summary_order_is_source_major_and_boundary_coil_fraction_is_last(
 
 def synthetic_rows():
     return [
-        candidate_row(0, 2, "0-2 3-11", min_size=1, max_cr=2, density_min=10, boundaries=[2]),
-        candidate_row(1, 2, "0-3 4-11", min_size=1, max_cr=4, density_min=9, boundaries=[3]),
-        candidate_row(2, 2, "0-4 5-11", min_size=3, max_cr=8, density_min=7, boundaries=[4]),
-        candidate_row(3, 4, "0-1 2-4 5-8 9-11", min_size=2, max_cr=5, density_min=6, boundaries=[1, 4, 8]),
-        candidate_row(4, 4, "0-2 3-5 6-8 9-11", min_size=3, max_cr=9, density_min=3, boundaries=[2, 5, 8]),
-        candidate_row(5, 7, "0 1 2 3-4 5-6 7-8 9-11", min_size=1, max_cr=12, density_min=1, boundaries=[0, 1, 2, 4, 6, 8]),
+        candidate_row(0, 2, "0-5 6-23", min_size=6, max_cr=2, density_min=10, boundaries=[5]),
+        candidate_row(1, 2, "0-11 12-23", min_size=12, max_cr=4, density_min=9, boundaries=[11]),
+        candidate_row(
+            2,
+            21,
+            "0-1 2-3 4-5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23",
+            min_size=1,
+            max_cr=8,
+            density_min=7,
+            boundaries=[1, 3, 5, *range(6, 23)],
+        ),
+        candidate_row(
+            3,
+            22,
+            "0-1 2-3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23",
+            min_size=1,
+            max_cr=5,
+            density_min=6,
+            boundaries=[1, 3, *range(4, 23)],
+        ),
+        candidate_row(
+            4,
+            22,
+            "0 1-2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22-23",
+            min_size=1,
+            max_cr=9,
+            density_min=3,
+            boundaries=[0, 2, *range(3, 22)],
+        ),
     ]
 
 
@@ -426,6 +496,7 @@ def synthetic_fixture(rows=None):
     count_rows = build_count_rows(global_, populated)
     relative = set(RELATIVE_HIERARCHY_FEATURES)
     return {
+        "chain_length": 24,
         "candidate_feature_names": list(CANDIDATE_FEATURES),
         "count_feature_names": list(COUNT_ITEM_FEATURES),
         "global_feature_names": list(GLOBAL_FEATURES),

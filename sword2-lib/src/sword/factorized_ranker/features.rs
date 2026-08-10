@@ -579,6 +579,7 @@ pub(crate) fn add_sibling_and_hierarchy_features(
     }
 
     let mut lattice_by_identity = BTreeMap::new();
+    let mut lattice_count_canonicals = BTreeSet::new();
     for candidate in &lattice.candidates {
         if candidate.measure.num_domains == 0 {
             return Err(FeatureError::SchemaMismatch);
@@ -592,8 +593,15 @@ pub(crate) fn add_sibling_and_hierarchy_features(
         {
             return Err(FeatureError::SchemaMismatch);
         }
+        if !lattice_count_canonicals.insert((
+            candidate.measure.num_domains,
+            candidate.partition.canonical.clone(),
+        )) {
+            return Err(FeatureError::SchemaMismatch);
+        }
     }
     let mut feature_indices = BTreeMap::new();
+    let mut feature_count_canonicals = BTreeSet::new();
     for (index, row) in features.iter().enumerate() {
         if row.num_domains == 0 || row.values.len() != CANDIDATE_FEATURE_NAMES.len() {
             return Err(FeatureError::SchemaMismatch);
@@ -605,6 +613,9 @@ pub(crate) fn add_sibling_and_hierarchy_features(
             .insert(CandidateIdentity::from_features(row), index)
             .is_some()
         {
+            return Err(FeatureError::SchemaMismatch);
+        }
+        if !feature_count_canonicals.insert((row.num_domains, row.canonical.clone())) {
             return Err(FeatureError::SchemaMismatch);
         }
     }
@@ -786,12 +797,16 @@ pub(crate) fn extract_count_features(
     }
 
     let mut identities = BTreeSet::new();
+    let mut count_canonicals = BTreeSet::new();
     let mut groups: BTreeMap<usize, Vec<&CandidateFeatures>> = BTreeMap::new();
     for candidate in candidates {
         if candidate.num_domains == 0 || candidate.values.len() != CANDIDATE_FEATURE_NAMES.len() {
             return Err(FeatureError::SchemaMismatch);
         }
         if !identities.insert(CandidateIdentity::from_features(candidate)) {
+            return Err(FeatureError::SchemaMismatch);
+        }
+        if !count_canonicals.insert((candidate.num_domains, candidate.canonical.clone())) {
             return Err(FeatureError::SchemaMismatch);
         }
         if !candidate.legacy_distance.is_finite() {
@@ -1403,6 +1418,7 @@ mod tests {
 
     #[derive(serde::Deserialize)]
     struct SyntheticFixture {
+        chain_length: usize,
         candidate_feature_names: Vec<String>,
         count_feature_names: Vec<String>,
         global_feature_names: Vec<String>,
@@ -1707,6 +1723,41 @@ mod tests {
             Err(FeatureError::SchemaMismatch)
         );
         assert_eq!(value_bits(&untouched), before);
+    }
+
+    #[test]
+    fn duplicate_count_canonical_is_rejected_independent_of_input_order() {
+        let first = lattice_candidate(0, 2, "0-2 3-11", 1, 2.0, 10.0);
+        let mut second = first.clone();
+        second.source_index = 1;
+        second.legacy_distance = 0.2;
+        let candidates = vec![first, second];
+        let features = candidates
+            .iter()
+            .map(|candidate| feature_row(candidate, candidate.measure.min_size as f64))
+            .collect::<Vec<_>>();
+
+        for reverse in [false, true] {
+            let mut ordered_candidates = candidates.clone();
+            let mut ordered_features = features.clone();
+            if reverse {
+                ordered_candidates.reverse();
+                ordered_features.reverse();
+            }
+            let before = value_bits(&ordered_features);
+            assert_eq!(
+                add_sibling_and_hierarchy_features(
+                    &lattice(ordered_candidates),
+                    &mut ordered_features,
+                ),
+                Err(FeatureError::SchemaMismatch)
+            );
+            assert_eq!(value_bits(&ordered_features), before);
+            assert!(matches!(
+                extract_count_features(&global_for(&ordered_features), &ordered_features),
+                Err(FeatureError::SchemaMismatch)
+            ));
+        }
     }
 
     #[test]
@@ -2018,7 +2069,7 @@ mod tests {
         let mut candidates = Vec::new();
         let mut features = Vec::new();
         for input in &fixture.candidate_inputs {
-            let partition = parse_partition(&input.delineation, 12).unwrap();
+            let partition = parse_partition(&input.delineation, fixture.chain_length).unwrap();
             assert_eq!(partition.canonical, input.canonical_delineation);
             assert_eq!(
                 sequential_boundaries(&partition),
