@@ -142,6 +142,15 @@ impl CandidateLattice {
     }
 }
 
+pub(crate) fn sequential_boundaries(partition: &ParsedPartition) -> Vec<usize> {
+    partition
+        .residue_to_domain
+        .windows(2)
+        .enumerate()
+        .filter_map(|(boundary, owners)| (owners[0] != owners[1]).then_some(boundary))
+        .collect()
+}
+
 fn partition_boundaries(partition: &ParsedPartition) -> Vec<usize> {
     let mut segments: Vec<_> = partition
         .domains
@@ -337,6 +346,32 @@ mod tests {
             .cloned()
             .unwrap_or_default();
         (best_num_domains.max(1), measure_line)
+    }
+
+    #[test]
+    fn sequential_boundaries_use_owner_transitions() {
+        let partition = ParsedPartition {
+            domains: vec![
+                crate::sword::factorized_ranker::partition::Domain {
+                    segments: vec![
+                        crate::sword::factorized_ranker::partition::Segment { start: 0, end: 1 },
+                        crate::sword::factorized_ranker::partition::Segment { start: 2, end: 3 },
+                    ],
+                    residues: vec![0, 1, 2, 3],
+                },
+                crate::sword::factorized_ranker::partition::Domain {
+                    segments: vec![crate::sword::factorized_ranker::partition::Segment {
+                        start: 4,
+                        end: 5,
+                    }],
+                    residues: vec![4, 5],
+                },
+            ],
+            residue_to_domain: vec![0, 0, 0, 0, 1, 1],
+            canonical: "synthetic".into(),
+        };
+        assert_eq!(partition_boundaries(&partition), vec![1, 3]);
+        assert_eq!(sequential_boundaries(&partition), vec![3]);
     }
 
     #[test]

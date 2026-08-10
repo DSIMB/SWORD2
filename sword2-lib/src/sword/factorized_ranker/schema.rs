@@ -170,6 +170,42 @@ pub(crate) const BASE_CANDIDATE_FEATURE_NAMES: &[&str] = &[
     "mean_segment_size",
 ];
 
+pub(crate) const RELATIVE_CORE_FEATURE_NAMES: &[&str] = &[
+    "min_size",
+    "max_cr",
+    "density_min",
+    "mean_density",
+    "boundary_coil_fraction",
+    "domain_q1_mean",
+    "domain_q2_mean",
+    "domain_q3_mean",
+    "domain_q3_min",
+    "domain_vol_ratio_mean",
+    "domain_density_mean",
+    "domain_density_min",
+    "contact_q_mean",
+    "contact_q_max",
+    "n_segments",
+    "n_discontinuous",
+    "size_balance",
+    "largest_domain_fraction",
+    "min_segment_size",
+    "mean_segment_size",
+];
+
+pub(crate) const COUNT_SUMMARY_SOURCE_FEATURE_NAMES: &[&str] = &[
+    "legacy_distance",
+    "min_size",
+    "max_cr",
+    "density_min",
+    "mean_density",
+    "contact_q_mean",
+    "contact_q_max",
+    "n_segments",
+    "n_discontinuous",
+    "boundary_coil_fraction",
+];
+
 pub(crate) const DOMAIN_CONDITIONED_FEATURE_NAMES: &[&str] = &[
     "smallest_size_fraction",
     "smallest_q1",
@@ -563,6 +599,9 @@ pub(crate) struct CandidateFeatures {
     pub source_index: usize,
     pub canonical: String,
     pub num_domains: usize,
+    /// Candidate metadata used by per-count summaries and output dumping. It
+    /// is not one of the frozen 154 candidate feature values.
+    pub legacy_distance: f64,
     pub values: Vec<f64>,
 }
 
