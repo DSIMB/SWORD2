@@ -25,3 +25,5 @@ benchmark/data/*
 # Fitted geometry reference constants, embedded into the Rust binary at
 # compile time via include_str! (sword2-lib/src/sword/geometry_metrics.rs).
 !benchmark/data/geometry_reference.json
+benchmark/factorized-corpus*/
+benchmark/data/*factorized*.csv

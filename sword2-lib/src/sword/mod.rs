@@ -43,11 +43,10 @@ pub struct SwordConfig {
     pub output_dir: String,
     /// Max alternative assignments (3, 9, or 15).
     pub max_alternatives: usize,
-    /// Reduced-shuffle energy config used for candidate rescoring and the
-    /// training dump — separate from the `-E` display-time energy config,
-    /// which main.rs builds independently at the full shuffle count. `None`
-    /// disables energy-based rescoring entirely (dump rows omit `energy_z`,
-    /// `use_pairwise_reranker` falls back to distance_model-only scoring).
+    /// Reduced-shuffle energy config used for candidate rescoring, separate
+    /// from the `-E` display-time energy config. The factorized development
+    /// dump does not use energy. `None` disables energy-based rescoring and
+    /// makes `use_pairwise_reranker` fall back to distance-model-only scoring.
     pub energy_config: Option<crate::energy::EnergyConfig>,
     /// PDB chain letter (e.g. "A"), needed to build energy residue lists.
     pub chain_id: String,
@@ -248,6 +247,13 @@ pub fn run_pipeline(
     // Step 4: Compute measures and reconstruct domains
     let has_peeling = peeling_output.is_some() || pu_delineation_file.exists();
     if !has_peeling {
+        if let Ok(dump_path) = std::env::var("SWORD2_DUMP_CANDIDATES") {
+            factorized_ranker::write_empty_feature_dump(Path::new(&dump_path))?;
+            tracing::warn!(
+                chain_id = pdb_name,
+                "factorized candidate dump unavailable: Peeling evidence is absent"
+            );
+        }
         // No peeling result → single domain
         tracing::debug!("No peeling for chain, treating as single domain");
         let first = tab_num.first().copied().unwrap_or(1);
@@ -334,12 +340,11 @@ pub fn run_pipeline(
         &results_dir.join("intermediate").to_string_lossy(),
         pdb_name,
     );
-    let _candidate_lattice = factorized_ranker::lattice::CandidateLattice::from_first_pass(
+    let candidate_lattice = factorized_ranker::lattice::CandidateLattice::from_first_pass(
         &measure_lines,
         &factorized_indices,
         tab_num.len(),
-    )
-    .map_err(|error| anyhow::anyhow!(error))?;
+    );
 
     let first_pass_measures: Vec<compute_measure::MeasureLine> = legacy_first_pass_indices
         .iter()
@@ -397,95 +402,89 @@ pub fn run_pipeline(
     // Independent of, and untouched by, the pairwise reranker branch below.
     let geometry_reference = geometry_metrics::ReferenceDistributions::embedded();
 
-    // Training dump: set SWORD2_DUMP_CANDIDATES=/path/to/output.csv to record the
-    // same alt_b/alt_l shortlist the pairwise reranker scores at inference time,
-    // with the same features (boundary_coil_fraction, energy_z, modal_count_distance)
-    // for offline training. Runs on relevant_measure2 (post-shortlist) rather than
-    // the raw measure_lines so training and inference see identical feature
-    // distributions.
+    // Development-only complete factorized feature dump. This remains wholly
+    // opt-in and does not participate in runtime candidate selection.
     if let Ok(dump_path) = std::env::var("SWORD2_DUMP_CANDIDATES") {
-        use std::io::Write as _;
+        use factorized_ranker::partition::FeatureError;
+        use factorized_ranker::schema::FeatureMask;
+        use factorized_ranker::FactorizedError;
 
-        let ss_types: &[crate::peeling::algorithm::SsType] = peeling_output
-            .as_ref()
-            .map(|po| po.ss_types.as_slice())
-            .unwrap_or(&[]);
-        let pdb_path_str = pdb_file_dst.to_string_lossy().to_string();
-
-        let mut parsed_rows: Vec<(usize, usize, f64, f64, f64, String, String)> = Vec::new();
-        for rm in &relevant_measure2 {
-            let fields: Vec<&str> = rm.split('|').collect();
-            if fields.len() < 7 {
-                continue;
+        let dump_path = Path::new(&dump_path);
+        let dump_result = (|| -> std::result::Result<(), FactorizedError> {
+            let dssp = _dssp_result
+                .as_ref()
+                .ok_or(FeatureError::MissingContext("fresh DSSP result"))?;
+            let peeling = peeling_output
+                .as_ref()
+                .ok_or(FeatureError::MissingContext("fresh Peeling output"))?;
+            let corpus = measure_corpus
+                .as_ref()
+                .ok_or(FeatureError::MissingContext("fresh measure corpus"))?;
+            let context = factorized_ranker::prepare_factorized_context(
+                Some(&ca_coords),
+                Some(&dssp.chain),
+                &peeling.iterations,
+                Some((&peeling.contact_matrix, &corpus.provenance)),
+                FeatureMask::all(),
+            )?;
+            let mut lattice = candidate_lattice?;
+            if lattice.candidates.is_empty() {
+                return Err(FactorizedError::SchemaMismatch);
             }
-            let nd: usize = fields[0].trim().parse().unwrap_or(0);
-            let min_size: usize = fields[1].trim().parse().unwrap_or(0);
-            let raw_del = fields[2].trim().to_string();
-            let max_cr: f64 = fields[3].trim().parse().unwrap_or(0.0);
-            let density_min: f64 = fields[5].trim().parse().unwrap_or(0.0);
-            let mean_density: f64 = fields[6].trim().parse().unwrap_or(0.0);
-            let remapped_del = remap_residue_numbers(&raw_del, &tab_num);
-            parsed_rows.push((
-                nd,
-                min_size,
-                max_cr,
-                density_min,
-                mean_density,
-                raw_del,
-                remapped_del,
-            ));
-        }
-
-        let modal = candidate_features::modal_num_domains(
-            &parsed_rows.iter().map(|r| r.0).collect::<Vec<_>>(),
-        );
-
-        let file_existed = std::path::Path::new(&dump_path).exists();
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&dump_path)
-        {
-            if !file_existed {
-                let _ = writeln!(
-                    f,
-                    "chain_id,output_dir,num_domains,min_size,max_cr,density_min,mean_density,delineation,boundary_coil_fraction,energy_z,modal_count_distance"
-                );
-            }
-            for (nd, min_size, max_cr, density_min, mean_density, raw_del, remapped_del) in
-                &parsed_rows
-            {
-                let row = candidate_features::build_dump_row(
-                    *nd,
-                    *min_size,
-                    *max_cr,
-                    *density_min,
-                    *mean_density,
-                    raw_del,
-                    remapped_del,
-                    ss_types,
-                    config.energy_config.as_ref(),
-                    &pdb_path_str,
-                    &config.chain_id,
-                    modal,
-                );
-                let energy_z_str = row.energy_z.map(|z| z.to_string()).unwrap_or_default();
-                let _ = writeln!(
-                    f,
-                    "{},{},{},{},{:.6},{:.6},{:.6},\"{}\",{:.6},{},{:.1}",
-                    pdb_name,
-                    results_dir.display(),
-                    row.num_domains,
-                    row.min_size,
-                    row.max_cr,
-                    row.density_min,
-                    row.mean_density,
-                    row.delineation,
-                    row.boundary_coil_fraction,
-                    energy_z_str,
-                    row.modal_count_distance,
-                );
-            }
+            lattice.attach_hierarchy(&corpus.provenance, &peeling.iterations)?;
+            let candidate_counts = lattice
+                .candidates
+                .iter()
+                .map(|candidate| candidate.measure.num_domains)
+                .collect::<Vec<_>>();
+            let global = factorized_ranker::features::extract_global_features(
+                &context,
+                &candidate_counts,
+            )?;
+            let modal_count = global.modal_count as usize;
+            let mut candidate_features = lattice
+                .candidates
+                .iter()
+                .map(|candidate| {
+                    let mut features = factorized_ranker::features::extract_candidate_base_and_domain_with_mask(
+                        candidate,
+                        &context,
+                        modal_count,
+                        FeatureMask::all(),
+                    )?;
+                    factorized_ranker::features::populate_candidate_conditional_features(
+                        candidate,
+                        &mut features,
+                        &context,
+                        FeatureMask::all(),
+                    )?;
+                    Ok(features)
+                })
+                .collect::<std::result::Result<Vec<_>, FeatureError>>()?;
+            factorized_ranker::features::add_sibling_and_hierarchy_features(
+                &lattice,
+                &mut candidate_features,
+            )?;
+            let counts = factorized_ranker::features::extract_count_features(
+                &global,
+                &candidate_features,
+            )?;
+            let chain_suffix = format!("_{}", config.chain_id);
+            let dump_chain_id = pdb_name.strip_suffix(&chain_suffix).unwrap_or(pdb_name);
+            factorized_ranker::write_feature_dump(
+                dump_path,
+                dump_chain_id,
+                &global,
+                &counts,
+                &candidate_features,
+            )
+        })();
+        if let Some(error) = factorized_ranker::install_failure_dump_header(dump_path, dump_result)? {
+            tracing::warn!(
+                chain_id = pdb_name,
+                error = %error,
+                "factorized candidate dump unavailable"
+            );
         }
     }
 
