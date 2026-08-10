@@ -258,6 +258,11 @@ def assign_folds(
                     / max(targets[index], 1.0)
                 )
                 ** 2
+                - (
+                    (fold_vectors[fold][index] - targets[index])
+                    / max(targets[index], 1.0)
+                )
+                ** 2
                 for index in range(10)
             )
             if not math.isfinite(cost):

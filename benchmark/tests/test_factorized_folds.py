@@ -171,6 +171,27 @@ def test_greedy_assignment_reserves_enough_components_to_populate_every_fold() -
     assert {assignment.fold for assignment in assignments} == set(range(5))
 
 
+def test_greedy_assignment_balances_many_independent_equal_components() -> None:
+    entries = [
+        _entry(
+            f"equal{index}",
+            f"{index:04x}",
+            (f"unique.{index}",),
+            n_domains=2,
+            n_residues=300,
+        )
+        for index in range(50)
+    ]
+
+    assignments = assign_folds(entries, n_folds=5, seed=37)
+    fold_sizes = [
+        sum(assignment.fold == fold for assignment in assignments)
+        for fold in range(5)
+    ]
+
+    assert fold_sizes == [10, 10, 10, 10, 10]
+
+
 @pytest.mark.parametrize(
     "entry,match",
     [
