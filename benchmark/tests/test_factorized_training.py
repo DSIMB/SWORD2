@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -31,12 +32,17 @@ from benchmark.factorized_ranker.training import (
     AblationGateReport,
     CorpusTables,
     Hyperparameters,
+    OOFResult,
+    OOFRow,
+    TrainingCheckpointStore,
+    build_training_checkpoint_context,
     cross_validate_configuration,
     fit_head,
     generate_oof,
     head_feature_spec,
     load_verified_training_data,
     retain_ablation,
+    select_head_hyperparameters,
     validate_retained_families,
 )
 
@@ -388,6 +394,154 @@ def test_grid_ties_use_exact_approved_parameter_order(monkeypatch: pytest.Monkey
     assert [head for head, _params in calls].count("candidate") == 8
 
 
+def test_grid_fold_checkpoints_are_exact_and_reused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    corpus, assignments = _synthetic_corpus()
+    context = {
+        "source_git_commit": "a" * 40,
+        "training_source_sha256": "b" * 64,
+        "corpus_manifest_sha256": "c" * 64,
+        "fold_manifest_sha256": "d" * 64,
+        "feature_schema_sha256": "e" * 64,
+        "seed": 37,
+    }
+    store = TrainingCheckpointStore(tmp_path, context)
+    original = training.fit_head
+    fits = 0
+
+    def capture(batch, params, seed=37):
+        nonlocal fits
+        fits += 1
+        return original(batch, params, seed)
+
+    monkeypatch.setattr(training, "fit_head", capture)
+    first = select_head_hyperparameters(
+        corpus,
+        assignments,
+        "count",
+        ("base",),
+        checkpoint_store=store,
+        stage_family="base",
+    )
+    assert fits == 40
+    payloads = sorted((tmp_path / "grid").glob("*.json"))
+    assert len(payloads) == 40
+    payload = json.loads(payloads[0].read_bytes())
+    assert set(payload) == {
+        "schema_version",
+        "kind",
+        "context",
+        "context_sha256",
+        "stage_family",
+        "retained_feature_families",
+        "head",
+        "hyperparameters",
+        "fold",
+        "seed",
+        "training_chain_ids",
+        "training_chain_id_sha256",
+        "validation_chain_ids",
+        "validation_chain_id_sha256",
+        "pair_feature_names",
+        "pair_feature_names_sha256",
+        "result",
+    }
+    assert payload["context"] == context
+
+    def forbidden_fit(*_args, **_kwargs):
+        raise AssertionError("valid fold checkpoint was not reused")
+
+    monkeypatch.setattr(training, "fit_head", forbidden_fit)
+    second = select_head_hyperparameters(
+        corpus,
+        tuple(reversed(assignments)),
+        "count",
+        ("base",),
+        checkpoint_store=store,
+        stage_family="base",
+    )
+    assert second == first
+    with pytest.raises(ValueError, match="context"):
+        TrainingCheckpointStore(tmp_path, {**context, "seed": 38})
+
+
+def test_completed_stage_checkpoint_round_trips_exact_oof_state(tmp_path: Path) -> None:
+    context = {"source_git_commit": "a" * 40, "seed": 37}
+    store = TrainingCheckpointStore(tmp_path, context)
+    row = OOFRow(
+        chain_id="chain0",
+        fold=0,
+        selected_count=2,
+        selected_candidate_id="candidate0",
+        canonical_delineation="1-10 11-20",
+        count_borda_score=0.75,
+        candidate_borda_score=0.625,
+        n_true_domains=2,
+        count_correct=1,
+        ndo=0.8,
+        boundary_f1_10=0.9,
+        matched_dice=0.85,
+        total_regret=0.1,
+        count_regret=0.05,
+        within_count_regret=0.05,
+        true_count_bin="2",
+        length_bin="<250",
+        continuity_cohort="contiguous",
+        label_cohort="unseen",
+        count_tie_break="none",
+        candidate_tie_break="none",
+    )
+    csv_bytes = training._render_oof((row,))
+    oof = OOFResult(
+        (row,),
+        {"chain0": training.CountDecision(2, 0.75, "none")},
+        csv_bytes,
+        hashlib.sha256(csv_bytes).hexdigest(),
+    )
+    stage_records = [{"family": "base", "retained": True}]
+    grid_history = [{"family": "base", "count": {}, "candidate": {}}]
+    store.write_stage(
+        completed_family_index=0,
+        retained_families=("base",),
+        count_params=MODEL_GRID[0],
+        candidate_params=MODEL_GRID[1],
+        retained_oof=oof,
+        stage_records=stage_records,
+        grid_history=grid_history,
+        accepted_ids=("chain0",),
+    )
+    restored = store.load_stage(("chain0",))
+    assert restored is not None
+    assert restored.completed_family_index == 0
+    assert restored.retained_families == ("base",)
+    assert restored.count_params == MODEL_GRID[0]
+    assert restored.candidate_params == MODEL_GRID[1]
+    assert restored.retained_oof == oof
+    assert list(restored.stage_records) == stage_records
+    assert list(restored.grid_history) == grid_history
+    state_path = tmp_path / "stage_state.json"
+    payload = json.loads(state_path.read_bytes())
+    assert set(payload) == {
+        "schema_version",
+        "kind",
+        "context",
+        "context_sha256",
+        "completed_family_index",
+        "retained_feature_families",
+        "count_hyperparameters",
+        "candidate_hyperparameters",
+        "retained_oof",
+        "stage_records",
+        "grid_history",
+    }
+
+    payload["retained_oof"]["sha256"] = "0" * 64
+    state_path.write_bytes(training._canonical_json_bytes(payload))
+    with pytest.raises(ValueError, match="OOF hash"):
+        store.load_stage(("chain0",))
+
+
 def test_committed_fixture_verifies_exact_hash_chain_and_source_cohorts() -> None:
     data = load_verified_training_data(
         FIXTURES / "factorized_corpus",
@@ -483,3 +637,60 @@ def test_training_argv_roles_and_model_outputs_are_all_or_none(
         )
     assert error.value.code == 2
     assert "must be supplied together" in capsys.readouterr().err
+
+
+def test_training_cli_exposes_resume(capsys: pytest.CaptureFixture[str]) -> None:
+    from benchmark.train_factorized_ranker import main
+
+    with pytest.raises(SystemExit) as error:
+        main(["--help"])
+    assert error.value.code == 0
+    assert "--resume" in capsys.readouterr().out
+
+
+def test_training_checkpoint_context_binds_source_data_and_command() -> None:
+    data = load_verified_training_data(
+        FIXTURES / "factorized_corpus",
+        FIXTURES / "factorized_folds.json",
+    )
+    command = [
+        "benchmark.train_factorized_ranker",
+        "--corpus-dir",
+        "<CORPUS_DIR>",
+        "--fold-manifest",
+        "<FOLD_MANIFEST>",
+        "--out-dir",
+        "<OUT_DIR>",
+        "--count-model-out",
+        "<COUNT_MODEL_OUT>",
+        "--candidate-model-out",
+        "<CANDIDATE_MODEL_OUT>",
+        "--resume",
+    ]
+    context = build_training_checkpoint_context(data, command)
+    assert set(context) == {
+        "schema_version",
+        "kind",
+        "source_git_commit",
+        "source_files",
+        "training_source_sha256",
+        "dataset_sha256",
+        "corpus_manifest_sha256",
+        "chains_sha256",
+        "fold_manifest_sha256",
+        "feature_schema_sha256",
+        "feature_family_order",
+        "model_grid",
+        "accepted_chain_count",
+        "accepted_chain_id_sha256",
+        "seed",
+        "normalized_command",
+        "versions",
+    }
+    assert len(context["source_git_commit"]) == 40
+    assert context["normalized_command"] == command
+    assert context["accepted_chain_count"] == 15
+    assert context["feature_schema_sha256"] == training.feature_schema_hash()
+    assert all(not path.startswith("/") for path in context["source_files"])
+    assert build_training_checkpoint_context(data, command) == context
+    assert build_training_checkpoint_context(data, [*command, "--seed", "37"]) != context

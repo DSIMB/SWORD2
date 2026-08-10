@@ -214,6 +214,7 @@ def export_inputs(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
         "<COUNT_MODEL_OUT>",
         "--candidate-model-out",
         "<CANDIDATE_MODEL_OUT>",
+        "--resume",
     )
     versions = {
         "python_implementation": platform.python_implementation(),

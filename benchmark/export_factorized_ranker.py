@@ -269,6 +269,7 @@ def _validate_semantic_command(
     executable: str,
     path_roles: Mapping[str, str],
     allow_seed: bool,
+    allowed_flags: frozenset[str] = frozenset(),
     description: str,
 ) -> tuple[str, ...]:
     tokens = _command(value, description)
@@ -307,6 +308,11 @@ def _validate_semantic_command(
             if observed != "37":
                 raise ValueError(f"{description} seed is not 37")
             seen.add(option)
+        elif option in allowed_flags:
+            if separator or option in seen:
+                raise ValueError(f"{description} has invalid or repeated {option}")
+            seen.add(option)
+            index += 1
         else:
             raise ValueError(f"{description} contains unknown token {token!r}")
     if not set(path_roles).issubset(seen):
@@ -363,6 +369,7 @@ def validate_export_manifest(manifest: Mapping[str, object]) -> None:
         executable="benchmark.train_factorized_ranker",
         path_roles=_TRAINING_PATH_ROLES,
         allow_seed=True,
+        allowed_flags=frozenset({"--resume"}),
         description="manifest training command",
     )
     _validate_semantic_command(

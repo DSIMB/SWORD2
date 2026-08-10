@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import sys
 from pathlib import Path
 from typing import Sequence
 
 from benchmark.factorized_ranker.training import (
+    FEATURE_FAMILY_ORDER,
+    TrainingCheckpointStore,
+    VerifiedTrainingData,
+    build_training_checkpoint_context,
     load_verified_training_data,
     run_grouped_training,
 )
@@ -20,6 +25,105 @@ _PATH_ROLES = {
     "--count-model-out": "<COUNT_MODEL_OUT>",
     "--candidate-model-out": "<CANDIDATE_MODEL_OUT>",
 }
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _reuse_completed_outputs(
+    data: VerifiedTrainingData,
+    out_dir: Path,
+    count_model_path: Path,
+    candidate_model_path: Path,
+    normalized_command: Sequence[str],
+    checkpoint_store: TrainingCheckpointStore,
+) -> tuple[dict[str, str], tuple[str, str]] | None:
+    accepted_ids = {assignment.chain_id for assignment in data.assignments}
+    state = checkpoint_store.load_stage(tuple(sorted(accepted_ids)))
+    if (
+        state is None
+        or state.completed_family_index != len(FEATURE_FAMILY_ORDER) - 1
+    ):
+        return None
+    report_paths = {
+        "oof_predictions.csv": Path(out_dir) / "oof_predictions.csv",
+        "cv_report.json": Path(out_dir) / "cv_report.json",
+        "ablation_report.json": Path(out_dir) / "ablation_report.json",
+    }
+    required = [
+        *report_paths.values(),
+        Path(count_model_path),
+        Path(candidate_model_path),
+    ]
+    if not all(path.exists() for path in required):
+        return None
+
+    from benchmark.export_factorized_ranker import _load_oof, _validate_reports
+    from benchmark.factorized_ranker.model_artifact import (
+        load_artifact,
+        validate_artifacts,
+    )
+
+    count_artifact = load_artifact(count_model_path, expected_head="count")
+    candidate_artifact = load_artifact(
+        candidate_model_path, expected_head="candidate"
+    )
+    validate_artifacts(count_artifact, candidate_artifact)
+    if (
+        list(state.retained_families)
+        != count_artifact["retained_feature_families"]
+        or state.retained_oof.sha256
+        != count_artifact["oof_predictions_sha256"]
+    ):
+        raise ValueError("completed checkpoint state disagrees with frozen models")
+    for artifact, params, head in (
+        (count_artifact, state.count_params, "count"),
+        (candidate_artifact, state.candidate_params, "candidate"),
+    ):
+        if (
+            artifact["n_estimators"] != params.n_estimators
+            or artifact["learning_rate"] != params.learning_rate
+            or artifact["min_samples_leaf"] != params.min_samples_leaf
+            or artifact["max_depth"] != params.max_depth
+        ):
+            raise ValueError(
+                f"completed checkpoint {head} hyperparameters disagree with model"
+            )
+    expected_provenance = {
+        "training_command": list(normalized_command),
+        "corpus_manifest_sha256": data.corpus_manifest_sha256,
+        "fold_manifest_sha256": data.fold_manifest_sha256,
+        "feature_dump_binary_sha256": data.corpus_manifest["binary_sha256"],
+        "source_git_commit": data.corpus_manifest["git_commit"],
+    }
+    for field, expected in expected_provenance.items():
+        if count_artifact[field] != expected:
+            raise ValueError(f"completed model provenance field {field} mismatch")
+    _validate_reports(
+        report_paths["cv_report.json"],
+        report_paths["ablation_report.json"],
+        count_artifact,
+        candidate_artifact,
+        data.corpus_manifest,
+        data.corpus_manifest_sha256,
+        data.fold_manifest_sha256,
+        data.chains_sha256,
+        accepted_ids,
+        data.corpus,
+    )
+    _load_oof(
+        report_paths["oof_predictions.csv"],
+        str(count_artifact["oof_predictions_sha256"]),
+        accepted_ids,
+        {assignment.chain_id: assignment for assignment in data.assignments},
+        data.corpus,
+    )
+    report_hashes = {
+        name: _sha256(path) for name, path in report_paths.items()
+    }
+    model_hashes = (_sha256(count_model_path), _sha256(candidate_model_path))
+    return report_hashes, model_hashes
 
 
 def normalize_training_argv(argv: Sequence[str]) -> list[str]:
@@ -50,6 +154,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=37)
     parser.add_argument("--count-model-out", type=Path, default=None)
     parser.add_argument("--candidate-model-out", type=Path, default=None)
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="reuse exact-context fold and completed-stage checkpoints",
+    )
     args = parser.parse_args(argv)
     if args.seed != 37:
         parser.error("factorized grouped training seed is frozen at 37")
@@ -62,11 +171,45 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         normalized = normalize_training_argv(raw_argv)
         data = load_verified_training_data(args.corpus_dir, args.fold_manifest)
+        checkpoint_store = (
+            TrainingCheckpointStore(
+                args.out_dir / ".factorized_training_checkpoints",
+                build_training_checkpoint_context(data, normalized),
+            )
+            if args.resume
+            else None
+        )
+        completed = (
+            _reuse_completed_outputs(
+                data,
+                args.out_dir,
+                args.count_model_out,
+                args.candidate_model_out,
+                normalized,
+                checkpoint_store,
+            )
+            if checkpoint_store is not None
+            and args.count_model_out is not None
+            and args.candidate_model_out is not None
+            else None
+        )
+        if completed is not None:
+            completed_reports, completed_models = completed
+            for name in (
+                "oof_predictions.csv",
+                "cv_report.json",
+                "ablation_report.json",
+            ):
+                print(f"{name} {completed_reports[name]}")
+            print(f"count_model.json {completed_models[0]}")
+            print(f"candidate_model.json {completed_models[1]}")
+            return 0
         result = run_grouped_training(
             data,
             args.out_dir,
             normalized,
             seed=args.seed,
+            checkpoint_store=checkpoint_store,
         )
         model_hashes: tuple[str, str] | None = None
         if args.count_model_out is not None and args.candidate_model_out is not None:

@@ -8,6 +8,7 @@ import json
 import math
 import os
 import platform
+import subprocess
 import sys
 from dataclasses import dataclass
 from io import StringIO
@@ -721,6 +722,540 @@ class GridSelection:
     evaluations: tuple[HeadGridEvaluation, ...]
 
 
+@dataclass(frozen=True)
+class TrainingStageState:
+    completed_family_index: int
+    retained_families: tuple[str, ...]
+    count_params: Hyperparameters
+    candidate_params: Hyperparameters
+    retained_oof: OOFResult
+    stage_records: tuple[dict[str, object], ...]
+    grid_history: tuple[dict[str, object], ...]
+
+
+class TrainingCheckpointStore:
+    """Canonical exact-context checkpoints for individual grid/fold fits."""
+
+    _MANIFEST_KEYS = {"schema_version", "kind", "context", "context_sha256"}
+    _FOLD_KEYS = {
+        "schema_version",
+        "kind",
+        "context",
+        "context_sha256",
+        "stage_family",
+        "retained_feature_families",
+        "head",
+        "hyperparameters",
+        "fold",
+        "seed",
+        "training_chain_ids",
+        "training_chain_id_sha256",
+        "validation_chain_ids",
+        "validation_chain_id_sha256",
+        "pair_feature_names",
+        "pair_feature_names_sha256",
+        "result",
+    }
+    _STATE_KEYS = {
+        "schema_version",
+        "kind",
+        "context",
+        "context_sha256",
+        "completed_family_index",
+        "retained_feature_families",
+        "count_hyperparameters",
+        "candidate_hyperparameters",
+        "retained_oof",
+        "stage_records",
+        "grid_history",
+    }
+    _OOF_STATE_KEYS = {
+        "sha256",
+        "chain_count",
+        "chain_id_sha256",
+        "rows",
+        "count_decisions",
+    }
+
+    def __init__(self, root: Path, context: Mapping[str, object]):
+        if not isinstance(context, Mapping) or not context or any(
+            not isinstance(key, str) or not key for key in context
+        ):
+            raise ValueError("checkpoint context must be a nonempty string-key mapping")
+        self.root = Path(root)
+        self.grid_dir = self.root / "grid"
+        self.context = dict(context)
+        context_bytes = _canonical_json_bytes(self.context)
+        self.context_sha256 = _sha256_bytes(context_bytes)
+        manifest = {
+            "schema_version": 1,
+            "kind": "factorized_training_checkpoints",
+            "context": self.context,
+            "context_sha256": self.context_sha256,
+        }
+        manifest_bytes = _canonical_json_bytes(manifest)
+        manifest_path = self.root / "checkpoint_manifest.json"
+        if manifest_path.exists():
+            observed = self._read_json(manifest_path, self._MANIFEST_KEYS)
+            if observed != manifest or manifest_path.read_bytes() != manifest_bytes:
+                raise ValueError("checkpoint context disagrees with existing manifest")
+        else:
+            self.root.mkdir(parents=True, exist_ok=True)
+            self._atomic_write(manifest_path, manifest_bytes)
+        self.grid_dir.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _read_json(path: Path, keys: set[str]) -> dict[str, object]:
+        data = Path(path).read_bytes()
+        try:
+            value = json.loads(data)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError(f"checkpoint {path.name} is invalid JSON") from error
+        if not isinstance(value, dict) or set(value) != keys:
+            raise ValueError(f"checkpoint {path.name} schema mismatch")
+        if _canonical_json_bytes(value) != data:
+            raise ValueError(f"checkpoint {path.name} is not canonical JSON")
+        return value
+
+    @staticmethod
+    def _atomic_write(path: Path, data: bytes) -> None:
+        temporary = path.with_name(f".{path.name}.tmp")
+        # A prior interrupted write is task-owned and explicitly incomplete.
+        temporary.unlink(missing_ok=True)
+        try:
+            with temporary.open("xb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            if temporary.read_bytes() != data:
+                raise ValueError("checkpoint temporary bytes changed after writing")
+            os.replace(temporary, path)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+
+    def _fold_payload(
+        self,
+        *,
+        stage_family: str,
+        retained_families: tuple[str, ...],
+        head: Literal["count", "candidate"],
+        params: Hyperparameters,
+        fold: int,
+        seed: int,
+        training_ids: set[str],
+        validation_ids: set[str],
+        pair_feature_names: tuple[str, ...],
+    ) -> dict[str, object]:
+        if stage_family not in FEATURE_FAMILY_ORDER:
+            raise ValueError("checkpoint stage family is invalid")
+        if stage_family not in retained_families:
+            raise ValueError("checkpoint stage family is absent from proposed families")
+        training = tuple(sorted(training_ids))
+        validation = tuple(sorted(validation_ids))
+        if not training or not validation or set(training) & set(validation):
+            raise ValueError("checkpoint train/validation IDs are invalid")
+        feature_bytes = _canonical_json_bytes(list(pair_feature_names))
+        return {
+            "schema_version": 1,
+            "kind": "grid_fold",
+            "context": self.context,
+            "context_sha256": self.context_sha256,
+            "stage_family": stage_family,
+            "retained_feature_families": list(retained_families),
+            "head": head,
+            "hyperparameters": _params_payload(params),
+            "fold": fold,
+            "seed": seed,
+            "training_chain_ids": list(training),
+            "training_chain_id_sha256": _id_hash(training),
+            "validation_chain_ids": list(validation),
+            "validation_chain_id_sha256": _id_hash(validation),
+            "pair_feature_names": list(pair_feature_names),
+            "pair_feature_names_sha256": _sha256_bytes(feature_bytes),
+        }
+
+    def _fold_path(self, expected: Mapping[str, object]) -> Path:
+        identifier = _sha256_bytes(_canonical_json_bytes(expected))
+        return self.grid_dir / f"{identifier}.json"
+
+    def load_fold(
+        self,
+        **kwargs: Any,
+    ) -> tuple[HeadFoldResult, tuple[float, ...], tuple[float, ...]] | None:
+        expected = self._fold_payload(**kwargs)
+        path = self._fold_path(expected)
+        if not path.exists():
+            return None
+        payload = self._read_json(path, self._FOLD_KEYS)
+        for name, value in expected.items():
+            if payload[name] != value:
+                raise ValueError(f"grid checkpoint field {name} mismatch")
+        result = payload["result"]
+        if not isinstance(result, dict) or set(result) != {
+            "primary",
+            "secondary",
+            "primary_values",
+            "secondary_values",
+        }:
+            raise ValueError("grid checkpoint result schema mismatch")
+        primary = _finite(result["primary"], "checkpoint fold primary")
+        secondary_raw = result["secondary"]
+        secondary = (
+            None
+            if secondary_raw is None
+            else _finite(secondary_raw, "checkpoint fold secondary")
+        )
+        primary_raw = result["primary_values"]
+        secondary_values_raw = result["secondary_values"]
+        if not isinstance(primary_raw, list) or not isinstance(
+            secondary_values_raw, list
+        ):
+            raise ValueError("grid checkpoint per-chain values are malformed")
+        primary_values = tuple(
+            _finite(value, "checkpoint primary value") for value in primary_raw
+        )
+        secondary_values = tuple(
+            _finite(value, "checkpoint secondary value")
+            for value in secondary_values_raw
+        )
+        validation_ids = tuple(expected["validation_chain_ids"])
+        if len(primary_values) != len(validation_ids):
+            raise ValueError("grid checkpoint primary population mismatch")
+        if expected["head"] == "count":
+            if secondary is None or len(secondary_values) != len(validation_ids):
+                raise ValueError("count checkpoint secondary population mismatch")
+        elif secondary is not None or secondary_values:
+            raise ValueError("candidate checkpoint has unexpected secondary values")
+        if primary != float(np.mean(primary_values)):
+            raise ValueError("grid checkpoint primary aggregate mismatch")
+        if secondary is not None and secondary != float(np.mean(secondary_values)):
+            raise ValueError("grid checkpoint secondary aggregate mismatch")
+        return (
+            HeadFoldResult(
+                int(expected["fold"]),
+                validation_ids,
+                primary,
+                secondary,
+            ),
+            primary_values,
+            secondary_values,
+        )
+
+    def write_fold(
+        self,
+        result: HeadFoldResult,
+        primary_values: Sequence[float],
+        secondary_values: Sequence[float],
+        **kwargs: Any,
+    ) -> None:
+        expected = self._fold_payload(**kwargs)
+        validated_primary = tuple(
+            _finite(value, "checkpoint primary value") for value in primary_values
+        )
+        validated_secondary = tuple(
+            _finite(value, "checkpoint secondary value")
+            for value in secondary_values
+        )
+        if (
+            result.fold != expected["fold"]
+            or list(result.validation_chain_ids)
+            != expected["validation_chain_ids"]
+            or len(validated_primary) != len(result.validation_chain_ids)
+            or result.primary != float(np.mean(validated_primary))
+        ):
+            raise ValueError("grid checkpoint result identity mismatch")
+        if expected["head"] == "count":
+            if (
+                result.secondary is None
+                or len(validated_secondary) != len(result.validation_chain_ids)
+                or result.secondary != float(np.mean(validated_secondary))
+            ):
+                raise ValueError("count grid checkpoint secondary result mismatch")
+        elif result.secondary is not None or validated_secondary:
+            raise ValueError("candidate grid checkpoint has unexpected secondary values")
+        payload = {
+            **expected,
+            "result": {
+                "primary": _finite(result.primary, "checkpoint primary"),
+                "secondary": (
+                    None
+                    if result.secondary is None
+                    else _finite(result.secondary, "checkpoint secondary")
+                ),
+                "primary_values": list(validated_primary),
+                "secondary_values": list(validated_secondary),
+            },
+        }
+        path = self._fold_path(expected)
+        data = _canonical_json_bytes(payload)
+        if path.exists():
+            if path.read_bytes() != data:
+                raise ValueError("existing grid checkpoint bytes disagree")
+            return
+        self._atomic_write(path, data)
+
+    @staticmethod
+    def _checkpoint_params(value: object, description: str) -> Hyperparameters:
+        if not isinstance(value, Mapping) or set(value) != {
+            "n_estimators",
+            "learning_rate",
+            "min_samples_leaf",
+            "max_depth",
+        }:
+            raise ValueError(f"{description} checkpoint hyperparameters are malformed")
+        if any(
+            type(value[name]) is not int
+            for name in ("n_estimators", "min_samples_leaf", "max_depth")
+        ):
+            raise ValueError(
+                f"{description} checkpoint integer hyperparameters are malformed"
+            )
+        if type(value["learning_rate"]) not in {int, float}:
+            raise ValueError(f"{description} checkpoint learning rate is malformed")
+        params = Hyperparameters(
+            value["n_estimators"],  # type: ignore[arg-type]
+            float(value["learning_rate"]),  # type: ignore[arg-type]
+            value["min_samples_leaf"],  # type: ignore[arg-type]
+            value["max_depth"],  # type: ignore[arg-type]
+        )
+        if params not in MODEL_GRID:
+            raise ValueError(
+                f"{description} checkpoint hyperparameters are outside the grid"
+            )
+        return params
+
+    @staticmethod
+    def _oof_state(oof: OOFResult, accepted_ids: Sequence[str]) -> dict[str, object]:
+        accepted = tuple(sorted(accepted_ids))
+        if not accepted or len(set(accepted)) != len(accepted):
+            raise ValueError("stage checkpoint accepted IDs are invalid")
+        ordered_rows = tuple(sorted(oof.rows, key=lambda row: row.chain_id))
+        csv_bytes = _render_oof(ordered_rows)
+        if (
+            csv_bytes != oof.csv_bytes
+            or _sha256_bytes(csv_bytes) != oof.sha256
+            or tuple(row.chain_id for row in ordered_rows) != accepted
+            or set(oof.count_decisions) != set(accepted)
+        ):
+            raise ValueError("stage checkpoint OOF population or hash mismatch")
+        decisions: list[dict[str, object]] = []
+        for row in ordered_rows:
+            decision = oof.count_decisions[row.chain_id]
+            if (
+                decision.selected_count != row.selected_count
+                or decision.borda_score != row.count_borda_score
+                or decision.tie_break != row.count_tie_break
+            ):
+                raise ValueError("stage checkpoint count decision disagrees with OOF")
+            decisions.append(
+                {
+                    "chain_id": row.chain_id,
+                    "selected_count": decision.selected_count,
+                    "borda_score": _finite(
+                        decision.borda_score, "checkpoint count Borda score"
+                    ),
+                    "tie_break": decision.tie_break,
+                }
+            )
+        return {
+            "sha256": oof.sha256,
+            "chain_count": len(accepted),
+            "chain_id_sha256": _id_hash(accepted),
+            "rows": [_oof_mapping(row) for row in ordered_rows],
+            "count_decisions": decisions,
+        }
+
+    @classmethod
+    def _restore_oof_state(
+        cls, value: object, accepted_ids: Sequence[str]
+    ) -> OOFResult:
+        if not isinstance(value, Mapping) or set(value) != cls._OOF_STATE_KEYS:
+            raise ValueError("stage checkpoint OOF schema mismatch")
+        accepted = tuple(sorted(accepted_ids))
+        if (
+            type(value["chain_count"]) is not int
+            or value["chain_count"] != len(accepted)
+            or value["chain_id_sha256"] != _id_hash(accepted)
+        ):
+            raise ValueError("stage checkpoint OOF population mismatch")
+        raw_rows = value["rows"]
+        raw_decisions = value["count_decisions"]
+        if not isinstance(raw_rows, list) or not isinstance(raw_decisions, list):
+            raise ValueError("stage checkpoint OOF rows are malformed")
+        rows: list[OOFRow] = []
+        for raw in raw_rows:
+            if not isinstance(raw, Mapping) or set(raw) != set(OOF_FIELDS):
+                raise ValueError("stage checkpoint OOF row schema mismatch")
+            rows.append(OOFRow(**raw))  # type: ignore[arg-type]
+        ordered = tuple(sorted(rows, key=lambda row: row.chain_id))
+        csv_bytes = _render_oof(ordered)
+        sha256 = _sha256_bytes(csv_bytes)
+        if (
+            tuple(row.chain_id for row in ordered) != accepted
+            or value["sha256"] != sha256
+        ):
+            raise ValueError("stage checkpoint OOF hash or chain IDs mismatch")
+        decisions: dict[str, CountDecision] = {}
+        for raw in raw_decisions:
+            if not isinstance(raw, Mapping) or set(raw) != {
+                "chain_id",
+                "selected_count",
+                "borda_score",
+                "tie_break",
+            }:
+                raise ValueError("stage checkpoint count decision schema mismatch")
+            chain_id = raw["chain_id"]
+            selected_count = raw["selected_count"]
+            tie_break = raw["tie_break"]
+            if (
+                not isinstance(chain_id, str)
+                or not chain_id
+                or chain_id in decisions
+                or type(selected_count) is not int
+                or selected_count < 1
+                or tie_break not in {"none", "legacy_count", "lower_count"}
+            ):
+                raise ValueError("stage checkpoint count decision is malformed")
+            decisions[chain_id] = CountDecision(
+                selected_count,
+                _finite(raw["borda_score"], "checkpoint count Borda score"),
+                tie_break,  # type: ignore[arg-type]
+            )
+        if set(decisions) != set(accepted):
+            raise ValueError("stage checkpoint count decisions have wrong population")
+        for row in ordered:
+            decision = decisions[row.chain_id]
+            if (
+                decision.selected_count != row.selected_count
+                or decision.borda_score != row.count_borda_score
+                or decision.tie_break != row.count_tie_break
+            ):
+                raise ValueError("stage checkpoint count decision disagrees with OOF")
+        return OOFResult(ordered, decisions, csv_bytes, sha256)
+
+    @staticmethod
+    def _validate_stage_lists(
+        completed_family_index: int,
+        retained_families: tuple[str, ...],
+        stage_records: Sequence[Mapping[str, object]],
+        grid_history: Sequence[Mapping[str, object]],
+    ) -> None:
+        expected_families = FEATURE_FAMILY_ORDER[: completed_family_index + 1]
+        if (
+            len(stage_records) != len(expected_families)
+            or len(grid_history) != len(expected_families)
+            or tuple(record.get("family") for record in stage_records)
+            != expected_families
+            or tuple(record.get("family") for record in grid_history)
+            != expected_families
+            or any(type(record.get("retained")) is not bool for record in stage_records)
+        ):
+            raise ValueError("stage checkpoint history is incomplete or out of order")
+        observed_retained = tuple(
+            str(record["family"])
+            for record in stage_records
+            if record["retained"] is True
+        )
+        if observed_retained != retained_families:
+            raise ValueError("stage checkpoint retained-family history mismatch")
+
+    def write_stage(
+        self,
+        *,
+        completed_family_index: int,
+        retained_families: Sequence[str],
+        count_params: Hyperparameters,
+        candidate_params: Hyperparameters,
+        retained_oof: OOFResult,
+        stage_records: Sequence[Mapping[str, object]],
+        grid_history: Sequence[Mapping[str, object]],
+        accepted_ids: Sequence[str],
+    ) -> None:
+        if (
+            type(completed_family_index) is not int
+            or not 0 <= completed_family_index < len(FEATURE_FAMILY_ORDER)
+        ):
+            raise ValueError("completed checkpoint family index is invalid")
+        families = validate_retained_families(retained_families)
+        if count_params not in MODEL_GRID or candidate_params not in MODEL_GRID:
+            raise ValueError("stage checkpoint hyperparameters are outside the grid")
+        records = [dict(record) for record in stage_records]
+        grids = [dict(record) for record in grid_history]
+        self._validate_stage_lists(
+            completed_family_index, families, records, grids
+        )
+        payload = {
+            "schema_version": 1,
+            "kind": "stage_state",
+            "context": self.context,
+            "context_sha256": self.context_sha256,
+            "completed_family_index": completed_family_index,
+            "retained_feature_families": list(families),
+            "count_hyperparameters": _params_payload(count_params),
+            "candidate_hyperparameters": _params_payload(candidate_params),
+            "retained_oof": self._oof_state(retained_oof, accepted_ids),
+            "stage_records": records,
+            "grid_history": grids,
+        }
+        path = self.root / "stage_state.json"
+        data = _canonical_json_bytes(payload)
+        if path.exists():
+            current = self._read_json(path, self._STATE_KEYS)
+            current_index = current["completed_family_index"]
+            if type(current_index) is not int:
+                raise ValueError("existing stage checkpoint index is malformed")
+            if current_index == completed_family_index:
+                if path.read_bytes() != data:
+                    raise ValueError("existing completed stage checkpoint disagrees")
+                return
+            if current_index > completed_family_index:
+                raise ValueError("refusing to replace a later completed stage checkpoint")
+        self._atomic_write(path, data)
+
+    def load_stage(self, accepted_ids: Sequence[str]) -> TrainingStageState | None:
+        path = self.root / "stage_state.json"
+        if not path.exists():
+            return None
+        payload = self._read_json(path, self._STATE_KEYS)
+        if (
+            payload["schema_version"] != 1
+            or payload["kind"] != "stage_state"
+            or payload["context"] != self.context
+            or payload["context_sha256"] != self.context_sha256
+        ):
+            raise ValueError("stage checkpoint context mismatch")
+        completed = payload["completed_family_index"]
+        if type(completed) is not int or not 0 <= completed < len(FEATURE_FAMILY_ORDER):
+            raise ValueError("stage checkpoint completed-family index is invalid")
+        raw_families = payload["retained_feature_families"]
+        if not isinstance(raw_families, list):
+            raise ValueError("stage checkpoint retained families are malformed")
+        families = validate_retained_families(raw_families)
+        raw_records = payload["stage_records"]
+        raw_grids = payload["grid_history"]
+        if (
+            not isinstance(raw_records, list)
+            or not isinstance(raw_grids, list)
+            or any(not isinstance(value, Mapping) for value in (*raw_records, *raw_grids))
+        ):
+            raise ValueError("stage checkpoint histories are malformed")
+        records = tuple(dict(value) for value in raw_records)
+        grids = tuple(dict(value) for value in raw_grids)
+        self._validate_stage_lists(completed, families, records, grids)
+        return TrainingStageState(
+            completed,
+            families,
+            self._checkpoint_params(payload["count_hyperparameters"], "count"),
+            self._checkpoint_params(
+                payload["candidate_hyperparameters"], "candidate"
+            ),
+            self._restore_oof_state(payload["retained_oof"], accepted_ids),
+            records,
+            grids,
+        )
+
+
 def _evaluate_head_configuration(
     corpus: CorpusTables,
     assignments: Sequence[FoldAssignment],
@@ -729,6 +1264,8 @@ def _evaluate_head_configuration(
     retained_families: Sequence[str],
     *,
     seed: int = 37,
+    checkpoint_store: TrainingCheckpointStore | None = None,
+    stage_family: str | None = None,
 ) -> HeadGridEvaluation:
     families = validate_retained_families(retained_families)
     canonical_assignments = _validate_cv_inputs(corpus, assignments)
@@ -737,6 +1274,8 @@ def _evaluate_head_configuration(
     primary_values: list[float] = []
     secondary_values: list[float] = []
     fold_results: list[HeadFoldResult] = []
+    if (checkpoint_store is None) != (stage_family is None):
+        raise ValueError("checkpoint store and stage family must be supplied together")
     for fold in range(5):
         validation_ids = {
             assignment.chain_id
@@ -744,6 +1283,28 @@ def _evaluate_head_configuration(
             if assignment.fold == fold
         }
         training_ids = all_ids - validation_ids
+        checkpoint_kwargs = {
+            "stage_family": stage_family,
+            "retained_families": families,
+            "head": head,
+            "params": params,
+            "fold": fold,
+            "seed": seed,
+            "training_ids": training_ids,
+            "validation_ids": validation_ids,
+            "pair_feature_names": spec.pair_features,
+        }
+        cached = (
+            checkpoint_store.load_fold(**checkpoint_kwargs)
+            if checkpoint_store is not None
+            else None
+        )
+        if cached is not None:
+            fold_result, cached_primary, cached_secondary = cached
+            fold_results.append(fold_result)
+            primary_values.extend(cached_primary)
+            secondary_values.extend(cached_secondary)
+            continue
         training_chains = _subset(corpus.chains, training_ids)
         if head == "count":
             batch = build_count_pairs(
@@ -799,14 +1360,20 @@ def _evaluate_head_configuration(
             secondary_values.extend(fold_secondary)
         else:
             fold_secondary_mean = None
-        fold_results.append(
-            HeadFoldResult(
-                fold,
-                tuple(sorted(validation_ids)),
-                fold_primary_mean,
-                fold_secondary_mean,
-            )
+        fold_result = HeadFoldResult(
+            fold,
+            tuple(sorted(validation_ids)),
+            fold_primary_mean,
+            fold_secondary_mean,
         )
+        fold_results.append(fold_result)
+        if checkpoint_store is not None:
+            checkpoint_store.write_fold(
+                fold_result,
+                fold_primary,
+                fold_secondary,
+                **checkpoint_kwargs,
+            )
     primary = _finite(float(np.mean(primary_values)), "head primary objective")
     secondary = (
         _finite(float(np.mean(secondary_values)), "head secondary objective")
@@ -823,9 +1390,17 @@ def select_head_hyperparameters(
     retained_families: Sequence[str],
     *,
     seed: int = 37,
+    checkpoint_store: TrainingCheckpointStore | None = None,
+    stage_family: str | None = None,
 ) -> GridSelection:
     if head not in {"count", "candidate"}:
         raise ValueError("head must be count or candidate")
+    resume_kwargs: dict[str, object] = {}
+    if checkpoint_store is not None or stage_family is not None:
+        resume_kwargs = {
+            "checkpoint_store": checkpoint_store,
+            "stage_family": stage_family,
+        }
     evaluations = tuple(
         _evaluate_head_configuration(
             corpus,
@@ -834,6 +1409,7 @@ def select_head_hyperparameters(
             params,
             retained_families,
             seed=seed,
+            **resume_kwargs,  # type: ignore[arg-type]
         )
         for params in MODEL_GRID
     )
@@ -1386,6 +1962,85 @@ def _common_report(
     }
 
 
+_TRAINING_SOURCE_FILES = (
+    "benchmark/train_factorized_ranker.py",
+    "benchmark/export_factorized_ranker.py",
+    "benchmark/factorized_ranker/training.py",
+    "benchmark/factorized_ranker/model_artifact.py",
+    "benchmark/factorized_ranker/pairs.py",
+    "benchmark/factorized_ranker/ranking.py",
+    "benchmark/factorized_ranker/schema.py",
+    "benchmark/factorized_ranker/corpus.py",
+    "benchmark/factorized_ranker/folds.py",
+    "benchmark/datasets.py",
+    "benchmark/stats.py",
+)
+
+
+def build_training_checkpoint_context(
+    data: VerifiedTrainingData,
+    normalized_command: Sequence[str],
+) -> dict[str, object]:
+    """Bind resumable work to the exact code, data, folds, and invocation."""
+
+    command = list(normalized_command)
+    if not command or any(not isinstance(token, str) or not token for token in command):
+        raise ValueError("checkpoint training command is invalid")
+    if any(token.startswith("/") or "=/" in token for token in command):
+        raise ValueError("checkpoint training command contains a physical path")
+    repo_root = Path(__file__).resolve().parents[2]
+    source_files: dict[str, str] = {}
+    for relative in _TRAINING_SOURCE_FILES:
+        path = repo_root / relative
+        try:
+            source_files[relative] = _sha256_bytes(path.read_bytes())
+        except OSError as error:
+            raise ValueError(f"training source file is unavailable: {relative}") from error
+    git_result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    source_commit = git_result.stdout.strip()
+    if (
+        git_result.returncode != 0
+        or len(source_commit) != 40
+        or any(character not in "0123456789abcdef" for character in source_commit)
+    ):
+        raise ValueError("training source Git commit is unavailable")
+    accepted_ids = tuple(
+        sorted(assignment.chain_id for assignment in data.assignments)
+    )
+    source_bytes = _canonical_json_bytes(source_files)
+    return {
+        "schema_version": 1,
+        "kind": "factorized_training_resume_context",
+        "source_git_commit": source_commit,
+        "source_files": source_files,
+        "training_source_sha256": _sha256_bytes(source_bytes),
+        "dataset_sha256": data.dataset_sha256,
+        "corpus_manifest_sha256": data.corpus_manifest_sha256,
+        "chains_sha256": data.chains_sha256,
+        "fold_manifest_sha256": data.fold_manifest_sha256,
+        "feature_schema_sha256": feature_schema_hash(),
+        "feature_family_order": list(FEATURE_FAMILY_ORDER),
+        "model_grid": [_params_payload(params) for params in MODEL_GRID],
+        "accepted_chain_count": len(accepted_ids),
+        "accepted_chain_id_sha256": _id_hash(accepted_ids),
+        "seed": 37,
+        "normalized_command": command,
+        "versions": {
+            "python": platform.python_version(),
+            "numpy": np.__version__,
+            "pandas": pd.__version__,
+            "scipy": scipy.__version__,
+            "scikit_learn": sklearn.__version__,
+        },
+    }
+
+
 def _atomic_write(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
@@ -1406,66 +2061,116 @@ def run_grouped_training(
     normalized_command: Sequence[str],
     *,
     seed: int = 37,
+    checkpoint_store: TrainingCheckpointStore | None = None,
 ) -> TrainingRun:
     if seed != 37 or isinstance(seed, bool):
         raise ValueError("grouped training seed is frozen at 37")
     accepted_ids = tuple(sorted(assignment.chain_id for assignment in data.assignments))
     common = _common_report(data, normalized_command, accepted_ids)
-    retained = ("base",)
-    count_grid = select_head_hyperparameters(
-        data.corpus, data.assignments, "count", retained, seed=seed
+    restored = (
+        checkpoint_store.load_stage(accepted_ids)
+        if checkpoint_store is not None
+        else None
     )
-    candidate_grid = select_head_hyperparameters(
-        data.corpus, data.assignments, "candidate", retained, seed=seed
-    )
-    retained_count_params = count_grid.selected
-    retained_candidate_params = candidate_grid.selected
-    retained_oof = generate_oof(
-        data,
-        retained,
-        retained_count_params,
-        retained_candidate_params,
-        seed=seed,
-    )
-    stage_records: list[dict[str, object]] = [
-        {
-            "family": "base",
-            "previous_retained": [],
-            "proposed": ["base"],
-            "next_retained": ["base"],
-            "affected_heads": ["count", "candidate"],
-            "reused_heads": [],
-            "count_selection": _grid_payload(count_grid),
-            "candidate_selection": _grid_payload(candidate_grid),
-            "count_feature_spec": _spec_payload(head_feature_spec("count", retained)),
-            "candidate_feature_spec": _spec_payload(
-                head_feature_spec("candidate", retained)
-            ),
-            "oof_sha256": retained_oof.sha256,
-            "oof_chain_count": len(retained_oof.rows),
-            "oof_chain_id_sha256": _id_hash(
-                [row.chain_id for row in retained_oof.rows]
-            ),
-            "gates": {"status": "mandatory_base_no_bootstrap"},
-            "diagnostics": _all_cohorts(retained_oof),
-            "retained": True,
-            "reason": "mandatory_base",
-        }
-    ]
-    grid_history: list[dict[str, object]] = [
-        {
-            "family": "base",
-            "count": _grid_payload(count_grid),
-            "candidate": _grid_payload(candidate_grid),
-        }
-    ]
+    if restored is None:
+        retained = ("base",)
+        count_grid = select_head_hyperparameters(
+            data.corpus,
+            data.assignments,
+            "count",
+            retained,
+            seed=seed,
+            checkpoint_store=checkpoint_store,
+            stage_family="base" if checkpoint_store is not None else None,
+        )
+        candidate_grid = select_head_hyperparameters(
+            data.corpus,
+            data.assignments,
+            "candidate",
+            retained,
+            seed=seed,
+            checkpoint_store=checkpoint_store,
+            stage_family="base" if checkpoint_store is not None else None,
+        )
+        retained_count_params = count_grid.selected
+        retained_candidate_params = candidate_grid.selected
+        retained_oof = generate_oof(
+            data,
+            retained,
+            retained_count_params,
+            retained_candidate_params,
+            seed=seed,
+        )
+        stage_records: list[dict[str, object]] = [
+            {
+                "family": "base",
+                "previous_retained": [],
+                "proposed": ["base"],
+                "next_retained": ["base"],
+                "affected_heads": ["count", "candidate"],
+                "reused_heads": [],
+                "count_selection": _grid_payload(count_grid),
+                "candidate_selection": _grid_payload(candidate_grid),
+                "count_feature_spec": _spec_payload(
+                    head_feature_spec("count", retained)
+                ),
+                "candidate_feature_spec": _spec_payload(
+                    head_feature_spec("candidate", retained)
+                ),
+                "oof_sha256": retained_oof.sha256,
+                "oof_chain_count": len(retained_oof.rows),
+                "oof_chain_id_sha256": _id_hash(
+                    [row.chain_id for row in retained_oof.rows]
+                ),
+                "gates": {"status": "mandatory_base_no_bootstrap"},
+                "diagnostics": _all_cohorts(retained_oof),
+                "retained": True,
+                "reason": "mandatory_base",
+            }
+        ]
+        grid_history: list[dict[str, object]] = [
+            {
+                "family": "base",
+                "count": _grid_payload(count_grid),
+                "candidate": _grid_payload(candidate_grid),
+            }
+        ]
+        completed_family_index = 0
+        if checkpoint_store is not None:
+            checkpoint_store.write_stage(
+                completed_family_index=completed_family_index,
+                retained_families=retained,
+                count_params=retained_count_params,
+                candidate_params=retained_candidate_params,
+                retained_oof=retained_oof,
+                stage_records=stage_records,
+                grid_history=grid_history,
+                accepted_ids=accepted_ids,
+            )
+    else:
+        retained = restored.retained_families
+        retained_count_params = restored.count_params
+        retained_candidate_params = restored.candidate_params
+        retained_oof = restored.retained_oof
+        stage_records = [dict(record) for record in restored.stage_records]
+        grid_history = [dict(record) for record in restored.grid_history]
+        completed_family_index = restored.completed_family_index
 
-    for family in FEATURE_FAMILY_ORDER[1:]:
+    for family_index in range(
+        completed_family_index + 1, len(FEATURE_FAMILY_ORDER)
+    ):
+        family = FEATURE_FAMILY_ORDER[family_index]
         previous = retained
         proposal = (*retained, family)
         if family == "global_count":
             proposed_count_grid = select_head_hyperparameters(
-                data.corpus, data.assignments, "count", proposal, seed=seed
+                data.corpus,
+                data.assignments,
+                "count",
+                proposal,
+                seed=seed,
+                checkpoint_store=checkpoint_store,
+                stage_family=family if checkpoint_store is not None else None,
             )
             proposed_count_params = proposed_count_grid.selected
             reused_count = None
@@ -1478,7 +2183,13 @@ def run_grouped_training(
             affected_heads = ["candidate"]
             reused_heads = ["count"]
         proposed_candidate_grid = select_head_hyperparameters(
-            data.corpus, data.assignments, "candidate", proposal, seed=seed
+            data.corpus,
+            data.assignments,
+            "candidate",
+            proposal,
+            seed=seed,
+            checkpoint_store=checkpoint_store,
+            stage_family=family if checkpoint_store is not None else None,
         )
         proposed_candidate_params = proposed_candidate_grid.selected
         proposed_oof = generate_oof(
@@ -1603,6 +2314,17 @@ def run_grouped_training(
             retained_count_params = proposed_count_params
             retained_candidate_params = proposed_candidate_params
             retained_oof = proposed_oof
+        if checkpoint_store is not None:
+            checkpoint_store.write_stage(
+                completed_family_index=family_index,
+                retained_families=retained,
+                count_params=retained_count_params,
+                candidate_params=retained_candidate_params,
+                retained_oof=retained_oof,
+                stage_records=stage_records,
+                grid_history=grid_history,
+                accepted_ids=accepted_ids,
+            )
 
     final_oof = generate_oof(
         data,
