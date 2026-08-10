@@ -56,7 +56,6 @@ _PATH_OPTIONS = {
     "--rejections": "$REJECTIONS",
     "--parts-dir": "$PARTS_DIR",
     "--out": "$OUT",
-    "--chain-dir": "$CHAIN_CACHE_DIR",
 }
 _INTEGER_FIELDS = {
     "source_index",

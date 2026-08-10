@@ -6,6 +6,7 @@ import argparse
 import csv
 import json
 import math
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -37,6 +38,104 @@ from benchmark.factorized_ranker.schema import (
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_BINARY = REPO / "target/release/sword2"
 DEFAULT_CHAIN_CACHE = REPO / "benchmark/cache/chains"
+
+_DUMP_VALUE_OPTIONS = {
+    "--dataset": "dataset",
+    "--out": "out",
+    "--parts-dir": "parts_dir",
+    "--chain-cache-dir": "chain_cache_dir",
+    "--binary": "binary",
+    "--jobs": "jobs",
+    "--threads": "threads",
+    "--timeout": "timeout",
+    "--limit": "limit",
+    "--seed": "seed",
+}
+_DUMP_PATH_ROLES = {
+    "out": "$OUT",
+    "parts_dir": "$PARTS_DIR",
+    "chain_cache_dir": "$CHAIN_CACHE_DIR",
+    "binary": "$BINARY",
+}
+_DUMP_DEFAULTS: dict[str, Any] = {
+    "dataset": "cath17287",
+    "out": "$OUT",
+    "parts_dir": None,
+    "chain_cache_dir": "$CHAIN_CACHE_DIR",
+    "binary": "$BINARY",
+    "jobs": 16,
+    "threads": 1,
+    "timeout": 300,
+    "limit": None,
+    "seed": SEED,
+    "resume": False,
+}
+
+
+def _ordinary_positive_integer(raw: str, option: str) -> int:
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise ValueError(f"dump argv option {option} is not an integer") from error
+    if value <= 0 or str(value) != raw:
+        raise ValueError(f"dump argv option {option} is not an ordinary positive integer")
+    return value
+
+
+def _parse_dump_argv_normalized(argv: Sequence[str]) -> dict[str, Any]:
+    if not argv or argv[0] != "benchmark.dump_candidate_corpus":
+        raise ValueError("dump argv program identity mismatch")
+    parsed = dict(_DUMP_DEFAULTS)
+    seen: set[str] = set()
+    index = 1
+    while index < len(argv):
+        token = argv[index]
+        if not isinstance(token, str) or not token.startswith("--"):
+            raise ValueError("dump argv contains an unexpected positional token")
+        option, separator, inline_value = token.partition("=")
+        if option == "--resume":
+            if separator or option in seen:
+                raise ValueError("dump argv contains a duplicate or valued --resume option")
+            seen.add(option)
+            parsed["resume"] = True
+            index += 1
+            continue
+        field = _DUMP_VALUE_OPTIONS.get(option)
+        if field is None:
+            raise ValueError(f"dump argv contains unknown option {option}")
+        if option in seen:
+            raise ValueError(f"dump argv contains duplicate option {option}")
+        seen.add(option)
+        if separator:
+            raw_value = inline_value
+        else:
+            if index + 1 >= len(argv):
+                raise ValueError(f"dump argv option {option} has no value")
+            raw_value = argv[index + 1]
+            index += 1
+        if not isinstance(raw_value, str) or raw_value == "":
+            raise ValueError(f"dump argv option {option} has an invalid value")
+        if field in _DUMP_PATH_ROLES:
+            expected_role = _DUMP_PATH_ROLES[field]
+            if raw_value != expected_role:
+                raise ValueError(f"dump argv option {option} has the wrong path role")
+            parsed[field] = raw_value
+        elif field in {"jobs", "threads", "timeout", "limit", "seed"}:
+            parsed[field] = _ordinary_positive_integer(raw_value, option)
+        else:
+            parsed[field] = raw_value
+        index += 1
+    return parsed
+
+
+def _expected_git_commit() -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=REPO,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
 
 
 def _format_vector(row: Mapping[str, str], fields: Sequence[str]) -> tuple[str, ...]:
@@ -151,6 +250,14 @@ def normalize_raw_rows(
 
     for canonical_chain_id in sorted(canonical_groups):
         rows = canonical_groups[canonical_chain_id]
+        if len({row["chain_id"] for row in rows}) != 1:
+            rejections.append(
+                _schema_rejection(
+                    canonical_chain_id,
+                    "canonical chain is sourced from multiple raw chain identities",
+                )
+            )
+            continue
         try:
             base_chain, base_counts = validate_raw_population(canonical_chain_id, rows)
         except ValueError as error:
@@ -164,6 +271,21 @@ def normalize_raw_rows(
             chain_cache_dir=chain_cache_dir,
         )
         rejections.extend(scored.rejections)
+        chain_rejections = [
+            rejection
+            for rejection in scored.rejections
+            if getattr(rejection, "scope", None) == "chain"
+            or (isinstance(rejection, Mapping) and rejection.get("scope") == "chain")
+        ]
+        if chain_rejections:
+            if scored.rows:
+                rejections.append(
+                    _schema_rejection(
+                        canonical_chain_id,
+                        "Task 1 scoring identity join is not one-to-one",
+                    )
+                )
+            continue
         scored_by_canonical: dict[str, Mapping[str, Any]] = {}
         duplicate = False
         for scored_row in scored.rows:
@@ -175,7 +297,25 @@ def normalize_raw_rows(
         raw_by_canonical = {row["canonical_delineation"]: row for row in rows}
         if len(raw_by_canonical) != len(rows):
             duplicate = True
-        if duplicate or not set(scored_by_canonical).issubset(raw_by_canonical):
+        rejected_canonicals: list[str] = []
+        for rejection in scored.rejections:
+            if isinstance(rejection, Mapping):
+                scope = rejection.get("scope")
+                delineation = rejection.get("delineation")
+            else:
+                scope = getattr(rejection, "scope", None)
+                delineation = getattr(rejection, "delineation", None)
+            if scope == "candidate" and delineation:
+                rejected_canonicals.append(str(delineation))
+        scored_identities = set(scored_by_canonical)
+        rejected_identities = set(rejected_canonicals)
+        raw_identities = set(raw_by_canonical)
+        if (
+            duplicate
+            or len(rejected_identities) != len(rejected_canonicals)
+            or scored_identities & rejected_identities
+            or scored_identities | rejected_identities != raw_identities
+        ):
             rejections.append(
                 _schema_rejection(canonical_chain_id, "Task 1 scoring identity join is not one-to-one")
             )
@@ -272,27 +412,54 @@ def _load_and_verify_provenance(path: Path, dataset: str, binary: Path) -> dict[
     if not path.is_file():
         raise ValueError("acquisition provenance sidecar is missing")
     value = json.loads(path.read_text())
+    if not isinstance(value, dict):
+        raise ValueError("acquisition provenance must be a JSON object")
+    required_fields = {
+        "dataset",
+        "dataset_sha256",
+        "binary_sha256",
+        "git_commit",
+        "seed",
+        "jobs",
+        "threads",
+        "timeout",
+        "limit",
+        "resume",
+        "feature_schema_hash",
+        "dump_argv_normalized",
+    }
+    if set(value) != required_fields:
+        raise ValueError("acquisition provenance schema mismatch")
+    integer_fields = ("seed", "jobs", "threads", "timeout")
+    if any(type(value.get(field)) is not int or value[field] <= 0 for field in integer_fields):
+        raise ValueError("acquisition provenance contains an invalid integer setting")
+    if value.get("limit") is not None and (
+        type(value["limit"]) is not int or value["limit"] <= 0
+    ):
+        raise ValueError("acquisition provenance limit is invalid")
+    if type(value.get("resume")) is not bool:
+        raise ValueError("acquisition provenance resume is invalid")
     expected = {
         "dataset": dataset,
         "dataset_sha256": _sha256(dataset_path(dataset)),
         "binary_sha256": _sha256(binary),
+        "git_commit": _expected_git_commit(),
         "feature_schema_hash": feature_schema_hash(),
     }
     for key, expected_value in expected.items():
         if value.get(key) != expected_value:
             raise ValueError(f"acquisition provenance {key} mismatch")
-    if value.get("seed") != SEED:
-        raise ValueError("acquisition provenance seed mismatch")
-    for key in ("jobs", "threads"):
-        if not isinstance(value.get(key), int) or value[key] <= 0:
-            raise ValueError(f"acquisition provenance {key} is invalid")
-    if not isinstance(value.get("git_commit"), str) or not value["git_commit"]:
-        raise ValueError("acquisition provenance git_commit is invalid")
     dump_argv = value.get("dump_argv_normalized")
-    if not isinstance(dump_argv, list) or any(
-        isinstance(token, str) and token.startswith("/") for token in dump_argv
-    ):
-        raise ValueError("acquisition provenance dump argv is not path-normalized")
+    if not isinstance(dump_argv, list) or not all(isinstance(token, str) for token in dump_argv):
+        raise ValueError("acquisition provenance dump argv is invalid")
+    parsed_argv = _parse_dump_argv_normalized(dump_argv)
+    for field in ("dataset", "seed", "jobs", "threads", "timeout", "limit", "resume"):
+        if parsed_argv[field] != value.get(field):
+            raise ValueError(f"acquisition provenance {field} does not match dump argv")
+    if value["seed"] != SEED:
+        raise ValueError("acquisition provenance seed mismatch")
+    if parsed_argv["binary"] != "$BINARY":
+        raise ValueError("acquisition provenance binary path role mismatch")
     return value
 
 
@@ -351,6 +518,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "seed": provenance["seed"],
         "jobs": provenance["jobs"],
         "threads": provenance["threads"],
+        "timeout": provenance["timeout"],
+        "limit": provenance["limit"],
+        "resume": provenance["resume"],
         "feature_schema_hash": provenance["feature_schema_hash"],
     }
     write_corpus(

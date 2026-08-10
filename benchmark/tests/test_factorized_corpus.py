@@ -7,12 +7,17 @@ from pathlib import Path
 
 import pytest
 
+import benchmark.build_factorized_corpus as build_factorized_corpus
+from benchmark.build_training_table import ScoredChain
+from benchmark.datasets import CathEntry
 from benchmark.dump_candidate_corpus import (
     required_dump_fields,
     valid_resume_part,
     validate_dump_header,
+    validate_dump_rows,
 )
 from benchmark.build_factorized_corpus import validate_raw_population
+from benchmark.factorized_ranker.integrity import RejectionCode, RejectionRecord
 from benchmark.factorized_ranker.corpus import (
     ACQUISITION_REJECTION_FIELDS,
     NORMALIZED_REJECTION_FIELDS,
@@ -63,6 +68,41 @@ def _raw_rows() -> list[dict[str, object]]:
             for index, name in enumerate(GLOBAL_FEATURES):
                 row[name] = index + 0.25
     return rows
+
+
+def _exact_raw_row(row: dict[str, object], chain_id: str | None = None) -> dict[str, str]:
+    result = {field: str(row[field]) for field in required_dump_fields()}
+    if chain_id is not None:
+        result["chain_id"] = chain_id
+    return result
+
+
+def _reference(*aliases: str) -> dict[str, CathEntry]:
+    entry = CathEntry(
+        pdb_id="1abc",
+        chain_id="A",
+        entry_id="canonicalA",
+        n_domains=2,
+        n_residues=4,
+        chopping="1-2:A|3-4:A",
+        dataset="cath17287",
+    )
+    return {alias: entry for alias in (*aliases, entry.entry_id)}
+
+
+def _scored_row(canonical: str, n_pred_domains: int) -> dict[str, object]:
+    return {
+        "delineation": canonical,
+        "n_true_domains": 2,
+        "n_pred_domains": n_pred_domains,
+        "ndo": 0.1,
+        "iou": 0.2,
+        "boundary_f1_10": 0.3,
+        "matched_dice": 0.4,
+        "d_count_acc": 1.0,
+        "S": 0.5,
+        "is_oracle_s": 1,
+    }
 
 
 def _build_fixture_corpus(directory: Path, rows: list[dict[str, object]]) -> CorpusPaths:
@@ -130,6 +170,18 @@ def test_exact_raw_header_has_one_frozen_num_domains() -> None:
     ]
     assert fields.count("num_domains") == 1
     validate_dump_header(fields)
+
+
+def test_merged_raw_identity_uniqueness_is_scoped_by_chain() -> None:
+    first = _exact_raw_row(_raw_rows()[1], "chainA")
+    second = dict(first)
+    second["chain_id"] = "chainB"
+    assert [row["chain_id"] for row in validate_dump_rows([second, first])] == [
+        "chainA",
+        "chainB",
+    ]
+    with pytest.raises(ValueError, match="duplicate candidate identity"):
+        validate_dump_rows([first, dict(first)])
 
 
 @pytest.mark.parametrize(
@@ -381,3 +433,204 @@ def test_candidate_rejection_keeps_complete_chain_count_population(tmp_path: Pat
         assert len(list(csv.DictReader(handle))) == 2
     with paths.candidates.open(newline="") as handle:
         assert len(list(csv.DictReader(handle))) == 1
+
+
+def test_normalize_raw_rows_preserves_raw_precision_and_complete_counts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    rows = [_exact_raw_row(row, "rawA") for row in _raw_rows()[1:]]
+    precise_field = CANDIDATE_FEATURES[-1]
+    rows[0][precise_field] = "0.12345678901234567"
+    rejected = RejectionRecord(
+        chain_id="canonicalA",
+        scope="candidate",
+        code=RejectionCode.CANDIDATE_PARSE_FAILED,
+        detail="invalid candidate",
+        delineation=rows[1]["canonical_delineation"],
+    )
+
+    def score(*_args, **_kwargs) -> ScoredChain:
+        return ScoredChain(
+            rows=[_scored_row(rows[0]["canonical_delineation"], 1)],
+            rejections=[rejected],
+        )
+
+    monkeypatch.setattr(build_factorized_corpus, "_score_candidates", score)
+    chains, counts, candidates, rejections = build_factorized_corpus.normalize_raw_rows(
+        rows, _reference("rawA"), tmp_path
+    )
+    assert len(chains) == 1
+    assert [int(float(row["count_num_domains"])) for row in counts] == [1, 2]
+    assert len(candidates) == 1
+    assert candidates[0][precise_field] == "0.12345678901234567"
+    assert rejections == [rejected]
+
+
+@pytest.mark.parametrize("defect", ["missing", "extra", "duplicate"])
+def test_normalize_raw_rows_rejects_non_bijective_scoring_identity(
+    defect: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    rows = [_exact_raw_row(row, "rawA") for row in _raw_rows()[1:]]
+    first = _scored_row(rows[0]["canonical_delineation"], 1)
+    second = _scored_row(rows[1]["canonical_delineation"], 2)
+    if defect == "missing":
+        scored_rows = [first]
+    elif defect == "extra":
+        scored_rows = [first, second, _scored_row("0;2 1;3", 2)]
+    else:
+        scored_rows = [first, second, dict(first)]
+
+    monkeypatch.setattr(
+        build_factorized_corpus,
+        "_score_candidates",
+        lambda *_args, **_kwargs: ScoredChain(rows=scored_rows, rejections=[]),
+    )
+    chains, counts, candidates, rejections = build_factorized_corpus.normalize_raw_rows(
+        rows, _reference("rawA"), tmp_path
+    )
+    assert chains == counts == candidates == []
+    assert len(rejections) == 1
+    assert rejections[0]["code"] == "schema_mismatch"
+    assert rejections[0]["detail"] == "Task 1 scoring identity join is not one-to-one"
+
+
+def test_normalize_raw_rows_rejects_canonical_alias_mixture_before_scoring(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    rows = [
+        _exact_raw_row(_raw_rows()[1], "rawA"),
+        _exact_raw_row(_raw_rows()[2], "rawAlias"),
+    ]
+    calls = 0
+
+    def score(*_args, **_kwargs) -> ScoredChain:
+        nonlocal calls
+        calls += 1
+        return ScoredChain(rows=[], rejections=[])
+
+    monkeypatch.setattr(build_factorized_corpus, "_score_candidates", score)
+    outcomes = []
+    for ordered in (rows, list(reversed(rows))):
+        result = build_factorized_corpus.normalize_raw_rows(
+            ordered, _reference("rawA", "rawAlias"), tmp_path
+        )
+        outcomes.append(result)
+    assert calls == 0
+    assert outcomes[0] == outcomes[1]
+    chains, counts, candidates, rejections = outcomes[0]
+    assert chains == counts == candidates == []
+    assert rejections == [
+        {
+            "chain_id": "canonicalA",
+            "scope": "chain",
+            "code": "schema_mismatch",
+            "detail": "canonical chain is sourced from multiple raw chain identities",
+            "delineation": "",
+        }
+    ]
+
+
+def _provenance_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    dataset = tmp_path / "dataset.csv"
+    dataset.write_bytes(b"dataset\n")
+    binary = tmp_path / "sword2"
+    binary.write_bytes(b"binary\n")
+    expected_commit = "a" * 40
+    monkeypatch.setattr(build_factorized_corpus, "dataset_path", lambda _name: dataset)
+    monkeypatch.setattr(
+        build_factorized_corpus,
+        "_expected_git_commit",
+        lambda: expected_commit,
+        raising=False,
+    )
+    provenance = {
+        "dataset": "cath17287",
+        "dataset_sha256": hashlib.sha256(dataset.read_bytes()).hexdigest(),
+        "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+        "git_commit": expected_commit,
+        "seed": 37,
+        "jobs": 3,
+        "threads": 4,
+        "timeout": 123,
+        "limit": 2,
+        "resume": False,
+        "feature_schema_hash": feature_schema_hash(),
+        "dump_argv_normalized": [
+            "benchmark.dump_candidate_corpus",
+            "--dataset=cath17287",
+            "--limit=2",
+            "--jobs=3",
+            "--threads=4",
+            "--timeout=123",
+            "--seed=37",
+            "--binary=$BINARY",
+            "--chain-cache-dir=$CHAIN_CACHE_DIR",
+            "--out=$OUT",
+        ],
+    }
+    path = tmp_path / "dump.provenance.json"
+    path.write_text(json.dumps(provenance, sort_keys=True, separators=(",", ":")) + "\n")
+    return path, binary, provenance
+
+
+def test_provenance_accepts_strict_canonical_equal_form(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path, binary, provenance = _provenance_fixture(tmp_path, monkeypatch)
+    assert build_factorized_corpus._load_and_verify_provenance(
+        path, "cath17287", binary
+    ) == provenance
+
+
+def test_dump_argv_parser_accepts_separate_form_and_applies_defaults() -> None:
+    parsed = build_factorized_corpus._parse_dump_argv_normalized(
+        [
+            "benchmark.dump_candidate_corpus",
+            "--dataset",
+            "cath17287",
+            "--jobs",
+            "8",
+            "--out",
+            "$OUT",
+        ]
+    )
+    assert parsed == {
+        "dataset": "cath17287",
+        "out": "$OUT",
+        "parts_dir": None,
+        "chain_cache_dir": "$CHAIN_CACHE_DIR",
+        "binary": "$BINARY",
+        "jobs": 8,
+        "threads": 1,
+        "timeout": 300,
+        "limit": None,
+        "seed": 37,
+        "resume": False,
+    }
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        lambda value: value.update(git_commit="b" * 40),
+        lambda value: value.update(seed=38),
+        lambda value: value.update(jobs=5),
+        lambda value: value.update(threads=5),
+        lambda value: value.update(timeout=124),
+        lambda value: value.update(limit=3),
+        lambda value: value.update(resume=0),
+        lambda value: value["dump_argv_normalized"].append("--unknown=value"),
+        lambda value: value["dump_argv_normalized"].extend(["--jobs", "3"]),
+        lambda value: value["dump_argv_normalized"].__setitem__(1, "--dataset=other"),
+        lambda value: value["dump_argv_normalized"].__setitem__(-1, "--out=/absolute/raw.csv"),
+        lambda value: value["dump_argv_normalized"].__setitem__(-3, "--binary=/absolute/sword2"),
+    ],
+)
+def test_provenance_rejects_each_sidecar_or_argv_tamper(
+    tamper, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path, binary, provenance = _provenance_fixture(tmp_path, monkeypatch)
+    tamper(provenance)
+    path.write_text(json.dumps(provenance, sort_keys=True, separators=(",", ":")) + "\n")
+    with pytest.raises(ValueError, match="provenance|argv|option|role|commit|mismatch"):
+        build_factorized_corpus._load_and_verify_provenance(path, "cath17287", binary)

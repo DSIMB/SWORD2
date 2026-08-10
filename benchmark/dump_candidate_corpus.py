@@ -95,8 +95,8 @@ def validate_dump_rows(
     if not rows:
         raise ValueError("candidate dump is header-only")
     validated: list[dict[str, str]] = []
-    identities: set[tuple[int, int, str]] = set()
-    count_canonicals: set[tuple[int, str]] = set()
+    identities: set[tuple[str, int, int, str]] = set()
+    count_canonicals: set[tuple[str, int, str]] = set()
     exact_fields = set(required_dump_fields())
     for raw in rows:
         if set(raw) != exact_fields:
@@ -123,15 +123,16 @@ def validate_dump_rows(
         count_domains = _finite(row["count_num_domains"], "count_num_domains")
         if count_domains != num_domains:
             raise ValueError("candidate/count domain identity mismatch")
-        identity = (source_index, num_domains, canonical)
-        if identity in identities or (num_domains, canonical) in count_canonicals:
+        identity = (chain_id, source_index, num_domains, canonical)
+        if identity in identities or (chain_id, num_domains, canonical) in count_canonicals:
             raise ValueError("duplicate candidate identity")
         identities.add(identity)
-        count_canonicals.add((num_domains, canonical))
+        count_canonicals.add((chain_id, num_domains, canonical))
         validated.append(row)
     return sorted(
         validated,
         key=lambda row: (
+            row["chain_id"],
             int(float(row["num_domains"])),
             row["canonical_delineation"],
             int(row["source_index"]),
@@ -302,7 +303,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--dataset", default="cath17287")
     parser.add_argument("--out", type=Path, default=REPO / "benchmark/data/cath17287_factorized.csv")
     parser.add_argument("--parts-dir", type=Path, default=None)
-    parser.add_argument("--chain-dir", type=Path, default=CHAINS)
+    parser.add_argument("--chain-cache-dir", type=Path, default=CHAINS)
     parser.add_argument("--binary", type=Path, default=BINARY)
     parser.add_argument("--jobs", type=int, default=16)
     parser.add_argument("--threads", type=int, default=1)
@@ -318,6 +319,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error(f"the factorized corpus seed is frozen at {SEED}")
     if args.jobs <= 0 or args.threads <= 0 or args.timeout <= 0:
         parser.error("jobs, threads, and timeout must be positive")
+    if args.limit is not None and args.limit <= 0:
+        parser.error("limit must be positive")
     if not args.binary.is_file():
         parser.error("SWORD2 binary is unavailable")
 
@@ -342,7 +345,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     _run_one,
                     entry_id,
                     args.binary,
-                    args.chain_dir,
+                    args.chain_cache_dir,
                     parts_dir,
                     scratch_dir,
                     args.threads,
@@ -374,6 +377,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "seed": args.seed,
         "jobs": args.jobs,
         "threads": args.threads,
+        "timeout": args.timeout,
+        "limit": args.limit,
+        "resume": args.resume,
         "feature_schema_hash": feature_schema_hash(),
         "dump_argv_normalized": normalize_argv(raw_argv),
     }
