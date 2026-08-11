@@ -6,10 +6,12 @@ import csv
 import hashlib
 import json
 import math
+import multiprocessing
 import os
 import platform
 import subprocess
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from io import StringIO
 from numbers import Integral, Real
@@ -132,6 +134,22 @@ MODEL_GRID = tuple(
     for learning_rate in (0.03, 0.05)
     for min_samples_leaf in (32, 64)
 )
+
+
+def validate_training_jobs(jobs: int) -> int:
+    if (
+        isinstance(jobs, bool)
+        or not isinstance(jobs, Integral)
+        or not 1 <= int(jobs) <= 8
+    ):
+        raise ValueError("training jobs must be a non-boolean integer in 1..=8")
+    return int(jobs)
+
+
+def _fork_context() -> multiprocessing.context.BaseContext:
+    if "fork" not in multiprocessing.get_all_start_methods():
+        raise ValueError("parallel factorized training requires the fork start method")
+    return multiprocessing.get_context("fork")
 
 
 @dataclass(frozen=True)
@@ -707,6 +725,32 @@ class HeadFoldResult:
 
 
 @dataclass(frozen=True)
+class _HeadFoldTask:
+    head: Literal["count", "candidate"]
+    params: Hyperparameters
+    retained_families: tuple[str, ...]
+    fold: int
+    seed: int
+
+
+@dataclass(frozen=True)
+class _HeadFoldWorkResult:
+    task: _HeadFoldTask
+    fold_result: HeadFoldResult
+    primary_values: tuple[float, ...]
+    secondary_values: tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class _GridWorkerContext:
+    corpus: CorpusTables
+    assignments: tuple[FoldAssignment, ...]
+
+
+_GRID_WORKER_CONTEXT: _GridWorkerContext | None = None
+
+
+@dataclass(frozen=True)
 class HeadGridEvaluation:
     head: Literal["count", "candidate"]
     params: Hyperparameters
@@ -1256,6 +1300,221 @@ class TrainingCheckpointStore:
         )
 
 
+def _head_fold_populations(
+    assignments: tuple[FoldAssignment, ...], fold: int
+) -> tuple[set[str], tuple[str, ...]]:
+    if type(fold) is not int or not 0 <= fold < 5:
+        raise ValueError("head fold is invalid")
+    all_ids = {assignment.chain_id for assignment in assignments}
+    validation = tuple(
+        sorted(
+            assignment.chain_id
+            for assignment in assignments
+            if assignment.fold == fold
+        )
+    )
+    if not validation:
+        raise ValueError("head validation fold is empty")
+    training = all_ids - set(validation)
+    if not training or training & set(validation):
+        raise ValueError("head train/validation populations are invalid")
+    return training, validation
+
+
+def _evaluate_head_fold(
+    corpus: CorpusTables,
+    assignments: tuple[FoldAssignment, ...],
+    task: _HeadFoldTask,
+) -> _HeadFoldWorkResult:
+    if task.head not in {"count", "candidate"}:
+        raise ValueError("head must be count or candidate")
+    if task.params not in MODEL_GRID:
+        raise ValueError("head fold hyperparameters are outside the frozen grid")
+    if task.seed != 37 or isinstance(task.seed, bool):
+        raise ValueError("head fold seed is frozen at 37")
+    families = validate_retained_families(task.retained_families)
+    training_ids, validation_ids = _head_fold_populations(assignments, task.fold)
+    spec = head_feature_spec(task.head, families)
+    training_chains = _subset(corpus.chains, training_ids)
+    if task.head == "count":
+        batch = build_count_pairs(
+            training_chains,
+            _subset(corpus.counts, training_ids),
+            shared_features=spec.shared_features,
+            item_features=spec.item_features,
+            seed=task.seed,
+        )
+    else:
+        batch = build_candidate_pairs(
+            training_chains,
+            _subset(corpus.candidates, training_ids),
+            shared_features=spec.shared_features,
+            item_features=spec.item_features,
+            seed=task.seed,
+        )
+    model = fit_head(batch, task.params, task.seed)
+    fold_primary: list[float] = []
+    fold_secondary: list[float] = []
+    for chain_id in validation_ids:
+        chain_rows = _records(_subset(corpus.chains, {chain_id}))
+        candidate_rows = _records(_subset(corpus.candidates, {chain_id}))
+        if len(chain_rows) != 1:
+            raise ValueError("validation chain row is missing or duplicated")
+        if task.head == "count":
+            count_rows = _records(_subset(corpus.counts, {chain_id}))
+            selected, _score, _tie = _count_decision(
+                model, chain_rows[0], count_rows, candidate_rows, spec
+            )
+            truth = _row_int(chain_rows[0], "n_true_domains")
+            fold_primary.append(float(selected == truth))
+            fold_secondary.append(float(abs(selected - truth)))
+        else:
+            decisions = _candidate_decisions(
+                model, chain_rows[0], candidate_rows, spec
+            )
+            fold_primary.append(
+                sum(
+                    _row_float(row, "ndo")
+                    for row, _score, _tie in decisions.values()
+                )
+                / len(decisions)
+            )
+    primary_values = tuple(fold_primary)
+    secondary_values = tuple(fold_secondary)
+    fold_result = HeadFoldResult(
+        task.fold,
+        validation_ids,
+        _finite(float(np.mean(primary_values)), "fold primary objective"),
+        (
+            _finite(float(np.mean(secondary_values)), "fold secondary objective")
+            if task.head == "count"
+            else None
+        ),
+    )
+    return _HeadFoldWorkResult(
+        task,
+        fold_result,
+        primary_values,
+        secondary_values,
+    )
+
+
+def _run_head_fold_task(task: _HeadFoldTask) -> _HeadFoldWorkResult:
+    context = _GRID_WORKER_CONTEXT
+    if context is None:
+        raise RuntimeError("grid worker context is unavailable")
+    return _evaluate_head_fold(context.corpus, context.assignments, task)
+
+
+def _validate_head_fold_work_result(
+    expected_task: _HeadFoldTask,
+    expected_validation_ids: tuple[str, ...],
+    result: _HeadFoldWorkResult,
+) -> _HeadFoldWorkResult:
+    if not isinstance(result, _HeadFoldWorkResult) or result.task != expected_task:
+        raise ValueError("grid worker task identity mismatch")
+    fold_result = result.fold_result
+    if (
+        fold_result.fold != expected_task.fold
+        or fold_result.validation_chain_ids != expected_validation_ids
+        or len(result.primary_values) != len(expected_validation_ids)
+    ):
+        raise ValueError("grid worker fold population mismatch")
+    primary_values = tuple(
+        _finite(value, "grid worker primary value") for value in result.primary_values
+    )
+    if fold_result.primary != float(np.mean(primary_values)):
+        raise ValueError("grid worker primary aggregate mismatch")
+    if expected_task.head == "count":
+        secondary_values = tuple(
+            _finite(value, "grid worker secondary value")
+            for value in result.secondary_values
+        )
+        if (
+            fold_result.secondary is None
+            or len(secondary_values) != len(expected_validation_ids)
+            or fold_result.secondary != float(np.mean(secondary_values))
+        ):
+            raise ValueError("count grid worker secondary aggregate mismatch")
+    elif fold_result.secondary is not None or result.secondary_values:
+        raise ValueError("candidate grid worker has unexpected secondary values")
+    return result
+
+
+def _assemble_head_evaluation(
+    head: Literal["count", "candidate"],
+    params: Hyperparameters,
+    fold_results: Sequence[_HeadFoldWorkResult],
+) -> HeadGridEvaluation:
+    ordered = tuple(sorted(fold_results, key=lambda value: value.task.fold))
+    if (
+        len(ordered) != 5
+        or {result.task.fold for result in ordered} != set(range(5))
+        or any(result.task.head != head or result.task.params != params for result in ordered)
+    ):
+        raise ValueError("head grid fold results are incomplete")
+    primary_values = tuple(
+        value for result in ordered for value in result.primary_values
+    )
+    secondary_values = tuple(
+        value for result in ordered for value in result.secondary_values
+    )
+    primary = _finite(float(np.mean(primary_values)), "head primary objective")
+    secondary = (
+        _finite(float(np.mean(secondary_values)), "head secondary objective")
+        if head == "count"
+        else None
+    )
+    return HeadGridEvaluation(
+        head,
+        params,
+        primary,
+        secondary,
+        tuple(result.fold_result for result in ordered),
+    )
+
+
+def _assemble_grid_evaluations(
+    head: Literal["count", "candidate"],
+    results: Mapping[_HeadFoldTask, _HeadFoldWorkResult],
+) -> tuple[HeadGridEvaluation, ...]:
+    if not results:
+        raise ValueError("head grid results are empty")
+    first_task = next(iter(results))
+    expected_tasks = tuple(
+        _HeadFoldTask(
+            head,
+            params,
+            first_task.retained_families,
+            fold,
+            first_task.seed,
+        )
+        for params in MODEL_GRID
+        for fold in range(5)
+    )
+    if set(results) != set(expected_tasks):
+        raise ValueError("head grid task results are incomplete or unexpected")
+    return tuple(
+        _assemble_head_evaluation(
+            head,
+            params,
+            tuple(
+                results[
+                    _HeadFoldTask(
+                        head,
+                        params,
+                        first_task.retained_families,
+                        fold,
+                        first_task.seed,
+                    )
+                ]
+                for fold in range(5)
+            ),
+        )
+        for params in MODEL_GRID
+    )
+
+
 def _evaluate_head_configuration(
     corpus: CorpusTables,
     assignments: Sequence[FoldAssignment],
@@ -1269,20 +1528,15 @@ def _evaluate_head_configuration(
 ) -> HeadGridEvaluation:
     families = validate_retained_families(retained_families)
     canonical_assignments = _validate_cv_inputs(corpus, assignments)
-    spec = head_feature_spec(head, families)
-    all_ids = {assignment.chain_id for assignment in canonical_assignments}
-    primary_values: list[float] = []
-    secondary_values: list[float] = []
-    fold_results: list[HeadFoldResult] = []
     if (checkpoint_store is None) != (stage_family is None):
         raise ValueError("checkpoint store and stage family must be supplied together")
+    spec = head_feature_spec(head, families)
+    work_results: list[_HeadFoldWorkResult] = []
     for fold in range(5):
-        validation_ids = {
-            assignment.chain_id
-            for assignment in canonical_assignments
-            if assignment.fold == fold
-        }
-        training_ids = all_ids - validation_ids
+        task = _HeadFoldTask(head, params, families, fold, seed)
+        training_ids, validation_ids = _head_fold_populations(
+            canonical_assignments, fold
+        )
         checkpoint_kwargs = {
             "stage_family": stage_family,
             "retained_families": families,
@@ -1291,7 +1545,7 @@ def _evaluate_head_configuration(
             "fold": fold,
             "seed": seed,
             "training_ids": training_ids,
-            "validation_ids": validation_ids,
+            "validation_ids": set(validation_ids),
             "pair_feature_names": spec.pair_features,
         }
         cached = (
@@ -1299,88 +1553,134 @@ def _evaluate_head_configuration(
             if checkpoint_store is not None
             else None
         )
-        if cached is not None:
-            fold_result, cached_primary, cached_secondary = cached
-            fold_results.append(fold_result)
-            primary_values.extend(cached_primary)
-            secondary_values.extend(cached_secondary)
-            continue
-        training_chains = _subset(corpus.chains, training_ids)
-        if head == "count":
-            batch = build_count_pairs(
-                training_chains,
-                _subset(corpus.counts, training_ids),
-                shared_features=spec.shared_features,
-                item_features=spec.item_features,
-                seed=seed,
-            )
+        if cached is None:
+            work = _evaluate_head_fold(corpus, canonical_assignments, task)
         else:
-            batch = build_candidate_pairs(
-                training_chains,
-                _subset(corpus.candidates, training_ids),
-                shared_features=spec.shared_features,
-                item_features=spec.item_features,
-                seed=seed,
+            fold_result, primary_values, secondary_values = cached
+            work = _HeadFoldWorkResult(
+                task, fold_result, primary_values, secondary_values
             )
-        model = fit_head(batch, params, seed)
-        fold_primary: list[float] = []
-        fold_secondary: list[float] = []
-        for chain_id in sorted(validation_ids):
-            chain_rows = _records(_subset(corpus.chains, {chain_id}))
-            candidate_rows = _records(_subset(corpus.candidates, {chain_id}))
-            if len(chain_rows) != 1:
-                raise ValueError("validation chain row is missing or duplicated")
-            if head == "count":
-                count_rows = _records(_subset(corpus.counts, {chain_id}))
-                selected, _score, _tie = _count_decision(
-                    model, chain_rows[0], count_rows, candidate_rows, spec
-                )
-                truth = _row_int(chain_rows[0], "n_true_domains")
-                fold_primary.append(float(selected == truth))
-                fold_secondary.append(float(abs(selected - truth)))
-            else:
-                decisions = _candidate_decisions(
-                    model, chain_rows[0], candidate_rows, spec
-                )
-                fold_primary.append(
-                    sum(
-                        _row_float(row, "ndo")
-                        for row, _score, _tie in decisions.values()
-                    )
-                    / len(decisions)
-                )
-        if not fold_primary:
-            raise ValueError("head validation fold is empty")
-        fold_primary_mean = _finite(float(np.mean(fold_primary)), "fold primary objective")
-        primary_values.extend(fold_primary)
-        if head == "count":
-            fold_secondary_mean: float | None = _finite(
-                float(np.mean(fold_secondary)), "fold secondary objective"
-            )
-            secondary_values.extend(fold_secondary)
-        else:
-            fold_secondary_mean = None
-        fold_result = HeadFoldResult(
-            fold,
-            tuple(sorted(validation_ids)),
-            fold_primary_mean,
-            fold_secondary_mean,
-        )
-        fold_results.append(fold_result)
-        if checkpoint_store is not None:
+        work = _validate_head_fold_work_result(task, validation_ids, work)
+        if cached is None and checkpoint_store is not None:
             checkpoint_store.write_fold(
-                fold_result,
-                fold_primary,
-                fold_secondary,
+                work.fold_result,
+                work.primary_values,
+                work.secondary_values,
                 **checkpoint_kwargs,
             )
-    primary = _finite(float(np.mean(primary_values)), "head primary objective")
-    secondary = (
-        _finite(float(np.mean(secondary_values)), "head secondary objective")
-        if head == "count"
-        else None
+        work_results.append(work)
+    return _assemble_head_evaluation(head, params, work_results)
+
+
+def _evaluate_head_grid_parallel(
+    corpus: CorpusTables,
+    assignments: Sequence[FoldAssignment],
+    head: Literal["count", "candidate"],
+    retained_families: Sequence[str],
+    *,
+    seed: int,
+    jobs: int,
+    mp_context: multiprocessing.context.BaseContext,
+    checkpoint_store: TrainingCheckpointStore | None,
+    stage_family: str | None,
+) -> tuple[HeadGridEvaluation, ...]:
+    global _GRID_WORKER_CONTEXT
+
+    families = validate_retained_families(retained_families)
+    canonical_assignments = _validate_cv_inputs(corpus, assignments)
+    if (checkpoint_store is None) != (stage_family is None):
+        raise ValueError("checkpoint store and stage family must be supplied together")
+    spec = head_feature_spec(head, families)
+    tasks = tuple(
+        _HeadFoldTask(head, params, families, fold, seed)
+        for params in MODEL_GRID
+        for fold in range(5)
     )
-    return HeadGridEvaluation(head, params, primary, secondary, tuple(fold_results))
+    results: dict[_HeadFoldTask, _HeadFoldWorkResult] = {}
+    checkpoint_kwargs: dict[_HeadFoldTask, dict[str, object]] = {}
+    cached_count = 0
+    for task in tasks:
+        training_ids, validation_ids = _head_fold_populations(
+            canonical_assignments, task.fold
+        )
+        kwargs: dict[str, object] = {
+            "stage_family": stage_family,
+            "retained_families": families,
+            "head": head,
+            "params": task.params,
+            "fold": task.fold,
+            "seed": seed,
+            "training_ids": training_ids,
+            "validation_ids": set(validation_ids),
+            "pair_feature_names": spec.pair_features,
+        }
+        checkpoint_kwargs[task] = kwargs
+        cached = (
+            checkpoint_store.load_fold(**kwargs)
+            if checkpoint_store is not None
+            else None
+        )
+        if cached is not None:
+            fold_result, primary_values, secondary_values = cached
+            work = _HeadFoldWorkResult(
+                task, fold_result, primary_values, secondary_values
+            )
+            results[task] = _validate_head_fold_work_result(
+                task, validation_ids, work
+            )
+            cached_count += 1
+
+    missing = tuple(task for task in tasks if task not in results)
+    if missing:
+        if _GRID_WORKER_CONTEXT is not None:
+            raise RuntimeError("grid worker context is already active")
+        _GRID_WORKER_CONTEXT = _GridWorkerContext(corpus, canonical_assignments)
+        executor = ProcessPoolExecutor(max_workers=jobs, mp_context=mp_context)
+        futures = {}
+        fitted_count = 0
+        try:
+            futures = {
+                executor.submit(_run_head_fold_task, task): task for task in missing
+            }
+            try:
+                for future in as_completed(futures):
+                    expected_task = futures[future]
+                    work = future.result()
+                    _training_ids, validation_ids = _head_fold_populations(
+                        canonical_assignments, expected_task.fold
+                    )
+                    work = _validate_head_fold_work_result(
+                        expected_task, validation_ids, work
+                    )
+                    if work.task in results:
+                        raise ValueError("grid worker returned a duplicate task")
+                    if checkpoint_store is not None:
+                        checkpoint_store.write_fold(
+                            work.fold_result,
+                            work.primary_values,
+                            work.secondary_values,
+                            **checkpoint_kwargs[work.task],
+                        )
+                    results[work.task] = work
+                    fitted_count += 1
+                    print(
+                        "factorized-training grid "
+                        f"head={head} family={stage_family or families[-1]} "
+                        f"completed={len(results)}/40 cached={cached_count} "
+                        f"fitted={fitted_count}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+            except BaseException:
+                for future in futures:
+                    future.cancel()
+                executor.shutdown(wait=True, cancel_futures=True)
+                raise
+            else:
+                executor.shutdown(wait=True)
+        finally:
+            _GRID_WORKER_CONTEXT = None
+    return _assemble_grid_evaluations(head, results)
 
 
 def select_head_hyperparameters(
@@ -1390,9 +1690,11 @@ def select_head_hyperparameters(
     retained_families: Sequence[str],
     *,
     seed: int = 37,
+    jobs: int = 1,
     checkpoint_store: TrainingCheckpointStore | None = None,
     stage_family: str | None = None,
 ) -> GridSelection:
+    jobs = validate_training_jobs(jobs)
     if head not in {"count", "candidate"}:
         raise ValueError("head must be count or candidate")
     resume_kwargs: dict[str, object] = {}
@@ -1401,18 +1703,31 @@ def select_head_hyperparameters(
             "checkpoint_store": checkpoint_store,
             "stage_family": stage_family,
         }
-    evaluations = tuple(
-        _evaluate_head_configuration(
+    if jobs == 1:
+        evaluations = tuple(
+            _evaluate_head_configuration(
+                corpus,
+                assignments,
+                head,
+                params,
+                retained_families,
+                seed=seed,
+                **resume_kwargs,  # type: ignore[arg-type]
+            )
+            for params in MODEL_GRID
+        )
+    else:
+        evaluations = _evaluate_head_grid_parallel(
             corpus,
             assignments,
             head,
-            params,
             retained_families,
             seed=seed,
-            **resume_kwargs,  # type: ignore[arg-type]
+            jobs=jobs,
+            mp_context=_fork_context(),
+            checkpoint_store=checkpoint_store,
+            stage_family=stage_family,
         )
-        for params in MODEL_GRID
-    )
     if len(evaluations) != len(MODEL_GRID):
         raise ValueError("head grid evaluation count mismatch")
     if head == "count":
@@ -2061,10 +2376,12 @@ def run_grouped_training(
     normalized_command: Sequence[str],
     *,
     seed: int = 37,
+    jobs: int = 1,
     checkpoint_store: TrainingCheckpointStore | None = None,
 ) -> TrainingRun:
     if seed != 37 or isinstance(seed, bool):
         raise ValueError("grouped training seed is frozen at 37")
+    jobs = validate_training_jobs(jobs)
     accepted_ids = tuple(sorted(assignment.chain_id for assignment in data.assignments))
     common = _common_report(data, normalized_command, accepted_ids)
     restored = (
@@ -2080,6 +2397,7 @@ def run_grouped_training(
             "count",
             retained,
             seed=seed,
+            jobs=jobs,
             checkpoint_store=checkpoint_store,
             stage_family="base" if checkpoint_store is not None else None,
         )
@@ -2089,6 +2407,7 @@ def run_grouped_training(
             "candidate",
             retained,
             seed=seed,
+            jobs=jobs,
             checkpoint_store=checkpoint_store,
             stage_family="base" if checkpoint_store is not None else None,
         )
@@ -2169,6 +2488,7 @@ def run_grouped_training(
                 "count",
                 proposal,
                 seed=seed,
+                jobs=jobs,
                 checkpoint_store=checkpoint_store,
                 stage_family=family if checkpoint_store is not None else None,
             )
@@ -2188,6 +2508,7 @@ def run_grouped_training(
             "candidate",
             proposal,
             seed=seed,
+            jobs=jobs,
             checkpoint_store=checkpoint_store,
             stage_family=family if checkpoint_store is not None else None,
         )

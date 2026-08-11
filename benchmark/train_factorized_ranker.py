@@ -27,6 +27,16 @@ _PATH_ROLES = {
 }
 
 
+def _jobs_argument(value: str) -> int:
+    try:
+        jobs = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("jobs must be an integer in 1..=8") from error
+    if not 1 <= jobs <= 8:
+        raise argparse.ArgumentTypeError("jobs must be an integer in 1..=8")
+    return jobs
+
+
 def _sha256(path: Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
@@ -152,6 +162,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--fold-manifest", type=Path, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=37)
+    parser.add_argument(
+        "--jobs",
+        type=_jobs_argument,
+        default=1,
+        help="independent fold workers (1..=8)",
+    )
     parser.add_argument("--count-model-out", type=Path, default=None)
     parser.add_argument("--candidate-model-out", type=Path, default=None)
     parser.add_argument(
@@ -209,6 +225,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.out_dir,
             normalized,
             seed=args.seed,
+            jobs=args.jobs,
             checkpoint_store=checkpoint_store,
         )
         model_hashes: tuple[str, str] | None = None

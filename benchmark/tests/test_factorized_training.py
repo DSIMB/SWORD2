@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing
+import shutil
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -48,6 +51,29 @@ from benchmark.factorized_ranker.training import (
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def _checkpoint_bytes(root: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in sorted(root.rglob("*.json"))
+    }
+
+
+def _always_fail_fit(*_args: object, **_kwargs: object) -> object:
+    raise RuntimeError("injected worker failure")
+
+
+@pytest.mark.parametrize("value", [True, False, 0, -1, 9, 1.0, "8", None])
+def test_parallel_jobs_reject_invalid_library_values(value: object) -> None:
+    with pytest.raises(ValueError, match="jobs"):
+        training.validate_training_jobs(value)  # type: ignore[arg-type]
+
+
+def test_parallel_jobs_accept_exact_supported_range() -> None:
+    assert [training.validate_training_jobs(value) for value in range(1, 9)] == list(
+        range(1, 9)
+    )
 
 
 def test_model_grid_is_exact_and_bounded() -> None:
@@ -466,6 +492,140 @@ def test_grid_fold_checkpoints_are_exact_and_reused(
         TrainingCheckpointStore(tmp_path, {**context, "seed": 38})
 
 
+@pytest.mark.skipif(
+    "fork" not in multiprocessing.get_all_start_methods(), reason="fork required"
+)
+def test_parallel_grid_matches_sequential_selection_and_checkpoint_bytes(
+    tmp_path: Path,
+) -> None:
+    data = load_verified_training_data(
+        FIXTURES / "factorized_corpus", FIXTURES / "factorized_folds.json"
+    )
+    context = {"source_git_commit": "a" * 40, "seed": 37}
+    sequential_root = tmp_path / "sequential"
+    parallel_root = tmp_path / "parallel"
+    sequential = select_head_hyperparameters(
+        data.corpus,
+        data.assignments,
+        "count",
+        ("base",),
+        jobs=1,
+        checkpoint_store=TrainingCheckpointStore(sequential_root, context),
+        stage_family="base",
+    )
+    parallel = select_head_hyperparameters(
+        data.corpus,
+        data.assignments,
+        "count",
+        ("base",),
+        jobs=8,
+        checkpoint_store=TrainingCheckpointStore(parallel_root, context),
+        stage_family="base",
+    )
+    assert parallel == sequential
+    assert _checkpoint_bytes(parallel_root) == _checkpoint_bytes(sequential_root)
+
+
+def test_grid_aggregation_ignores_worker_completion_order() -> None:
+    canonical: dict[training._HeadFoldTask, training._HeadFoldWorkResult] = {}
+    for params_index, params in enumerate(MODEL_GRID):
+        for fold in range(5):
+            task = training._HeadFoldTask("count", params, ("base",), fold, 37)
+            primary = (float((params_index + fold) % 2),)
+            secondary = (float(fold),)
+            canonical[task] = training._HeadFoldWorkResult(
+                task,
+                training.HeadFoldResult(
+                    fold,
+                    (f"chain{fold}",),
+                    float(np.mean(primary)),
+                    float(np.mean(secondary)),
+                ),
+                primary,
+                secondary,
+            )
+    reversed_results = dict(reversed(tuple(canonical.items())))
+    assert training._assemble_grid_evaluations(
+        "count", reversed_results
+    ) == training._assemble_grid_evaluations("count", canonical)
+
+
+@pytest.mark.skipif(
+    "fork" not in multiprocessing.get_all_start_methods(), reason="fork required"
+)
+def test_parallel_grid_reuses_partial_checkpoints_without_rewriting_them(
+    tmp_path: Path,
+) -> None:
+    data = load_verified_training_data(
+        FIXTURES / "factorized_corpus", FIXTURES / "factorized_folds.json"
+    )
+    context = {"source_git_commit": "a" * 40, "seed": 37}
+    complete_root = tmp_path / "complete"
+    complete = select_head_hyperparameters(
+        data.corpus,
+        data.assignments,
+        "count",
+        ("base",),
+        jobs=1,
+        checkpoint_store=TrainingCheckpointStore(complete_root, context),
+        stage_family="base",
+    )
+    partial_root = tmp_path / "partial"
+    partial_grid = partial_root / "grid"
+    partial_grid.mkdir(parents=True)
+    shutil.copy2(
+        complete_root / "checkpoint_manifest.json",
+        partial_root / "checkpoint_manifest.json",
+    )
+    for source in sorted((complete_root / "grid").glob("*.json"))[:13]:
+        shutil.copy2(source, partial_grid / source.name)
+    cached_paths = tuple(sorted(partial_grid.glob("*.json")))
+    cached_bytes = {path.name: path.read_bytes() for path in cached_paths}
+    cached_mtimes = {path.name: path.stat().st_mtime_ns for path in cached_paths}
+
+    resumed = select_head_hyperparameters(
+        data.corpus,
+        tuple(reversed(data.assignments)),
+        "count",
+        ("base",),
+        jobs=8,
+        checkpoint_store=TrainingCheckpointStore(partial_root, context),
+        stage_family="base",
+    )
+
+    assert resumed == complete
+    assert len(list(partial_grid.glob("*.json"))) == 40
+    assert {path.name: path.read_bytes() for path in cached_paths} == cached_bytes
+    assert {path.name: path.stat().st_mtime_ns for path in cached_paths} == cached_mtimes
+
+
+@pytest.mark.skipif(
+    "fork" not in multiprocessing.get_all_start_methods(), reason="fork required"
+)
+def test_parallel_grid_worker_failure_never_writes_stage_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = load_verified_training_data(
+        FIXTURES / "factorized_corpus", FIXTURES / "factorized_folds.json"
+    )
+    store = TrainingCheckpointStore(
+        tmp_path, {"source_git_commit": "a" * 40, "seed": 37}
+    )
+    monkeypatch.setattr(training, "fit_head", _always_fail_fit)
+    with pytest.raises(RuntimeError, match="injected worker failure"):
+        select_head_hyperparameters(
+            data.corpus,
+            data.assignments,
+            "count",
+            ("base",),
+            jobs=8,
+            checkpoint_store=store,
+            stage_family="base",
+        )
+    assert not (tmp_path / "stage_state.json").exists()
+    assert not tuple((tmp_path / "grid").glob(".*.tmp"))
+
+
 def test_completed_stage_checkpoint_round_trips_exact_oof_state(tmp_path: Path) -> None:
     context = {"source_git_commit": "a" * 40, "seed": 37}
     store = TrainingCheckpointStore(tmp_path, context)
@@ -646,6 +806,99 @@ def test_training_cli_exposes_resume(capsys: pytest.CaptureFixture[str]) -> None
         main(["--help"])
     assert error.value.code == 0
     assert "--resume" in capsys.readouterr().out
+
+
+def test_training_cli_exposes_bounded_jobs(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from benchmark.train_factorized_ranker import main
+
+    with pytest.raises(SystemExit) as help_exit:
+        main(["--help"])
+    assert help_exit.value.code == 0
+    assert "--jobs" in capsys.readouterr().out
+    with pytest.raises(SystemExit) as invalid_exit:
+        main(
+            [
+                "--corpus-dir",
+                "unused",
+                "--fold-manifest",
+                "unused",
+                "--out-dir",
+                "unused",
+                "--jobs",
+                "9",
+            ]
+        )
+    assert invalid_exit.value.code == 2
+    assert "1..=8" in capsys.readouterr().err
+
+
+def test_training_cli_forwards_jobs_and_binds_normalized_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import benchmark.train_factorized_ranker as cli
+
+    sentinel = object()
+    observed: dict[str, object] = {}
+
+    def fake_run(
+        data: object,
+        out_dir: Path,
+        normalized_command: list[str],
+        *,
+        seed: int,
+        jobs: int,
+        checkpoint_store: object,
+    ) -> SimpleNamespace:
+        observed.update(
+            data=data,
+            out_dir=out_dir,
+            normalized_command=normalized_command,
+            seed=seed,
+            jobs=jobs,
+            checkpoint_store=checkpoint_store,
+        )
+        return SimpleNamespace(
+            artifact_hashes={
+                "oof_predictions.csv": "a" * 64,
+                "cv_report.json": "b" * 64,
+                "ablation_report.json": "c" * 64,
+            }
+        )
+
+    monkeypatch.setattr(cli, "load_verified_training_data", lambda *_args: sentinel)
+    monkeypatch.setattr(cli, "run_grouped_training", fake_run)
+    assert (
+        cli.main(
+            [
+                "--corpus-dir",
+                str(tmp_path / "corpus"),
+                "--fold-manifest",
+                str(tmp_path / "folds.json"),
+                "--out-dir",
+                str(tmp_path / "out"),
+                "--jobs",
+                "8",
+            ]
+        )
+        == 0
+    )
+    assert observed["data"] is sentinel
+    assert observed["jobs"] == 8
+    assert observed["seed"] == 37
+    assert observed["checkpoint_store"] is None
+    assert observed["normalized_command"] == [
+        "benchmark.train_factorized_ranker",
+        "--corpus-dir",
+        "<CORPUS_DIR>",
+        "--fold-manifest",
+        "<FOLD_MANIFEST>",
+        "--out-dir",
+        "<OUT_DIR>",
+        "--jobs",
+        "8",
+    ]
 
 
 def test_training_checkpoint_context_binds_source_data_and_command() -> None:
