@@ -6,7 +6,7 @@
 
 **Architecture:** The parent process validates inputs, enumerates tasks in canonical model-grid/fold order, reads and writes every checkpoint, validates worker identities, and aggregates results in canonical order. Linux `fork` workers inherit one verified read-only corpus through copy-on-write, receive only small frozen task identities, fit one fold at a time, and return immutable payloads; `jobs=1` remains an in-process reference path that uses the same fold functions.
 
-**Tech Stack:** Python 3.11, `concurrent.futures.ProcessPoolExecutor`, `multiprocessing` with explicit `fork`, pandas/numpy, scikit-learn `GradientBoostingClassifier`, pytest, canonical JSON/CSV checkpoint formats, GNU `time`, Linux `/proc`/`ps` resource inspection.
+**Tech Stack:** Python 3.12, `concurrent.futures.ProcessPoolExecutor`, `multiprocessing` with explicit `fork`, pandas/numpy, scikit-learn `GradientBoostingClassifier`, pytest, canonical JSON/CSV checkpoint formats, GNU `time`, Linux `/proc`/`ps` resource inspection.
 
 ---
 
