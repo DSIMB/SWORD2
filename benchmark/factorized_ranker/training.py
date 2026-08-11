@@ -267,6 +267,32 @@ class OOFResult:
 
 
 @dataclass(frozen=True)
+class _OOFFoldTask:
+    fold: int
+    retained_families: tuple[str, ...]
+    count_params: Hyperparameters
+    candidate_params: Hyperparameters
+    seed: int
+    reuse_count_decisions: bool
+
+
+@dataclass(frozen=True)
+class _OOFFoldWorkResult:
+    task: _OOFFoldTask
+    rows: tuple[OOFRow, ...]
+    count_decisions: tuple[tuple[str, CountDecision], ...]
+
+
+@dataclass(frozen=True)
+class _OOFWorkerContext:
+    data: VerifiedTrainingData
+    reused_count_decisions: Mapping[str, CountDecision] | None
+
+
+_OOF_WORKER_CONTEXT: _OOFWorkerContext | None = None
+
+
+@dataclass(frozen=True)
 class TrainingRun:
     count_model: GradientBoostingClassifier
     candidate_model: GradientBoostingClassifier
@@ -1882,150 +1908,240 @@ def _truth_continuity(entry: CathEntry) -> str:
     return "contiguous" if all(len(segments) == 1 for segments in domains) else "discontinuous"
 
 
-def generate_oof(
+def _generate_oof_fold(
     data: VerifiedTrainingData,
-    retained_families: Sequence[str],
-    count_params: Hyperparameters,
-    candidate_params: Hyperparameters,
-    *,
-    seed: int = 37,
-    reused_count_decisions: Mapping[str, CountDecision] | None = None,
-) -> OOFResult:
-    families = validate_retained_families(retained_families)
+    task: _OOFFoldTask,
+    reused_count_decisions: Mapping[str, CountDecision] | None,
+) -> _OOFFoldWorkResult:
+    if task.count_params not in MODEL_GRID or task.candidate_params not in MODEL_GRID:
+        raise ValueError("OOF fold hyperparameters are outside the frozen grid")
+    if task.seed != 37 or isinstance(task.seed, bool):
+        raise ValueError("OOF fold seed is frozen at 37")
+    if type(task.reuse_count_decisions) is not bool or task.reuse_count_decisions != (
+        reused_count_decisions is not None
+    ):
+        raise ValueError("OOF fold reused-count identity mismatch")
+    families = validate_retained_families(task.retained_families)
     count_spec = head_feature_spec("count", families)
     candidate_spec = head_feature_spec("candidate", families)
     assignments = data.assignments
     all_ids = {assignment.chain_id for assignment in assignments}
     metadata = {entry.entry_id: entry for entry in data.metadata}
-    assignment_by_id = {assignment.chain_id: assignment for assignment in assignments}
+    assignment_by_id = {
+        assignment.chain_id: assignment for assignment in assignments
+    }
     if set(metadata) != all_ids or set(assignment_by_id) != all_ids:
         raise ValueError("OOF metadata/fold populations disagree")
     if reused_count_decisions is not None and set(reused_count_decisions) != all_ids:
         raise ValueError("reused count decisions do not cover exact accepted chains")
-
+    training_ids, validation_ids = _head_fold_populations(assignments, task.fold)
+    training_chains = _subset(data.corpus.chains, training_ids)
+    if reused_count_decisions is None:
+        count_batch = build_count_pairs(
+            training_chains,
+            _subset(data.corpus.counts, training_ids),
+            shared_features=count_spec.shared_features,
+            item_features=count_spec.item_features,
+            seed=task.seed,
+        )
+        count_model: GradientBoostingClassifier | None = fit_head(
+            count_batch, task.count_params, task.seed
+        )
+    else:
+        count_model = None
+    candidate_batch = build_candidate_pairs(
+        training_chains,
+        _subset(data.corpus.candidates, training_ids),
+        shared_features=candidate_spec.shared_features,
+        item_features=candidate_spec.item_features,
+        seed=task.seed,
+    )
+    candidate_model = fit_head(candidate_batch, task.candidate_params, task.seed)
+    label_cohorts = chain_label_cohorts(assignments, task.fold)
     rows: list[OOFRow] = []
     count_decisions: dict[str, CountDecision] = {}
-    for fold in range(5):
-        validation_ids = {
-            assignment.chain_id for assignment in assignments if assignment.fold == fold
-        }
-        training_ids = all_ids - validation_ids
-        training_chains = _subset(data.corpus.chains, training_ids)
+    for chain_id in validation_ids:
+        chain_values = _records(_subset(data.corpus.chains, {chain_id}))
+        count_values = _records(_subset(data.corpus.counts, {chain_id}))
+        candidate_values = _records(_subset(data.corpus.candidates, {chain_id}))
+        if len(chain_values) != 1:
+            raise ValueError("OOF chain row is missing or duplicated")
         if reused_count_decisions is None:
-            count_batch = build_count_pairs(
-                training_chains,
-                _subset(data.corpus.counts, training_ids),
-                shared_features=count_spec.shared_features,
-                item_features=count_spec.item_features,
-                seed=seed,
-            )
-            count_model: GradientBoostingClassifier | None = fit_head(
-                count_batch, count_params, seed
-            )
-        else:
-            count_model = None
-        candidate_batch = build_candidate_pairs(
-            training_chains,
-            _subset(data.corpus.candidates, training_ids),
-            shared_features=candidate_spec.shared_features,
-            item_features=candidate_spec.item_features,
-            seed=seed,
-        )
-        candidate_model = fit_head(candidate_batch, candidate_params, seed)
-        label_cohorts = chain_label_cohorts(assignments, fold)
-
-        for chain_id in sorted(validation_ids):
-            chain_values = _records(_subset(data.corpus.chains, {chain_id}))
-            count_values = _records(_subset(data.corpus.counts, {chain_id}))
-            candidate_values = _records(_subset(data.corpus.candidates, {chain_id}))
-            if len(chain_values) != 1:
-                raise ValueError("OOF chain row is missing or duplicated")
-            if reused_count_decisions is None:
-                assert count_model is not None
-                selected_count, count_score, count_tie = _count_decision(
-                    count_model,
-                    chain_values[0],
-                    count_values,
-                    candidate_values,
-                    count_spec,
-                )
-                decision = CountDecision(selected_count, count_score, count_tie)
-            else:
-                decision = reused_count_decisions[chain_id]
-            count_decisions[chain_id] = decision
-            candidate_decisions = _candidate_decisions(
-                candidate_model,
+            assert count_model is not None
+            selected_count, count_score, count_tie = _count_decision(
+                count_model,
                 chain_values[0],
+                count_values,
                 candidate_values,
-                candidate_spec,
+                count_spec,
             )
-            if decision.selected_count not in candidate_decisions:
-                raise ValueError("selected count has no candidate group")
-            winner, candidate_score, candidate_tie = candidate_decisions[
-                decision.selected_count
-            ]
-            winner_id = str(winner["candidate_id"])
-            canonical = str(winner["canonical_delineation"])
-            matching = [
-                row
-                for row in candidate_values
-                if str(row["candidate_id"]) == winner_id
-                and str(row["canonical_delineation"]) == canonical
-            ]
-            if len(matching) != 1 or matching[0] is not winner:
-                raise ValueError("selected candidate identity does not match normalized row")
-            chosen_ndo = _row_float(winner, "ndo")
-            best_all = max(_row_float(row, "ndo") for row in candidate_values)
-            selected_count_rows = [
-                row
-                for row in candidate_values
-                if _row_int(row, "num_domains") == decision.selected_count
-            ]
-            if not selected_count_rows:
-                raise ValueError("selected count has no normalized candidates")
-            best_selected = max(_row_float(row, "ndo") for row in selected_count_rows)
-            total_regret = best_all - chosen_ndo
-            count_regret = best_all - best_selected
-            within_regret = best_selected - chosen_ndo
-            if (
-                any(
-                    not math.isfinite(value) or value < 0.0
-                    for value in (total_regret, count_regret, within_regret)
-                )
-                or abs(total_regret - (count_regret + within_regret)) > 1e-12
-            ):
-                raise ValueError("OOF regret decomposition is invalid")
-            assignment = assignment_by_id[chain_id]
-            true_count = _row_int(chain_values[0], "n_true_domains")
-            if true_count != metadata[chain_id].n_domains:
-                raise ValueError("OOF truth count disagrees with verified metadata")
-            if chain_id not in label_cohorts:
-                raise ValueError("OOF chain label cohort is missing")
-            rows.append(
-                OOFRow(
-                    chain_id=chain_id,
-                    fold=fold,
-                    selected_count=decision.selected_count,
-                    selected_candidate_id=winner_id,
-                    canonical_delineation=canonical,
-                    count_borda_score=decision.borda_score,
-                    candidate_borda_score=candidate_score,
-                    n_true_domains=true_count,
-                    count_correct=int(decision.selected_count == true_count),
-                    ndo=chosen_ndo,
-                    boundary_f1_10=_row_float(winner, "boundary_f1_10"),
-                    matched_dice=_row_float(winner, "matched_dice"),
-                    total_regret=total_regret,
-                    count_regret=count_regret,
-                    within_count_regret=within_regret,
-                    true_count_bin=assignment.true_count_bin,
-                    length_bin=assignment.length_bin,
-                    continuity_cohort=_truth_continuity(metadata[chain_id]),
-                    label_cohort=label_cohorts[chain_id],
-                    count_tie_break=decision.tie_break,
-                    candidate_tie_break=candidate_tie,
-                )
+            decision = CountDecision(selected_count, count_score, count_tie)
+        else:
+            decision = reused_count_decisions[chain_id]
+        count_decisions[chain_id] = decision
+        candidate_decisions = _candidate_decisions(
+            candidate_model,
+            chain_values[0],
+            candidate_values,
+            candidate_spec,
+        )
+        if decision.selected_count not in candidate_decisions:
+            raise ValueError("selected count has no candidate group")
+        winner, candidate_score, candidate_tie = candidate_decisions[
+            decision.selected_count
+        ]
+        winner_id = str(winner["candidate_id"])
+        canonical = str(winner["canonical_delineation"])
+        matching = [
+            row
+            for row in candidate_values
+            if str(row["candidate_id"]) == winner_id
+            and str(row["canonical_delineation"]) == canonical
+        ]
+        if len(matching) != 1 or matching[0] is not winner:
+            raise ValueError("selected candidate identity does not match normalized row")
+        chosen_ndo = _row_float(winner, "ndo")
+        best_all = max(_row_float(row, "ndo") for row in candidate_values)
+        selected_count_rows = [
+            row
+            for row in candidate_values
+            if _row_int(row, "num_domains") == decision.selected_count
+        ]
+        if not selected_count_rows:
+            raise ValueError("selected count has no normalized candidates")
+        best_selected = max(_row_float(row, "ndo") for row in selected_count_rows)
+        total_regret = best_all - chosen_ndo
+        count_regret = best_all - best_selected
+        within_regret = best_selected - chosen_ndo
+        if (
+            any(
+                not math.isfinite(value) or value < 0.0
+                for value in (total_regret, count_regret, within_regret)
             )
+            or abs(total_regret - (count_regret + within_regret)) > 1e-12
+        ):
+            raise ValueError("OOF regret decomposition is invalid")
+        assignment = assignment_by_id[chain_id]
+        true_count = _row_int(chain_values[0], "n_true_domains")
+        if true_count != metadata[chain_id].n_domains:
+            raise ValueError("OOF truth count disagrees with verified metadata")
+        if chain_id not in label_cohorts:
+            raise ValueError("OOF chain label cohort is missing")
+        rows.append(
+            OOFRow(
+                chain_id=chain_id,
+                fold=task.fold,
+                selected_count=decision.selected_count,
+                selected_candidate_id=winner_id,
+                canonical_delineation=canonical,
+                count_borda_score=decision.borda_score,
+                candidate_borda_score=candidate_score,
+                n_true_domains=true_count,
+                count_correct=int(decision.selected_count == true_count),
+                ndo=chosen_ndo,
+                boundary_f1_10=_row_float(winner, "boundary_f1_10"),
+                matched_dice=_row_float(winner, "matched_dice"),
+                total_regret=total_regret,
+                count_regret=count_regret,
+                within_count_regret=within_regret,
+                true_count_bin=assignment.true_count_bin,
+                length_bin=assignment.length_bin,
+                continuity_cohort=_truth_continuity(metadata[chain_id]),
+                label_cohort=label_cohorts[chain_id],
+                count_tie_break=decision.tie_break,
+                candidate_tie_break=candidate_tie,
+            )
+        )
+    return _OOFFoldWorkResult(
+        task,
+        tuple(sorted(rows, key=lambda row: row.chain_id)),
+        tuple(sorted(count_decisions.items())),
+    )
+
+
+def _run_oof_fold_task(task: _OOFFoldTask) -> _OOFFoldWorkResult:
+    context = _OOF_WORKER_CONTEXT
+    if context is None:
+        raise RuntimeError("OOF worker context is unavailable")
+    return _generate_oof_fold(
+        data=context.data,
+        task=task,
+        reused_count_decisions=context.reused_count_decisions,
+    )
+
+
+def _validate_oof_fold_work_result(
+    data: VerifiedTrainingData,
+    expected_task: _OOFFoldTask,
+    result: _OOFFoldWorkResult,
+    *,
+    reused_count_decisions: Mapping[str, CountDecision] | None = None,
+) -> _OOFFoldWorkResult:
+    if not isinstance(result, _OOFFoldWorkResult) or result.task != expected_task:
+        raise ValueError("OOF worker task identity mismatch")
+    _training_ids, validation_ids = _head_fold_populations(
+        data.assignments, expected_task.fold
+    )
+    row_ids = tuple(row.chain_id for row in result.rows)
+    decision_ids = tuple(chain_id for chain_id, _decision in result.count_decisions)
+    if (
+        row_ids != validation_ids
+        or decision_ids != validation_ids
+        or any(row.fold != expected_task.fold for row in result.rows)
+    ):
+        raise ValueError("OOF worker fold population mismatch")
+    decisions = dict(result.count_decisions)
+    if len(decisions) != len(result.count_decisions):
+        raise ValueError("OOF worker returned duplicate count decisions")
+    if expected_task.reuse_count_decisions != (reused_count_decisions is not None):
+        raise ValueError("OOF worker reused count decision mode mismatch")
+    for row in result.rows:
+        decision = decisions[row.chain_id]
+        if (
+            not isinstance(decision, CountDecision)
+            or row.selected_count != decision.selected_count
+            or row.count_borda_score != decision.borda_score
+            or row.count_tie_break != decision.tie_break
+        ):
+            raise ValueError("OOF worker row/count decision mismatch")
+        if (
+            reused_count_decisions is not None
+            and decision != reused_count_decisions[row.chain_id]
+        ):
+            raise ValueError("OOF worker changed a reused count decision")
+    _render_oof(result.rows)
+    return result
+
+
+def _combine_oof_fold_results(
+    data: VerifiedTrainingData,
+    tasks: Sequence[_OOFFoldTask],
+    results: Mapping[_OOFFoldTask, _OOFFoldWorkResult],
+    *,
+    reused_count_decisions: Mapping[str, CountDecision] | None = None,
+) -> OOFResult:
+    ordered_tasks = tuple(sorted(tasks, key=lambda task: task.fold))
+    if (
+        len(ordered_tasks) != 5
+        or {task.fold for task in ordered_tasks} != set(range(5))
+        or set(results) != set(ordered_tasks)
+    ):
+        raise ValueError("OOF fold task results are incomplete or unexpected")
+    rows: list[OOFRow] = []
+    count_decisions: dict[str, CountDecision] = {}
+    for task in ordered_tasks:
+        result = _validate_oof_fold_work_result(
+            data,
+            task,
+            results[task],
+            reused_count_decisions=reused_count_decisions,
+        )
+        rows.extend(result.rows)
+        for chain_id, decision in result.count_decisions:
+            if chain_id in count_decisions:
+                raise ValueError("OOF count decisions contain duplicate chain IDs")
+            count_decisions[chain_id] = decision
+    all_ids = {assignment.chain_id for assignment in data.assignments}
     ordered = tuple(sorted(rows, key=lambda row: row.chain_id))
     if {row.chain_id for row in ordered} != all_ids or len(ordered) != len(all_ids):
         raise ValueError("OOF rows do not cover exact accepted chains")
@@ -2033,6 +2149,96 @@ def generate_oof(
         raise ValueError("OOF count decisions do not cover exact accepted chains")
     csv_bytes = _render_oof(ordered)
     return OOFResult(ordered, count_decisions, csv_bytes, _sha256_bytes(csv_bytes))
+
+
+def generate_oof(
+    data: VerifiedTrainingData,
+    retained_families: Sequence[str],
+    count_params: Hyperparameters,
+    candidate_params: Hyperparameters,
+    *,
+    seed: int = 37,
+    jobs: int = 1,
+    reused_count_decisions: Mapping[str, CountDecision] | None = None,
+) -> OOFResult:
+    global _OOF_WORKER_CONTEXT
+
+    jobs = validate_training_jobs(jobs)
+    families = validate_retained_families(retained_families)
+    assignments = data.assignments
+    all_ids = {assignment.chain_id for assignment in assignments}
+    metadata = {entry.entry_id: entry for entry in data.metadata}
+    if set(metadata) != all_ids or len(assignments) != len(all_ids):
+        raise ValueError("OOF metadata/fold populations disagree")
+    if reused_count_decisions is not None and set(reused_count_decisions) != all_ids:
+        raise ValueError("reused count decisions do not cover exact accepted chains")
+    tasks = tuple(
+        _OOFFoldTask(
+            fold,
+            families,
+            count_params,
+            candidate_params,
+            seed,
+            reused_count_decisions is not None,
+        )
+        for fold in range(5)
+    )
+    results: dict[_OOFFoldTask, _OOFFoldWorkResult] = {}
+    if jobs == 1:
+        for task in tasks:
+            result = _generate_oof_fold(data, task, reused_count_decisions)
+            results[task] = _validate_oof_fold_work_result(
+                data,
+                task,
+                result,
+                reused_count_decisions=reused_count_decisions,
+            )
+    else:
+        mp_context = _fork_context()
+        if _OOF_WORKER_CONTEXT is not None:
+            raise RuntimeError("OOF worker context is already active")
+        _OOF_WORKER_CONTEXT = _OOFWorkerContext(data, reused_count_decisions)
+        executor = ProcessPoolExecutor(
+            max_workers=min(jobs, len(tasks)), mp_context=mp_context
+        )
+        futures = {}
+        try:
+            futures = {
+                executor.submit(_run_oof_fold_task, task): task for task in tasks
+            }
+            try:
+                for future in as_completed(futures):
+                    expected_task = futures[future]
+                    result = _validate_oof_fold_work_result(
+                        data,
+                        expected_task,
+                        future.result(),
+                        reused_count_decisions=reused_count_decisions,
+                    )
+                    if result.task in results:
+                        raise ValueError("OOF worker returned a duplicate task")
+                    results[result.task] = result
+                    print(
+                        "factorized-training oof "
+                        f"family={families[-1]} completed={len(results)}/5",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+            except BaseException:
+                for future in futures:
+                    future.cancel()
+                executor.shutdown(wait=True, cancel_futures=True)
+                raise
+            else:
+                executor.shutdown(wait=True)
+        finally:
+            _OOF_WORKER_CONTEXT = None
+    return _combine_oof_fold_results(
+        data,
+        tasks,
+        results,
+        reused_count_decisions=reused_count_decisions,
+    )
 
 
 def _canonical_json_bytes(value: object) -> bytes:
@@ -2419,6 +2625,7 @@ def run_grouped_training(
             retained_count_params,
             retained_candidate_params,
             seed=seed,
+            jobs=jobs,
         )
         stage_records: list[dict[str, object]] = [
             {
@@ -2519,6 +2726,7 @@ def run_grouped_training(
             proposed_count_params,
             proposed_candidate_params,
             seed=seed,
+            jobs=jobs,
             reused_count_decisions=reused_count,
         )
         previous_by_id = {row.chain_id: row for row in retained_oof.rows}
@@ -2653,6 +2861,7 @@ def run_grouped_training(
         retained_count_params,
         retained_candidate_params,
         seed=seed,
+        jobs=jobs,
     )
     if final_oof.csv_bytes != retained_oof.csv_bytes:
         raise ValueError("fresh final OOF does not match last retained stage")

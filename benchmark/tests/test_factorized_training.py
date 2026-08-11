@@ -756,6 +756,192 @@ def test_fixture_oof_is_complete_and_regrets_decompose() -> None:
     assert hashlib.sha256(oof.csv_bytes).hexdigest() == oof.sha256
 
 
+@pytest.mark.skipif(
+    "fork" not in multiprocessing.get_all_start_methods(), reason="fork required"
+)
+def test_parallel_oof_matches_sequential_bytes_and_decisions() -> None:
+    data = load_verified_training_data(
+        FIXTURES / "factorized_corpus", FIXTURES / "factorized_folds.json"
+    )
+    sequential = generate_oof(
+        data, ("base",), MODEL_GRID[0], MODEL_GRID[0], jobs=1
+    )
+    parallel = generate_oof(
+        data, ("base",), MODEL_GRID[0], MODEL_GRID[0], jobs=8
+    )
+    assert parallel == sequential
+    assert parallel.csv_bytes == sequential.csv_bytes
+    assert parallel.sha256 == sequential.sha256
+    assert parallel.count_decisions == sequential.count_decisions
+
+
+@pytest.mark.skipif(
+    "fork" not in multiprocessing.get_all_start_methods(), reason="fork required"
+)
+def test_parallel_oof_is_repeatable_with_reused_count_decisions() -> None:
+    data = load_verified_training_data(
+        FIXTURES / "factorized_corpus", FIXTURES / "factorized_folds.json"
+    )
+    reference = generate_oof(
+        data, ("base",), MODEL_GRID[0], MODEL_GRID[0], jobs=1
+    )
+    sequential = generate_oof(
+        data,
+        ("base",),
+        MODEL_GRID[0],
+        MODEL_GRID[0],
+        jobs=1,
+        reused_count_decisions=reference.count_decisions,
+    )
+    first = generate_oof(
+        data,
+        ("base",),
+        MODEL_GRID[0],
+        MODEL_GRID[0],
+        jobs=8,
+        reused_count_decisions=reference.count_decisions,
+    )
+    second = generate_oof(
+        data,
+        ("base",),
+        MODEL_GRID[0],
+        MODEL_GRID[0],
+        jobs=8,
+        reused_count_decisions=reference.count_decisions,
+    )
+    assert first == second == sequential
+    assert first.csv_bytes == second.csv_bytes == sequential.csv_bytes
+
+
+def test_oof_combination_ignores_worker_completion_order() -> None:
+    data = load_verified_training_data(
+        FIXTURES / "factorized_corpus", FIXTURES / "factorized_folds.json"
+    )
+    tasks = tuple(
+        training._OOFFoldTask(
+            fold, ("base",), MODEL_GRID[0], MODEL_GRID[0], 37, False
+        )
+        for fold in range(5)
+    )
+    canonical = {
+        task: training._generate_oof_fold(data, task, None) for task in tasks
+    }
+    reversed_results = dict(reversed(tuple(canonical.items())))
+    assert training._combine_oof_fold_results(
+        data, tasks, reversed_results
+    ) == training._combine_oof_fold_results(data, tasks, canonical)
+
+
+def test_oof_parent_rejects_changed_reused_count_decision() -> None:
+    data = load_verified_training_data(
+        FIXTURES / "factorized_corpus", FIXTURES / "factorized_folds.json"
+    )
+    reference = generate_oof(
+        data, ("base",), MODEL_GRID[0], MODEL_GRID[0], jobs=1
+    )
+    task = training._OOFFoldTask(
+        0, ("base",), MODEL_GRID[0], MODEL_GRID[0], 37, True
+    )
+    work = training._generate_oof_fold(data, task, reference.count_decisions)
+    chain_id, decision = work.count_decisions[0]
+    changed_decision = replace(
+        decision,
+        selected_count=decision.selected_count + 1,
+        borda_score=decision.borda_score + 0.125,
+    )
+    changed_rows = tuple(
+        replace(
+            row,
+            selected_count=changed_decision.selected_count,
+            count_borda_score=changed_decision.borda_score,
+        )
+        if row.chain_id == chain_id
+        else row
+        for row in work.rows
+    )
+    changed_decisions = tuple(
+        (observed_id, changed_decision if observed_id == chain_id else observed)
+        for observed_id, observed in work.count_decisions
+    )
+    changed = replace(
+        work, rows=changed_rows, count_decisions=changed_decisions
+    )
+    with pytest.raises(ValueError, match="reused count decision"):
+        training._validate_oof_fold_work_result(
+            data,
+            task,
+            changed,
+            reused_count_decisions=reference.count_decisions,
+        )
+
+
+@pytest.mark.skipif(
+    "fork" not in multiprocessing.get_all_start_methods(), reason="fork required"
+)
+def test_parallel_oof_worker_failure_returns_no_partial_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data = load_verified_training_data(
+        FIXTURES / "factorized_corpus", FIXTURES / "factorized_folds.json"
+    )
+    monkeypatch.setattr(training, "fit_head", _always_fail_fit)
+    with pytest.raises(RuntimeError, match="injected worker failure"):
+        generate_oof(
+            data, ("base",), MODEL_GRID[0], MODEL_GRID[0], jobs=8
+        )
+
+
+def test_grouped_training_forwards_jobs_to_final_oof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = load_verified_training_data(
+        FIXTURES / "factorized_corpus", FIXTURES / "factorized_folds.json"
+    )
+    retained_oof = generate_oof(
+        data, ("base",), MODEL_GRID[0], MODEL_GRID[0], jobs=1
+    )
+    restored = training.TrainingStageState(
+        completed_family_index=len(FEATURE_FAMILY_ORDER) - 1,
+        retained_families=("base",),
+        count_params=MODEL_GRID[0],
+        candidate_params=MODEL_GRID[0],
+        retained_oof=retained_oof,
+        stage_records=(),
+        grid_history=(),
+    )
+
+    class RestoredStore:
+        def load_stage(self, _accepted_ids: tuple[str, ...]) -> object:
+            return restored
+
+    observed: list[int] = []
+
+    def capture_oof(
+        _data: object,
+        _families: tuple[str, ...],
+        _count_params: Hyperparameters,
+        _candidate_params: Hyperparameters,
+        *,
+        seed: int,
+        jobs: int,
+        reused_count_decisions: object = None,
+    ) -> OOFResult:
+        assert seed == 37
+        assert reused_count_decisions is None
+        observed.append(jobs)
+        return retained_oof
+
+    monkeypatch.setattr(training, "generate_oof", capture_oof)
+    training.run_grouped_training(
+        data,
+        tmp_path / "out",
+        ["benchmark.train_factorized_ranker", "--jobs", "8"],
+        jobs=8,
+        checkpoint_store=RestoredStore(),  # type: ignore[arg-type]
+    )
+    assert observed == [8]
+
+
 def test_training_argv_roles_and_model_outputs_are_all_or_none(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
