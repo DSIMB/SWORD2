@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import math
 import os
 import re
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 
@@ -35,6 +36,7 @@ class ToolRunResult:
     peak_rss_mb: float | None
     stdout: str
     stderr: str
+    peak_rss_kb: int | None = None
 
 
 _RSS_RE = re.compile(r"Maximum resident set size \(kbytes\):\s*(\d+)")
@@ -58,6 +60,23 @@ def parse_peak_rss_mb(time_stderr: str) -> float | None:
     if not match:
         return None
     return int(match.group(1)) / 1024.0
+
+
+def parse_locked_peak_rss_kb(time_stderr: str) -> int:
+    labels = [
+        line
+        for line in time_stderr.splitlines()
+        if "Maximum resident set size" in line
+    ]
+    if len(labels) != 1:
+        raise ValueError("locked GNU time evidence must contain exactly one RSS line")
+    match = re.fullmatch(r"\s*Maximum resident set size \(kbytes\):\s*(\d+)\s*", labels[0])
+    if match is None:
+        raise ValueError("locked GNU time RSS line has the wrong label or unit")
+    value = int(match.group(1))
+    if value <= 0:
+        raise ValueError("locked GNU time RSS must be positive")
+    return value
 
 
 def ensure_cuda_available(python: Path, cwd: Path) -> None:
@@ -109,12 +128,34 @@ def run_timed(
         check=False,
     )
     runtime_s = time.perf_counter() - start
+    peak_rss_mb = parse_peak_rss_mb(completed.stderr)
     return ToolRunResult(
         command=command,
         cwd=cwd.resolve(),
         returncode=completed.returncode,
         runtime_s=runtime_s,
-        peak_rss_mb=parse_peak_rss_mb(completed.stderr),
+        peak_rss_mb=peak_rss_mb,
         stdout=completed.stdout,
         stderr=completed.stderr,
+        peak_rss_kb=(
+            int(round(peak_rss_mb * 1024))
+            if peak_rss_mb is not None
+            else None
+        ),
+    )
+
+
+def run_timed_locked(
+    command: list[str],
+    cwd: Path,
+    env: dict[str, str],
+) -> ToolRunResult:
+    result = run_timed(command, cwd=cwd, env=env, timeout_s=None)
+    if not math.isfinite(result.runtime_s) or result.runtime_s <= 0:
+        raise ValueError("locked wall duration must be finite and positive")
+    peak_rss_kb = parse_locked_peak_rss_kb(result.stderr)
+    return replace(
+        result,
+        peak_rss_kb=peak_rss_kb,
+        peak_rss_mb=peak_rss_kb / 1024.0,
     )

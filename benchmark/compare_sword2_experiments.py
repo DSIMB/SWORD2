@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 
 import pandas as pd
+
+from benchmark.stats import paired_chain_bootstrap
 
 
 DEFAULT_BASELINE_PATH = Path("benchmark/results_rust_original/scores.csv")
@@ -70,8 +73,16 @@ NON_METRIC_COLUMNS = {
 }
 
 
-def _select_variant(scores: pd.DataFrame, tool: str, variant: str) -> pd.DataFrame:
+def _select_variant(
+    scores: pd.DataFrame,
+    tool: str,
+    variant: str,
+    *,
+    reject_duplicates: bool = False,
+) -> pd.DataFrame:
     selected = scores[(scores["tool"] == tool) & (scores["variant"] == variant)]
+    if reject_duplicates and selected["entry_id"].duplicated(keep=False).any():
+        raise ValueError("paired CI input contains duplicate entry rows")
     return selected.drop_duplicates(subset=["entry_id"], keep="last").set_index("entry_id")
 
 
@@ -132,14 +143,27 @@ def compare_experiment_scores(
     *,
     tool: str = "sword2-rust",
     variant: str = "optimal",
+    paired_ci: bool = False,
+    bootstrap_replicates: int = 10_000,
+    bootstrap_seed: int = 37,
 ) -> list[dict[str, object]]:
     """Return paired score deltas for experiment score tables against a baseline."""
     metric_names = metrics or discover_numeric_metrics(baseline, experiments)
-    baseline_rows = _select_variant(baseline, tool, variant)
+    baseline_rows = _select_variant(
+        baseline,
+        tool,
+        variant,
+        reject_duplicates=paired_ci,
+    )
     rows: list[dict[str, object]] = []
 
     for experiment_name, experiment_scores in experiments.items():
-        experiment_rows = _select_variant(experiment_scores, tool, variant)
+        experiment_rows = _select_variant(
+            experiment_scores,
+            tool,
+            variant,
+            reject_duplicates=paired_ci,
+        )
         for metric in metric_names:
             if metric not in baseline_rows.columns or metric not in experiment_rows.columns:
                 continue
@@ -150,14 +174,28 @@ def compare_experiment_scores(
                 lsuffix="_baseline",
                 rsuffix="_experiment",
             )
-            paired = paired.dropna()
+            if not paired_ci:
+                paired = paired.dropna()
             if paired.empty:
+                if paired_ci:
+                    raise ValueError("paired CI has no common entry IDs")
                 continue
 
             baseline_col = f"{metric}_baseline"
             experiment_col = f"{metric}_experiment"
             baseline_values = pd.to_numeric(paired[baseline_col], errors="coerce")
             experiment_values = pd.to_numeric(paired[experiment_col], errors="coerce")
+            if paired_ci:
+                try:
+                    finite = baseline_values.map(
+                        lambda value: math.isfinite(float(value))
+                    ).all() and experiment_values.map(
+                        lambda value: math.isfinite(float(value))
+                    ).all()
+                except (TypeError, ValueError) as error:
+                    raise ValueError("paired CI inputs must be finite") from error
+                if not finite:
+                    raise ValueError("paired CI inputs must be finite")
             deltas = experiment_values - baseline_values
             ties = deltas.abs() <= EPSILON
             direction = metric_direction(metric)
@@ -171,8 +209,7 @@ def compare_experiment_scores(
                 experiment_better = None
                 baseline_better = None
 
-            rows.append(
-                {
+            row: dict[str, object] = {
                     "experiment": experiment_name,
                     "metric": metric,
                     "better_when": direction,
@@ -188,7 +225,29 @@ def compare_experiment_scores(
                     if experiment_better is None
                     else float(experiment_better.mean()),
                 }
-            )
+            if paired_ci:
+                if direction == "neutral":
+                    higher_is_better = True
+                else:
+                    higher_is_better = direction == "higher"
+                bootstrap = paired_chain_bootstrap(
+                    baseline_values.to_dict(),
+                    experiment_values.to_dict(),
+                    n_resamples=bootstrap_replicates,
+                    seed=bootstrap_seed,
+                    higher_is_better=higher_is_better,
+                )
+                if bootstrap.n != len(paired):
+                    raise ValueError("paired CI denominator mismatch")
+                row.update(
+                    {
+                        "mean_delta_ci_low": bootstrap.ci_low,
+                        "mean_delta_ci_high": bootstrap.ci_high,
+                        "bootstrap_replicates": bootstrap_replicates,
+                        "bootstrap_seed": bootstrap_seed,
+                    }
+                )
+            rows.append(row)
 
     return rows
 
@@ -401,6 +460,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-n", type=int, default=10, help="Number of largest absolute changes to show")
     parser.add_argument("--tool", default="sword2-rust")
     parser.add_argument("--variant", default="optimal")
+    parser.add_argument("--paired-ci", action="store_true")
+    parser.add_argument("--bootstrap-replicates", type=int, default=10_000)
+    parser.add_argument("--bootstrap-seed", type=int, default=37)
     return parser.parse_args()
 
 
@@ -435,6 +497,9 @@ def main() -> int:
         metrics=metrics,
         tool=args.tool,
         variant=args.variant,
+        paired_ci=args.paired_ci,
+        bootstrap_replicates=args.bootstrap_replicates,
+        bootstrap_seed=args.bootstrap_seed,
     )
     results = pd.DataFrame(rows)
     if args.out:

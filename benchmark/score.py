@@ -82,6 +82,41 @@ class RunRow:
 
 
 @dataclass(frozen=True)
+class LockedRunRow:
+    dataset: str
+    entry_id: str
+    pdb_id: str
+    chain_id: str
+    tool: str
+    selector_variant: str
+    locked_role: str
+    pair_order: str
+    pair_position: int | str
+    reused_output: bool
+    returncode: int | None
+    runtime_s: float | None
+    peak_rss_kb: int | None
+    command_json: str
+    normalized_command_json: str
+    cwd_role: str
+    input_structure_sha256: str
+    raw_summary_role: str
+    raw_summary_sha256: str
+    stdout_sha256: str
+    stderr_sha256: str
+    selector_status_sha256: str
+    requested_selector: str
+    selector_used: str
+    fallback: bool | str
+    error_code: str
+    selector_warning_code: str
+    excluded_candidate_count: int | str
+    binary_sha256: str
+    model_manifest_sha256: str
+    runtime_manifest_sha256: str
+
+
+@dataclass(frozen=True)
 class FailureRow:
     dataset: str
     entry_id: str
@@ -216,6 +251,10 @@ def write_scores_csv(rows: list[ScoreRow], path: Path) -> None:
 
 def write_runs_csv(rows: list[RunRow], path: Path) -> None:
     _write_dataclass_csv(rows, path, RunRow)
+
+
+def write_locked_runs_csv(rows: list[LockedRunRow], path: Path) -> None:
+    _write_dataclass_csv(rows, path, LockedRunRow)
 
 
 def write_failures_csv(rows: list[FailureRow], path: Path) -> None:

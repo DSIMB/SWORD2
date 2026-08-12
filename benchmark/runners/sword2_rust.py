@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 from dataclasses import dataclass
@@ -11,7 +12,7 @@ from benchmark.numbering import (
     map_sword2_chopping,
     read_sword2_residue_mapping,
 )
-from benchmark.runners.base import PartitionPrediction, ToolRunResult, run_timed
+from benchmark.runners.base import PartitionPrediction, ToolRunResult, run_timed, run_timed_locked
 
 
 _ALT_RE = re.compile(r"Alternative partition (\d+)")
@@ -94,11 +95,16 @@ class Sword2RustRunner:
     threads: int | None = None
     experiments: str | None = None
     extra_args: str | None = None
+    fresh_only: bool = False
+    locked_env: dict[str, str] | None = None
+    selector_status_path: Path | None = None
 
     def run(self, structure_file: Path, output_dir: Path) -> ToolRunResult:
         structure_file = structure_file.resolve()
         output_dir = output_dir.resolve()
         if output_dir.exists():
+            if self.fresh_only:
+                raise FileExistsError(f"locked SWORD output already exists: {output_dir}")
             shutil.rmtree(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         command = [str(self.binary.resolve()), "-i", str(structure_file), "-o", str(output_dir)]
@@ -106,6 +112,20 @@ class Sword2RustRunner:
             command.extend(["-j", str(self.threads)])
         if self.extra_args:
             command.extend(self.extra_args.split())
+        environment: dict[str, str] = dict(self.locked_env or {})
+        if self.selector_status_path is not None:
+            status_path = self.selector_status_path.absolute()
+            if self.fresh_only and status_path.parent != output_dir:
+                raise ValueError("locked selector status must be inside its fresh process directory")
+            if status_path.exists():
+                raise FileExistsError(f"selector status already exists: {status_path}")
+            environment["SWORD2_SELECTOR_STATUS"] = os.fspath(status_path)
+        if self.fresh_only:
+            if self.selector_status_path is None:
+                raise ValueError("locked SWORD execution requires a selector-status path")
+            return run_timed_locked(command, cwd=self.repo_dir, env=environment)
         if self.experiments:
             return run_timed(command, cwd=self.repo_dir, env={"SWORD2_EXPERIMENTS": self.experiments})
+        if environment:
+            return run_timed(command, cwd=self.repo_dir, env=environment)
         return run_timed(command, cwd=self.repo_dir)
