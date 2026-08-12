@@ -1111,7 +1111,7 @@ For each normal run, compare `residue_quality.json` bytes with the read-only ins
 
 - [ ] **Step 5: Recompute the CATH-17287 input-only profile**
 
-Run the new eligibility creator with `--jobs 32` into a temporary absent path. Require exactly 17,287 identities, exact accounting, deterministic byte identity across a second location, and reconcile the known 591-chain incomplete set without reading any CATH-663 input. Record counts/hashes in the local report.
+Run the new eligibility creator with `--jobs 32` into a temporary absent path. Require exactly 17,286 identities for the current hash-frozen external metadata (the historical `CATH-17287` name is not its row count), exact accounting, deterministic byte identity across a second location, and reconcile against the prior 591-chain incomplete diagnostic without reading any CATH-663 input. Record counts/hashes in the local report and explain any diagnostic-count difference rather than forcing the stale nominal count.
 
 - [ ] **Step 6: Remove only temporary development artifacts**
 

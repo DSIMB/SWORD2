@@ -38,6 +38,12 @@ This is a model-validity decision, not a claim that the entire biological
 structure is useless. Gap-tolerant learned inference requires a separately
 trained and calibrated model version.
 
+The external metadata file retains the historical `CATH-17287` dataset name but
+currently contains 17,286 nonblank identities. Its SHA-256 and that exact count
+already agree with the frozen development corpus (10,573 accepted plus 6,713
+rejected), so validation uses the hash-bound row population rather than treating
+the name as a row-count assertion.
+
 ## Goals
 
 1. Give the frozen model only the structural representation on which its feature
