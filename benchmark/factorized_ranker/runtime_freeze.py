@@ -28,7 +28,7 @@ from benchmark.factorized_ranker.folds import (
 from benchmark.factorized_ranker.model_artifact import verify_top_level_manifest
 
 
-RUNTIME_FREEZE_SCHEMA_VERSION = 1
+RUNTIME_FREEZE_SCHEMA_VERSION = 2
 
 BUILD_PROFILE = "release"
 BUILD_COMMAND = ["cargo", "build", "--locked", "--release", "--bin", "sword2"]
@@ -75,7 +75,7 @@ MODEL_ARTIFACT_FIELDS = (
     "generated_rust_sha256",
 )
 
-EVIDENCE_TOOL_PATHS = (
+EVIDENCE_TOOL_PATHS_V1 = (
     "benchmark/factorized_ranker/runtime_freeze.py",
     "benchmark/freeze_factorized_runtime.py",
     "benchmark/evaluate_factorized_acceptance.py",
@@ -90,6 +90,16 @@ EVIDENCE_TOOL_PATHS = (
     "benchmark/stats.py",
     "benchmark/structures.py",
 )
+EVIDENCE_TOOL_PATHS_V2 = tuple(
+    sorted(
+        {
+            *EVIDENCE_TOOL_PATHS_V1,
+            "benchmark/factorized_ranker/eligibility.py",
+            "benchmark/freeze_factorized_eligibility.py",
+        }
+    )
+)
+EVIDENCE_TOOL_PATHS = EVIDENCE_TOOL_PATHS_V2
 
 _TABLE_FIELDS: dict[str, Sequence[str]] = {
     "chains": CHAIN_FIELDS,
@@ -726,6 +736,7 @@ def _build_payload(
     binary: Path,
     repo_root: Path,
     runtime_source_git_commit: str,
+    schema_version: int = RUNTIME_FREEZE_SCHEMA_VERSION,
 ) -> dict[str, object]:
     repo_root = Path(repo_root).resolve(strict=True)
     model_info = Path(model_manifest_path).lstat()
@@ -750,9 +761,10 @@ def _build_payload(
         runtime_paths,
         runtime_roots=True,
     )
+    evidence_tool_paths = _evidence_tool_paths(schema_version)
     evidence_hashes, evidence_tree_hash = _hash_git_inputs(
         repo_root,
-        EVIDENCE_TOOL_PATHS,
+        evidence_tool_paths,
         runtime_roots=False,
     )
     binary_info = Path(binary).lstat()
@@ -774,7 +786,7 @@ def _build_payload(
         for field in MODEL_ARTIFACT_FIELDS
     }
     payload: dict[str, object] = {
-        "schema_version": RUNTIME_FREEZE_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "model_manifest_sha256": model_manifest_hash,
         "model_source_git_commit": model_manifest["source_git_commit"],
         "model_artifact_sha256s": artifact_hashes,
@@ -806,7 +818,7 @@ def _build_payload(
     )
     current_evidence_hashes, current_evidence_tree = _hash_git_inputs(
         repo_root,
-        EVIDENCE_TOOL_PATHS,
+        evidence_tool_paths,
         runtime_roots=False,
     )
     if (
@@ -845,11 +857,19 @@ def create_runtime_freeze(
     )
 
 
+def _evidence_tool_paths(schema_version: int) -> tuple[str, ...]:
+    if schema_version == 1:
+        return EVIDENCE_TOOL_PATHS_V1
+    if schema_version == 2:
+        return EVIDENCE_TOOL_PATHS_V2
+    raise ValueError("unsupported runtime freeze schema version")
+
+
 def _validate_runtime_payload(payload: Mapping[str, object]) -> None:
     if set(payload) != RUNTIME_FREEZE_KEYS:
         raise ValueError("runtime freeze top-level schema mismatch")
-    if _require_plain_int(payload["schema_version"], "schema version", 1) != 1:
-        raise ValueError("unsupported runtime freeze schema version")
+    schema_version = _require_plain_int(payload["schema_version"], "schema version", 1)
+    evidence_tool_paths = _evidence_tool_paths(schema_version)
     for field in (
         "model_manifest_sha256",
         "runtime_input_tree_sha256",
@@ -885,7 +905,7 @@ def _validate_runtime_payload(payload: Mapping[str, object]) -> None:
         for name in payload[field]:
             if _canonical_relative_path(name) != name or Path(name).as_posix() != name:
                 raise ValueError(f"{field} contains a noncanonical path")
-    if set(payload["evidence_tool_sha256s"]) != set(EVIDENCE_TOOL_PATHS):
+    if set(payload["evidence_tool_sha256s"]) != set(evidence_tool_paths):
         raise ValueError("runtime evidence-tool path set mismatch")
     development = payload["development_population"]
     expected_development = {
@@ -1014,6 +1034,7 @@ def verify_runtime_freeze(
         binary=binary,
         repo_root=root,
         runtime_source_git_commit=runtime_commit,
+        schema_version=int(payload["schema_version"]),
     )
     if payload != expected:
         raise ValueError("runtime freeze no longer matches model/source/tool/binary inputs")
@@ -1024,6 +1045,8 @@ __all__ = [
     "BUILD_COMMAND",
     "CACHE_CONTRACT",
     "EVIDENCE_TOOL_PATHS",
+    "EVIDENCE_TOOL_PATHS_V1",
+    "EVIDENCE_TOOL_PATHS_V2",
     "RUNTIME_FREEZE_SCHEMA_VERSION",
     "canonical_id_set_hash",
     "canonical_json_bytes",

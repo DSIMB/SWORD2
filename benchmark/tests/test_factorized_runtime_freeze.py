@@ -7,41 +7,49 @@ from pathlib import Path
 
 import pytest
 
+import benchmark.factorized_ranker.runtime_freeze as runtime_freeze_module
 from benchmark.factorized_ranker.runtime_freeze import (
     BUILD_COMMAND,
     CACHE_CONTRACT,
-    EVIDENCE_TOOL_PATHS,
+    EVIDENCE_TOOL_PATHS_V1,
+    EVIDENCE_TOOL_PATHS_V2,
     MODEL_ARTIFACT_FIELDS,
+    RUNTIME_FREEZE_SCHEMA_VERSION,
     canonical_id_set_hash,
     canonical_json_bytes,
     hash_directory_tree,
     hash_file_or_tree,
+    verify_runtime_freeze,
     write_runtime_freeze,
 )
 
 
-def _runtime_payload() -> dict[str, object]:
+def _tree_hash(mapping: dict[str, str]) -> str:
+    value = hashlib.sha256()
+    for name, item in sorted(mapping.items()):
+        name_bytes = name.encode()
+        item_bytes = item.encode()
+        value.update(len(name_bytes).to_bytes(8, "big"))
+        value.update(name_bytes)
+        value.update(len(item_bytes).to_bytes(8, "big"))
+        value.update(item_bytes)
+    return value.hexdigest()
+
+
+def _runtime_payload(schema_version: int = 1) -> dict[str, object]:
     digest = "a" * 64
     runtime_inputs = {"Cargo.lock": digest, "Cargo.toml": "b" * 64}
+    evidence_paths = (
+        EVIDENCE_TOOL_PATHS_V1 if schema_version == 1 else EVIDENCE_TOOL_PATHS_V2
+    )
     evidence_inputs = {
         name: hashlib.sha256(name.encode()).hexdigest()
-        for name in EVIDENCE_TOOL_PATHS
+        for name in evidence_paths
     }
-
-    def tree_hash(mapping: dict[str, str]) -> str:
-        value = hashlib.sha256()
-        for name, item in sorted(mapping.items()):
-            name_bytes = name.encode()
-            item_bytes = item.encode()
-            value.update(len(name_bytes).to_bytes(8, "big"))
-            value.update(name_bytes)
-            value.update(len(item_bytes).to_bytes(8, "big"))
-            value.update(item_bytes)
-        return value.hexdigest()
 
     population_hash = "d" * 64
     return {
-        "schema_version": 1,
+        "schema_version": schema_version,
         "model_manifest_sha256": "e" * 64,
         "model_source_git_commit": "1" * 40,
         "model_artifact_sha256s": {
@@ -70,9 +78,9 @@ def _runtime_payload() -> dict[str, object]:
         },
         "runtime_source_git_commit": "2" * 40,
         "runtime_input_sha256s": runtime_inputs,
-        "runtime_input_tree_sha256": tree_hash(runtime_inputs),
+        "runtime_input_tree_sha256": _tree_hash(runtime_inputs),
         "evidence_tool_sha256s": evidence_inputs,
-        "evidence_tool_tree_sha256": tree_hash(evidence_inputs),
+        "evidence_tool_tree_sha256": _tree_hash(evidence_inputs),
         "cargo_lock_sha256": digest,
         "rustc_version_verbose": "rustc test\nhost: x86_64-unknown-linux-gnu",
         "cargo_version": "cargo test",
@@ -89,6 +97,58 @@ def _runtime_payload() -> dict[str, object]:
         "binary_sha256": "8" * 64,
         "selector_cache_contract": CACHE_CONTRACT,
     }
+
+
+def test_runtime_v2_binds_eligibility_tools_and_v1_keeps_its_original_path_set(
+    tmp_path: Path,
+):
+    assert RUNTIME_FREEZE_SCHEMA_VERSION == 2
+    assert set(EVIDENCE_TOOL_PATHS_V2) == {
+        *EVIDENCE_TOOL_PATHS_V1,
+        "benchmark/factorized_ranker/eligibility.py",
+        "benchmark/freeze_factorized_eligibility.py",
+    }
+
+    created = _runtime_payload(schema_version=2)
+    assert created["schema_version"] == 2
+    assert set(created["evidence_tool_sha256s"]) == set(EVIDENCE_TOOL_PATHS_V2)
+    write_runtime_freeze(tmp_path / "v2.json", created)
+
+    legacy = _runtime_payload(schema_version=1)
+    assert set(legacy["evidence_tool_sha256s"]) == set(EVIDENCE_TOOL_PATHS_V1)
+    write_runtime_freeze(tmp_path / "v1.json", legacy)
+
+
+def test_runtime_schema_and_new_tool_hash_tampering_are_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    legacy_relabelled = _runtime_payload(schema_version=1)
+    legacy_relabelled["schema_version"] = 2
+    with pytest.raises(ValueError, match="path set"):
+        write_runtime_freeze(tmp_path / "legacy-relabelled.json", legacy_relabelled)
+
+    expected = _runtime_payload(schema_version=2)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    binary = tmp_path / "sword2"
+    binary.write_bytes(b"binary\n")
+    monkeypatch.setattr(runtime_freeze_module, "_require_ancestor", lambda *_args: None)
+    monkeypatch.setattr(
+        runtime_freeze_module, "_build_payload", lambda **_kwargs: expected
+    )
+    for tool in (
+        "benchmark/factorized_ranker/eligibility.py",
+        "benchmark/freeze_factorized_eligibility.py",
+    ):
+        tampered = _runtime_payload(schema_version=2)
+        tampered["evidence_tool_sha256s"][tool] = "f" * 64
+        tampered["evidence_tool_tree_sha256"] = _tree_hash(
+            tampered["evidence_tool_sha256s"]
+        )
+        path = tmp_path / f"tampered-{Path(tool).name}.json"
+        write_runtime_freeze(path, tampered)
+        with pytest.raises(ValueError, match="no longer matches"):
+            verify_runtime_freeze(path, binary=binary, repo_root=repo)
 
 
 def test_canonical_runtime_helpers_are_root_independent_and_strict(tmp_path: Path):
