@@ -152,6 +152,10 @@ enum Commands {
     /// or residue subset. Prints `Pseudo-energy = …` and `Z-score = …`, one per
     /// line. Useful for scoring a single structure or debugging.
     Score(ScoreArgs),
+
+    /// Inspect whether a structure has the complete backbone evidence required
+    /// by the frozen factorized ranker. Writes canonical JSON to stdout.
+    InspectFactorizedEligibility(InspectFactorizedEligibilityArgs),
 }
 
 /// Arguments for the `score` subcommand.
@@ -182,6 +186,22 @@ struct ScoreArgs {
     residues: Option<String>,
 }
 
+/// Arguments for the read-only factorized structural-eligibility inspector.
+#[derive(Args, Debug)]
+struct InspectFactorizedEligibilityArgs {
+    /// Path to a local PDB/mmCIF structure file.
+    #[arg(long)]
+    input: PathBuf,
+
+    /// Chain to inspect. Defaults to the first SWORD-compatible chain.
+    #[arg(long)]
+    chain: Option<char>,
+
+    /// Structure model serial to inspect.
+    #[arg(long, default_value = "1")]
+    nmr_model: i32,
+}
+
 /// Run the `score` subcommand: load potentials, score the structure, print results.
 fn run_score(args: &ScoreArgs) -> Result<()> {
     if args.cpu > 0 {
@@ -207,6 +227,86 @@ fn run_score(args: &ScoreArgs) -> Result<()> {
             println!("Z-score = {z}");
         }
     }
+    Ok(())
+}
+
+fn select_chain(
+    structure: &pdb::Structure,
+    model_serial: i32,
+    requested_chain: Option<char>,
+) -> Result<&pdb::Chain> {
+    let model = structure
+        .get_model(model_serial)
+        .ok_or_else(|| anyhow::anyhow!("Model {model_serial} not found"))?;
+    if let Some(chain_id) = requested_chain {
+        return model.get_chain(chain_id).ok_or_else(|| {
+            let available = model
+                .chain_ids()
+                .into_iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>();
+            anyhow::anyhow!(
+                "Chain '{chain_id}' not found. Available chains: {}",
+                available.join(", ")
+            )
+        });
+    }
+
+    model
+        .chains
+        .iter()
+        .find(|chain| {
+            chain
+                .residues
+                .iter()
+                .any(pdb::structural_quality::is_sword_candidate_residue)
+        })
+        .or_else(|| model.chains.first())
+        .ok_or_else(|| anyhow::anyhow!("No chains found in model {model_serial}"))
+}
+
+fn structural_quality_bytes(chain: &pdb::Chain) -> Result<Vec<u8>> {
+    pdb::structural_quality::inspect_structural_quality(chain).canonical_json_bytes()
+}
+
+fn write_structural_quality_report(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("structural-quality report path has no file name"))?;
+    let temporary_path = path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
+    let result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary_path)?;
+        file.write_all(bytes)?;
+        file.flush()?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temporary_path, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary_path);
+    }
+    result.with_context(|| {
+        format!(
+            "Failed to write structural-quality report {}",
+            path.display()
+        )
+    })
+}
+
+fn run_inspect_factorized_eligibility(args: &InspectFactorizedEligibilityArgs) -> Result<()> {
+    use std::io::Write as _;
+
+    let structure = pdb::parse_pdb(&args.input)
+        .with_context(|| format!("Failed to parse {}", args.input.display()))?;
+    let chain = select_chain(&structure, args.nmr_model, args.chain)?;
+    std::io::stdout().write_all(&structural_quality_bytes(chain)?)?;
     Ok(())
 }
 
@@ -558,43 +658,11 @@ fn process_entry(
     let structure = pdb::parse_pdb(&input_path)
         .with_context(|| format!("Failed to parse {}", input_path.display()))?;
 
-    // Determine chain
-    let chain_id = if let Some(c) = entry.chain {
-        c
-    } else if let Some(model) = structure.first_model() {
-        // Find the first chain that contains at least one standard amino acid residue
-        if let Some(chain) = model.chains.iter().find(|c| {
-            c.residues
-                .iter()
-                .any(|r| pdb::amino_acids::is_standard(&r.name))
-        }) {
-            tracing::debug!(
-                "No chain specified. Using first protein chain '{}'",
-                chain.id
-            );
-            chain.id
-        } else if let Some(chain) = model.chains.first() {
-            tracing::debug!("No chain specified. Using first chain '{}'", chain.id);
-            chain.id
-        } else {
-            anyhow::bail!("No chains found in the structure");
-        }
-    } else {
-        anyhow::bail!("No models found in the structure");
-    };
-
-    // Verify chain exists
-    let model = structure
-        .first_model()
-        .ok_or_else(|| anyhow::anyhow!("No models found"))?;
-    let chain = model.get_chain(chain_id).ok_or_else(|| {
-        let available: Vec<String> = model.chains.iter().map(|c| c.id.to_string()).collect();
-        anyhow::anyhow!(
-            "Chain '{}' not found. Available chains: {}",
-            chain_id,
-            available.join(", ")
-        )
-    })?;
+    let chain = select_chain(&structure, cli.nmr_model, entry.chain)?;
+    let chain_id = chain.id;
+    if entry.chain.is_none() {
+        tracing::debug!("No chain specified. Using chain '{}'", chain_id);
+    }
 
     let pdb_id_chain = format!("{}_{}", pdb_id_base, chain_id);
     let results_dir = output_dir.join(&pdb_id_chain);
@@ -634,6 +702,8 @@ fn process_entry(
     } else {
         chain
     };
+    let quality_bytes = structural_quality_bytes(chain)?;
+    write_structural_quality_report(&results_dir.join("residue_quality.json"), &quality_bytes)?;
     let (cleaned_chain, original_resnums) = pdb::writer::clean_chain_for_sword(chain);
 
     if cleaned_chain.is_empty() {
@@ -969,8 +1039,12 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Subcommands short-circuit the full pipeline.
-    if let Some(Commands::Score(args)) = &cli.command {
-        return run_score(args);
+    match &cli.command {
+        Some(Commands::Score(args)) => return run_score(args),
+        Some(Commands::InspectFactorizedEligibility(args)) => {
+            return run_inspect_factorized_eligibility(args);
+        }
+        None => {}
     }
 
     setup_logging(cli.verbosity, cli.quiet);
@@ -1114,8 +1188,103 @@ fn resolve_input(
 
 #[cfg(test)]
 mod tests {
-    use super::Cli;
+    use super::{
+        select_chain, structural_quality_bytes, write_structural_quality_report, Cli, Commands,
+        InspectFactorizedEligibilityArgs,
+    };
     use clap::{error::ErrorKind, Parser};
+    use sword2_lib::pdb::{self, Atom, Chain, Model, Point3D, Residue, Structure};
+
+    fn complete_chain(id: char) -> Chain {
+        let mut chain = Chain::new(id);
+        let mut residue = Residue::new("ALA", 42, ' ', id);
+        for name in pdb::structural_quality::REQUIRED_BACKBONE_ATOMS {
+            residue.atoms.push(Atom::new(
+                1,
+                name,
+                ' ',
+                "ALA",
+                id,
+                42,
+                ' ',
+                Point3D::new(1.0, 2.0, 3.0),
+                1.0,
+                10.0,
+                "C",
+                "",
+                false,
+            ));
+        }
+        chain.residues.push(residue);
+        chain
+    }
+
+    #[test]
+    fn parses_factorized_eligibility_inspector() {
+        let cli = Cli::try_parse_from([
+            "sword2",
+            "inspect-factorized-eligibility",
+            "--input",
+            "fixture.pdb",
+            "--chain",
+            "B",
+            "--nmr-model",
+            "2",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::InspectFactorizedEligibility(
+                InspectFactorizedEligibilityArgs {
+                    chain: Some('B'),
+                    nmr_model: 2,
+                    ..
+                }
+            ))
+        ));
+    }
+
+    #[test]
+    fn inspector_and_normal_report_use_identical_bytes() {
+        let chain = complete_chain('A');
+        let direct = pdb::structural_quality::inspect_structural_quality(&chain)
+            .canonical_json_bytes()
+            .unwrap();
+        assert_eq!(structural_quality_bytes(&chain).unwrap(), direct);
+    }
+
+    #[test]
+    fn normal_quality_report_is_exact_and_leaves_no_temporary_file() {
+        let directory = std::env::temp_dir().join(format!(
+            "sword2-structural-quality-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id(),
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("residue_quality.json");
+        let bytes = structural_quality_bytes(&complete_chain('A')).unwrap();
+
+        write_structural_quality_report(&path, &bytes).unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn shared_selection_honors_model_and_chain_and_rejects_absent_ids() {
+        let mut structure = Structure::new("fixture");
+        let mut first = Model::new(1);
+        first.chains.push(complete_chain('A'));
+        let mut second = Model::new(2);
+        second.chains.push(complete_chain('B'));
+        structure.models.extend([first, second]);
+
+        assert_eq!(select_chain(&structure, 2, Some('B')).unwrap().id, 'B');
+        assert!(select_chain(&structure, 3, None).is_err());
+        assert!(select_chain(&structure, 2, Some('A')).is_err());
+    }
 
     #[test]
     fn factorized_cli_defaults_off_and_explicit_flag_enables_it() {
