@@ -298,7 +298,13 @@ def hash_file_or_tree(path: Path) -> dict[str, object]:
     path = Path(path)
     info = path.lstat()
     if stat.S_ISLNK(info.st_mode):
-        raise ValueError(f"artifact is a symlink: {path}")
+        digest, byte_count = _stable_symlink_hash_and_size(path)
+        return {
+            "kind": "file",
+            "byte_count": byte_count,
+            "file_count": 1,
+            "sha256": digest,
+        }
     if stat.S_ISREG(info.st_mode):
         digest, byte_count = _stable_file_hash_and_size(path)
         return {

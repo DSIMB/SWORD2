@@ -960,6 +960,13 @@ def _parse_locked_artifacts(values: list[str] | None) -> dict[str, Path]:
     return result
 
 
+def _artifact_paths_for_recheck(paths: dict[str, Path]) -> dict[str, Path]:
+    return {
+        role: Path(os.path.abspath(path))
+        for role, path in sorted(paths.items())
+    }
+
+
 def _read_expected_success_ids(path: Path) -> tuple[tuple[str, ...], str]:
     path = Path(path)
     if path.is_symlink() or not path.is_file():
@@ -1187,9 +1194,7 @@ def _locked_preflight(args: argparse.Namespace) -> LockedPreflight:
         structure_sha256s=dict(sorted(structure_hashes.items())),
         structure_tree_sha256=_length_framed_mapping_hash(structure_hashes),
         external_artifacts=external_artifacts,
-        external_artifact_paths={
-            role: path.resolve(strict=True) for role, path in sorted(artifact_paths.items())
-        },
+        external_artifact_paths=_artifact_paths_for_recheck(artifact_paths),
         expected_chainsaw_ids=expected_ids,
         expected_chainsaw_path=(
             Path(args.chainsaw_expected_success_ids).resolve(strict=True)

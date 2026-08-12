@@ -125,6 +125,12 @@ def test_opaque_artifact_tree_hashes_symlink_target_without_following(tmp_path: 
         "file_count": 2,
         "sha256": "f9e30f8564dee7116cb1e8e4c0b439ce80738670caa7aca2065dac0936d14971",
     }
+    assert hash_file_or_tree(root / "relative-link") == {
+        "kind": "file",
+        "byte_count": 11,
+        "file_count": 1,
+        "sha256": "af3ff413ed80f409410ac36d2a0e22a3af2f0cde2db0f44594a292df9cf3fac6",
+    }
 
 
 def test_runtime_manifest_write_is_canonical_absent_only_and_cache_is_frozen(tmp_path: Path):

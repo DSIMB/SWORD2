@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import benchmark.run_benchmark as run_benchmark
 from benchmark.run_benchmark import (
     _normalized_command,
     _split_locked_merizo_stdout,
@@ -21,6 +22,22 @@ from benchmark.score import LockedRunRow, RunRow, write_locked_runs_csv, write_r
 LEGACY_STATUS = b'{"error_code":null,"excluded_candidate_count":0,"fallback":false,"requested_selector":"legacy","schema_version":1,"selector_used":"legacy"}\n'
 FACTORIZED_STATUS = b'{"error_code":null,"excluded_candidate_count":2,"fallback":false,"requested_selector":"factorized","schema_version":1,"selector_used":"factorized"}\n'
 FALLBACK_STATUS = b'{"error_code":"feature_missing_context","excluded_candidate_count":2,"fallback":true,"requested_selector":"factorized","schema_version":1,"selector_used":"legacy"}\n'
+
+
+def test_locked_artifact_recheck_paths_preserve_symlink_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    target = tmp_path / "python-real"
+    target.write_bytes(b"python")
+    link = tmp_path / "python-link"
+    link.symlink_to(target.name)
+    monkeypatch.chdir(tmp_path)
+
+    paths = run_benchmark._artifact_paths_for_recheck({"python": Path("python-link")})
+
+    assert paths == {"python": link}
+    assert paths["python"].is_symlink()
 
 
 def test_counterbalanced_orders_are_seed37_permutation_invariant():
