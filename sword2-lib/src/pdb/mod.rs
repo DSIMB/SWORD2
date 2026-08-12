@@ -2,6 +2,7 @@
 
 pub mod amino_acids;
 pub mod parser;
+pub mod structural_quality;
 pub mod types;
 pub mod writer;
 

@@ -8,7 +8,6 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use super::amino_acids;
 use super::types::Chain;
 
 /// Clean a chain for SWORD processing:
@@ -24,16 +23,7 @@ pub fn clean_chain_for_sword(chain: &Chain) -> (Chain, Vec<i32>) {
     let mut original_resnums = Vec::new();
 
     for residue in &chain.residues {
-        // Skip HETATM-only residues
-        if residue.atoms.iter().all(|a| a.is_hetatm) {
-            continue;
-        }
-        // Skip non-standard amino acids
-        if !amino_acids::is_standard(&residue.name) {
-            continue;
-        }
-        // Skip residues with insertion codes
-        if residue.icode != ' ' {
+        if !super::structural_quality::is_sword_candidate_residue(residue) {
             continue;
         }
 
@@ -43,13 +33,7 @@ pub fn clean_chain_for_sword(chain: &Chain) -> (Chain, Vec<i32>) {
     // Now create the cleaned chain with renumbered residues
     let mut new_resnum = 1i32;
     for residue in &chain.residues {
-        if residue.atoms.iter().all(|a| a.is_hetatm) {
-            continue;
-        }
-        if !amino_acids::is_standard(&residue.name) {
-            continue;
-        }
-        if residue.icode != ' ' {
+        if !super::structural_quality::is_sword_candidate_residue(residue) {
             continue;
         }
 

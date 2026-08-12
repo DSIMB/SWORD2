@@ -88,7 +88,7 @@ pub fn extract_backbone(pdb_path: &Path) -> Result<DsspChain> {
             let name = atom_name.trim();
             // Only take first alternate location
             let altloc = line.as_bytes().get(16).map(|&b| b as char).unwrap_or(' ');
-            if altloc != ' ' && altloc != 'A' {
+            if !crate::pdb::structural_quality::accepts_backbone_alt_loc(altloc) {
                 continue;
             }
             match name {
