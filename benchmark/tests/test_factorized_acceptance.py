@@ -854,6 +854,21 @@ def test_acceptance_reports_are_canonical_deterministic_and_absent_only(tmp_path
         write_acceptance_report(json_path, tmp_path / "other.md", results)
 
 
+def test_coverage_accepts_installed_gnu_time_capitalization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    paths = _synthetic_evidence(tmp_path, monkeypatch)
+    legacy_manifest = json.loads(paths["legacy_manifest"].read_bytes())
+    legacy_manifest["gnu_time_version"] = "time (GNU Time) UNKNOWN"
+    paths["legacy_manifest"].write_bytes(canonical_json_bytes(legacy_manifest))
+
+    coverage = tmp_path / "coverage.json"
+    assert main(
+        ["coverage", *_evidence_cli_args(paths), "--coverage-out", str(coverage)]
+    ) == 0
+
+
 def test_synthetic_coverage_precedes_metrics_and_evaluation_is_deterministic(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

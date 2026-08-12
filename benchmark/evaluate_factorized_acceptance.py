@@ -425,7 +425,9 @@ def _load_locked_manifest(path: Path, role: str) -> dict[str, object]:
     }
     if environment != expected_environment:
         raise InvalidEvidence(f"locked {role} environment mismatch")
-    if not isinstance(manifest["gnu_time_version"], str) or "GNU time" not in manifest["gnu_time_version"]:
+    if not isinstance(manifest["gnu_time_version"], str) or "gnu time" not in manifest[
+        "gnu_time_version"
+    ].casefold():
         raise InvalidEvidence(f"locked {role} GNU-time identity mismatch")
     for field in (
         "dataset_sha256",
