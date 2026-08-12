@@ -49,6 +49,8 @@ pub(crate) enum FactorizedError {
     IdentityMismatch,
     #[error("factorized count-group mismatch")]
     CountGroupMismatch,
+    #[error("factorized selector abstained because required backbone atoms are incomplete")]
+    StructuralQualityAbstention,
 }
 
 impl FactorizedError {
@@ -69,6 +71,7 @@ impl FactorizedError {
             Self::SchemaMismatch => "schema",
             Self::IdentityMismatch => "identity",
             Self::CountGroupMismatch => "count_group",
+            Self::StructuralQualityAbstention => "structural_quality_abstention",
         }
     }
 }
@@ -1769,6 +1772,19 @@ mod tests {
             Err(super::FactorizedError::Io(_))
         ));
         assert!(!missing.exists());
+    }
+
+    #[test]
+    fn structural_abstention_has_stable_error_code_and_status_bytes() {
+        let error = super::FactorizedError::StructuralQualityAbstention;
+        assert_eq!(error.code(), "structural_quality_abstention");
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("status.json");
+        write_selector_status(&path, &SelectorStatus::factorized_fallback(&error, 0)).unwrap();
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            b"{\"error_code\":\"structural_quality_abstention\",\"excluded_candidate_count\":0,\"fallback\":true,\"requested_selector\":\"factorized\",\"schema_version\":1,\"selector_used\":\"legacy\"}\n"
+        );
     }
 
     #[test]

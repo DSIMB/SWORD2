@@ -121,6 +121,7 @@ struct PipelineDecision {
 
 fn resolve_pipeline_choice<F>(
     use_factorized_ranker: bool,
+    structurally_eligible: bool,
     legacy: PipelineChoice,
     factorized: F,
 ) -> PipelineDecision
@@ -131,6 +132,13 @@ where
         return PipelineDecision {
             choice: legacy,
             error: None,
+            excluded_candidate_count: 0,
+        };
+    }
+    if !structurally_eligible {
+        return PipelineDecision {
+            choice: legacy,
+            error: Some(factorized_ranker::FactorizedError::StructuralQualityAbstention),
             excluded_candidate_count: 0,
         };
     }
@@ -255,6 +263,14 @@ pub fn run_pipeline(
         std::fs::copy(&pdb_file_src, &pdb_file_dst)?;
     }
 
+    let pdb_struct = crate::pdb::parse_pdb(&pdb_file_dst)
+        .with_context(|| format!("Failed to parse clean PDB: {}", pdb_file_dst.display()))?;
+    let structurally_eligible = pdb_struct
+        .first_model()
+        .and_then(|model| model.chains.first())
+        .map(crate::pdb::structural_quality::inspect_structural_quality)
+        .is_some_and(|report| report.eligible);
+
     // Step 1: Run DSSP (pure Rust)
     let dssp_file = intermediate_dir.join(format!("{}.dssp", pdb_name));
     let _dssp_result = if !dssp_file.exists() {
@@ -274,8 +290,6 @@ pub fn run_pipeline(
     // runs) and, regardless of whether Peeling was cached, for the
     // geometry_metrics criteria computed later — so this is hoisted out of
     // the cache-hit guard below rather than only computed on a Peeling run.
-    let pdb_struct = crate::pdb::parse_pdb(&pdb_file_dst)
-        .with_context(|| format!("Failed to parse clean PDB: {}", pdb_file_dst.display()))?;
     let ca_coords: Vec<[f64; 3]> = pdb_struct
         .first_model()
         .map(|m| {
@@ -344,10 +358,17 @@ pub fn run_pipeline(
     if !has_peeling {
         if let Ok(dump_path) = std::env::var("SWORD2_DUMP_CANDIDATES") {
             factorized_ranker::write_empty_feature_dump(Path::new(&dump_path))?;
-            tracing::warn!(
-                chain_id = pdb_name,
-                "factorized candidate dump unavailable: Peeling evidence is absent"
-            );
+            if structurally_eligible {
+                tracing::warn!(
+                    chain_id = pdb_name,
+                    "factorized candidate dump unavailable: Peeling evidence is absent"
+                );
+            } else {
+                tracing::warn!(
+                    chain_id = pdb_name,
+                    "factorized candidate dump unavailable: structural-quality abstention"
+                );
+            }
         }
         // No peeling result → single domain
         tracing::debug!("No peeling for chain, treating as single domain");
@@ -374,9 +395,15 @@ pub fn run_pipeline(
             }],
         };
         let fallback_error = config.use_factorized_ranker.then(|| {
-            factorized_ranker::FactorizedError::Feature(
-                factorized_ranker::partition::FeatureError::MissingContext("fresh Peeling output"),
-            )
+            if structurally_eligible {
+                factorized_ranker::FactorizedError::Feature(
+                    factorized_ranker::partition::FeatureError::MissingContext(
+                        "fresh Peeling output",
+                    ),
+                )
+            } else {
+                factorized_ranker::FactorizedError::StructuralQualityAbstention
+            }
         });
         if let Some(error) = &fallback_error {
             tracing::warn!(
@@ -514,6 +541,9 @@ pub fn run_pipeline(
 
         let dump_path = Path::new(&dump_path);
         let dump_result = (|| -> std::result::Result<(), FactorizedError> {
+            if !structurally_eligible {
+                return Err(FactorizedError::StructuralQualityAbstention);
+            }
             let dssp = _dssp_result
                 .as_ref()
                 .ok_or(FeatureError::MissingContext("fresh DSSP result"))?;
@@ -766,6 +796,7 @@ pub fn run_pipeline(
     let mut failed_attempt_exclusions = 0usize;
     let mut decision = resolve_pipeline_choice(
         config.use_factorized_ranker,
+        structurally_eligible,
         legacy_choice,
         || -> Result<_, factorized_ranker::FactorizedError> {
             let factorized_indices = factorized_first_pass_indices(
@@ -1313,7 +1344,7 @@ mod tests {
     fn factorized_pipeline_defaults_off_and_never_evaluates_attempt() {
         assert!(!SwordConfig::default().use_factorized_ranker);
         let legacy = pipeline_choice_fixture();
-        let decision = resolve_pipeline_choice(false, legacy.clone(), || {
+        let decision = resolve_pipeline_choice(false, false, legacy.clone(), || {
             panic!("flag-off execution must not touch factorized code")
         });
         assert_eq!(decision.choice, legacy);
@@ -1332,12 +1363,13 @@ mod tests {
                 "factorized-alt".to_string(),
             ],
         };
-        let success = resolve_pipeline_choice(true, legacy.clone(), || Ok((factorized.clone(), 2)));
+        let success =
+            resolve_pipeline_choice(true, true, legacy.clone(), || Ok((factorized.clone(), 2)));
         assert_eq!(success.choice, factorized);
         assert!(success.error.is_none());
         assert_eq!(success.excluded_candidate_count, 2);
 
-        let fallback = resolve_pipeline_choice(true, legacy.clone(), || {
+        let fallback = resolve_pipeline_choice(true, true, legacy.clone(), || {
             Err(factorized_ranker::FactorizedError::IdentityMismatch)
         });
         assert_eq!(fallback.choice, legacy);
@@ -1346,6 +1378,20 @@ mod tests {
             Some(factorized_ranker::FactorizedError::IdentityMismatch)
         ));
         assert_eq!(fallback.excluded_candidate_count, 0);
+    }
+
+    #[test]
+    fn ineligible_preflight_rolls_back_without_calling_factorized_attempt() {
+        let legacy = pipeline_choice_fixture();
+        let decision = resolve_pipeline_choice(true, false, legacy.clone(), || {
+            panic!("ineligible input must not construct features or call a model")
+        });
+        assert_eq!(decision.choice, legacy);
+        assert!(matches!(
+            decision.error,
+            Some(factorized_ranker::FactorizedError::StructuralQualityAbstention)
+        ));
+        assert_eq!(decision.excluded_candidate_count, 0);
     }
 
     #[test]
