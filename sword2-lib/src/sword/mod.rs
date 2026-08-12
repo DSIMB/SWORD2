@@ -53,6 +53,10 @@ pub struct SwordConfig {
     /// Use the pairwise-trained reranker to pick the winning candidate
     /// instead of the legacy distance_model-based selection. Off by default.
     pub use_pairwise_reranker: bool,
+    /// Use the embedded factorized structural ranker for count and partition
+    /// selection. Experimental and off by default; incomplete evidence falls
+    /// back to the plain legacy selector for the whole chain.
+    pub use_factorized_ranker: bool,
     /// Bias N_dom selection toward a length-predicted domain count.
     pub use_count_calibration: bool,
     /// Override the calibration penalty weight (for A/B sweeps); None = fitted default.
@@ -78,6 +82,7 @@ impl Default for SwordConfig {
             energy_config: None,
             chain_id: "A".to_string(),
             use_pairwise_reranker: false,
+            use_factorized_ranker: false,
             use_count_calibration: false,
             count_lambda: None,
             use_geometry_metrics: false,
@@ -99,6 +104,95 @@ fn factorized_first_pass_indices(
     pdb_name: &str,
 ) -> Vec<usize> {
     parse_measure::parse_measure_indices(measures, dir_data, pdb_name, false, 0, 3, 3, true)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PipelineChoice {
+    n_dom: usize,
+    to_print: String,
+    alternatives: Vec<String>,
+}
+
+struct PipelineDecision {
+    choice: PipelineChoice,
+    error: Option<factorized_ranker::FactorizedError>,
+    excluded_candidate_count: usize,
+}
+
+fn resolve_pipeline_choice<F>(
+    use_factorized_ranker: bool,
+    legacy: PipelineChoice,
+    factorized: F,
+) -> PipelineDecision
+where
+    F: FnOnce() -> Result<(PipelineChoice, usize), factorized_ranker::FactorizedError>,
+{
+    if !use_factorized_ranker {
+        return PipelineDecision {
+            choice: legacy,
+            error: None,
+            excluded_candidate_count: 0,
+        };
+    }
+    match factorized() {
+        Ok((choice, excluded_candidate_count)) => PipelineDecision {
+            choice,
+            error: None,
+            excluded_candidate_count,
+        },
+        Err(error) => PipelineDecision {
+            choice: legacy,
+            error: Some(error),
+            excluded_candidate_count: 0,
+        },
+    }
+}
+
+fn factorized_display_choice(
+    measures: &[compute_measure::MeasureLine],
+    selected: &factorized_ranker::FactorizedSelection,
+    second_pass_indices: &[usize],
+    chain_len: usize,
+) -> Result<PipelineChoice, factorized_ranker::FactorizedError> {
+    let winner = measures
+        .get(selected.measure_index)
+        .ok_or(factorized_ranker::FactorizedError::IdentityMismatch)?;
+    let winner_partition =
+        factorized_ranker::partition::parse_partition(&winner.delineation, chain_len)
+            .map_err(|_| factorized_ranker::FactorizedError::IdentityMismatch)?;
+    if winner.num_domains != selected.num_domains
+        || winner_partition.domains.len() != winner.num_domains
+        || winner_partition.canonical != selected.canonical
+    {
+        return Err(factorized_ranker::FactorizedError::IdentityMismatch);
+    }
+
+    let mut seen = std::collections::BTreeSet::new();
+    seen.insert((selected.num_domains, selected.canonical.clone()));
+    let to_print = winner.to_line();
+    let mut alternatives = vec![to_print.clone()];
+    for &source_index in second_pass_indices {
+        let measure = measures
+            .get(source_index)
+            .ok_or(factorized_ranker::FactorizedError::IdentityMismatch)?;
+        if measure.num_domains == 0 {
+            return Err(factorized_ranker::FactorizedError::IdentityMismatch);
+        }
+        let partition =
+            factorized_ranker::partition::parse_partition(&measure.delineation, chain_len)
+                .map_err(|_| factorized_ranker::FactorizedError::IdentityMismatch)?;
+        if partition.domains.len() != measure.num_domains {
+            return Err(factorized_ranker::FactorizedError::IdentityMismatch);
+        }
+        if seen.insert((measure.num_domains, partition.canonical)) {
+            alternatives.push(measure.to_line());
+        }
+    }
+    Ok(PipelineChoice {
+        n_dom: selected.num_domains,
+        to_print,
+        alternatives,
+    })
 }
 
 /// Raw parsed results from the SWORD pipeline.
@@ -151,6 +245,7 @@ pub fn run_pipeline(
 ) -> Result<(Vec<String>, SwordResults)> {
     let results_dir = PathBuf::from(&config.output_dir);
     let intermediate_dir = results_dir.join("intermediate");
+    let selector_status_path = std::env::var_os("SWORD2_SELECTOR_STATUS").map(PathBuf::from);
     std::fs::create_dir_all(&intermediate_dir)?;
 
     // Copy PDB file to intermediate directory
@@ -278,6 +373,25 @@ pub fn run_pipeline(
                 geometry_score: None,
             }],
         };
+        let fallback_error = config.use_factorized_ranker.then(|| {
+            factorized_ranker::FactorizedError::Feature(
+                factorized_ranker::partition::FeatureError::MissingContext("fresh Peeling output"),
+            )
+        });
+        if let Some(error) = &fallback_error {
+            tracing::warn!(
+                target: "sword2",
+                error = %error,
+                "factorized selector unavailable; using legacy selector"
+            );
+        }
+        if let Some(path) = selector_status_path.as_deref() {
+            let status = match &fallback_error {
+                Some(error) => factorized_ranker::SelectorStatus::factorized_fallback(error, 0),
+                None => factorized_ranker::SelectorStatus::legacy(),
+            };
+            factorized_ranker::write_selector_status(path, &status)?;
+        }
         return Ok((vec![line], results));
     }
 
@@ -333,19 +447,6 @@ pub fn run_pipeline(
         .map(compute_measure::MeasureLine::to_line)
         .collect();
 
-    // The factorized lattice is always built from its fixed (3, 3) first
-    // pass, independently of the legacy output-alternative configuration.
-    let factorized_indices = factorized_first_pass_indices(
-        &measure_lines,
-        &results_dir.join("intermediate").to_string_lossy(),
-        pdb_name,
-    );
-    let candidate_lattice = factorized_ranker::lattice::CandidateLattice::from_first_pass(
-        &measure_lines,
-        &factorized_indices,
-        tab_num.len(),
-    );
-
     let first_pass_measures: Vec<compute_measure::MeasureLine> = legacy_first_pass_indices
         .iter()
         .filter_map(|&index| measure_lines.get(index).cloned())
@@ -353,8 +454,10 @@ pub fn run_pipeline(
     let legacy_selection = factorized_ranker::lattice::select_legacy(
         &first_pass_measures,
         tab_num.len(),
-        config.use_count_calibration,
-        config.count_lambda,
+        config.use_count_calibration && !config.use_factorized_ranker,
+        (!config.use_factorized_ranker)
+            .then_some(config.count_lambda)
+            .flatten(),
     );
     let n_dom = legacy_selection.num_domains;
     let to_print_first_pass = legacy_selection.measure_line;
@@ -427,7 +530,16 @@ pub fn run_pipeline(
                 Some((&peeling.contact_matrix, &corpus.provenance)),
                 FeatureMask::all(),
             )?;
-            let mut lattice = candidate_lattice?;
+            let factorized_indices = factorized_first_pass_indices(
+                measure_lines,
+                &results_dir.join("intermediate").to_string_lossy(),
+                pdb_name,
+            );
+            let mut lattice = factorized_ranker::lattice::CandidateLattice::from_first_pass(
+                measure_lines,
+                &factorized_indices,
+                tab_num.len(),
+            )?;
             if lattice.candidates.is_empty() {
                 return Err(FactorizedError::SchemaMismatch);
             }
@@ -525,7 +637,10 @@ pub fn run_pipeline(
         }
     }
 
-    let mut to_print = if config.use_pairwise_reranker && relevant_measure2.len() > 1 {
+    let mut to_print = if !config.use_factorized_ranker
+        && config.use_pairwise_reranker
+        && relevant_measure2.len() > 1
+    {
         let ss_types: &[crate::peeling::algorithm::SsType] = peeling_output
             .as_ref()
             .map(|po| po.ss_types.as_slice())
@@ -586,7 +701,11 @@ pub fn run_pipeline(
         String::new()
     };
 
-    if to_print.is_empty() && config.use_geometry_metrics && relevant_measure2.len() > 1 {
+    if to_print.is_empty()
+        && !config.use_factorized_ranker
+        && config.use_geometry_metrics
+        && relevant_measure2.len() > 1
+    {
         // Analytical opt-in reordering: score = dist_model - lambda * G,
         // independent of (and evaluated after) the pairwise reranker above.
         let lambda_geo = config.geometry_lambda.unwrap_or(DEFAULT_GEOMETRY_LAMBDA);
@@ -639,13 +758,88 @@ pub fn run_pipeline(
         to_print = to_print_first_pass;
     }
 
+    let legacy_choice = PipelineChoice {
+        n_dom,
+        to_print,
+        alternatives: relevant_measure2,
+    };
+    let mut failed_attempt_exclusions = 0usize;
+    let mut decision = resolve_pipeline_choice(
+        config.use_factorized_ranker,
+        legacy_choice,
+        || -> Result<_, factorized_ranker::FactorizedError> {
+            let factorized_indices = factorized_first_pass_indices(
+                measure_lines,
+                &results_dir.join("intermediate").to_string_lossy(),
+                pdb_name,
+            );
+            let attempt = factorized_ranker::attempt_runtime_factorized(
+                measure_lines,
+                &factorized_indices,
+                tab_num.len(),
+                &ca_coords,
+                _dssp_result.as_ref().map(|result| &result.chain),
+                peeling_output.as_ref(),
+                measure_corpus.as_ref(),
+                n_dom,
+            );
+            failed_attempt_exclusions = attempt.excluded_candidate_count;
+            let runtime = attempt.result?;
+            let second_pass_indices = parse_measure::parse_measure_indices(
+                measure_lines,
+                &results_dir.join("intermediate").to_string_lossy(),
+                pdb_name,
+                true,
+                runtime.selection.num_domains,
+                alt_b,
+                alt_l,
+                true,
+            );
+            let choice = factorized_display_choice(
+                measure_lines,
+                &runtime.selection,
+                &second_pass_indices,
+                tab_num.len(),
+            )?;
+            Ok((choice, runtime.excluded_candidate_count))
+        },
+    );
+    if decision.error.is_some() {
+        decision.excluded_candidate_count = failed_attempt_exclusions;
+    }
+    if let Some(error) = &decision.error {
+        tracing::warn!(
+            target: "sword2",
+            error = %error,
+            "factorized selector unavailable; using legacy selector"
+        );
+    }
+    if let Some(path) = selector_status_path.as_deref() {
+        let status = if !config.use_factorized_ranker {
+            factorized_ranker::SelectorStatus::legacy()
+        } else if let Some(error) = &decision.error {
+            factorized_ranker::SelectorStatus::factorized_fallback(
+                error,
+                decision.excluded_candidate_count,
+            )
+        } else {
+            factorized_ranker::SelectorStatus::factorized_success(decision.excluded_candidate_count)
+        };
+        factorized_ranker::write_selector_status(path, &status)?;
+    }
+    let PipelineChoice {
+        n_dom,
+        to_print,
+        alternatives,
+    } = decision.choice;
+
     // Quality and display
     let geometry_ctx = GeometryContext { ca_coords: &ca_coords, reference: geometry_reference };
     let output_lines = quality_and_display(
         &tab_num,
         &to_print,
         n_dom,
-        &relevant_measure2,
+        &alternatives,
         alt_b,
         alt_l,
         &geometry_ctx,
@@ -1105,6 +1299,98 @@ mod tests {
         let config = SwordConfig::default();
         assert!(!config.use_count_calibration);
         assert_eq!(config.count_lambda, None);
+    }
+
+    fn pipeline_choice_fixture() -> PipelineChoice {
+        PipelineChoice {
+            n_dom: 2,
+            to_print: "legacy-primary".to_string(),
+            alternatives: vec!["legacy-primary".to_string(), "legacy-alt".to_string()],
+        }
+    }
+
+    #[test]
+    fn factorized_pipeline_defaults_off_and_never_evaluates_attempt() {
+        assert!(!SwordConfig::default().use_factorized_ranker);
+        let legacy = pipeline_choice_fixture();
+        let decision = resolve_pipeline_choice(false, legacy.clone(), || {
+            panic!("flag-off execution must not touch factorized code")
+        });
+        assert_eq!(decision.choice, legacy);
+        assert!(decision.error.is_none());
+        assert_eq!(decision.excluded_candidate_count, 0);
+    }
+
+    #[test]
+    fn factorized_pipeline_commits_or_rolls_back_the_complete_choice() {
+        let legacy = pipeline_choice_fixture();
+        let factorized = PipelineChoice {
+            n_dom: 3,
+            to_print: "factorized-primary".to_string(),
+            alternatives: vec![
+                "factorized-primary".to_string(),
+                "factorized-alt".to_string(),
+            ],
+        };
+        let success = resolve_pipeline_choice(true, legacy.clone(), || Ok((factorized.clone(), 2)));
+        assert_eq!(success.choice, factorized);
+        assert!(success.error.is_none());
+        assert_eq!(success.excluded_candidate_count, 2);
+
+        let fallback = resolve_pipeline_choice(true, legacy.clone(), || {
+            Err(factorized_ranker::FactorizedError::IdentityMismatch)
+        });
+        assert_eq!(fallback.choice, legacy);
+        assert!(matches!(
+            fallback.error,
+            Some(factorized_ranker::FactorizedError::IdentityMismatch)
+        ));
+        assert_eq!(fallback.excluded_candidate_count, 0);
+    }
+
+    #[test]
+    fn factorized_pipeline_uses_full_source_index_and_winner_first_dedup() {
+        let measures = vec![
+            compute_measure::MeasureLine {
+                num_domains: 1,
+                min_size: 6,
+                delineation: "0-5".to_string(),
+                max_cr: 0.1,
+                mean_cr: 0.0,
+                density_min: 1.0,
+                mean_density: 1.0,
+            },
+            compute_measure::MeasureLine {
+                num_domains: 2,
+                min_size: 2,
+                delineation: "0-1 2-5".to_string(),
+                max_cr: 0.2,
+                mean_cr: 0.0,
+                density_min: 2.0,
+                mean_density: 2.0,
+            },
+            compute_measure::MeasureLine {
+                num_domains: 2,
+                min_size: 3,
+                delineation: "0-2 3-5".to_string(),
+                max_cr: 0.3,
+                mean_cr: 0.0,
+                density_min: 3.0,
+                mean_density: 3.0,
+            },
+        ];
+        let selected = factorized_ranker::FactorizedSelection {
+            measure_index: 2,
+            num_domains: 2,
+            canonical: "0-2 3-5".to_string(),
+        };
+        let choice = factorized_display_choice(&measures, &selected, &[1, 2, 1], 6).unwrap();
+        assert_eq!(choice.n_dom, 2);
+        assert_eq!(choice.to_print, measures[2].to_line());
+        assert_eq!(
+            choice.alternatives,
+            vec![measures[2].to_line(), measures[1].to_line()]
+        );
     }
 
     #[test]

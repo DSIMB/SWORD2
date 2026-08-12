@@ -12,10 +12,12 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use serde::Serialize;
+
 use crate::dssp::DsspChain;
 use crate::peeling::algorithm::IterationResult;
 use crate::peeling::contact_matrix::ContactMatrix;
-use crate::sword::compute_measure::MeasureProvenance;
+use crate::sword::compute_measure::{MeasureCorpus, MeasureLine, MeasureProvenance};
 
 use self::features::ContactFeatureCache;
 use self::generated_model::{
@@ -23,7 +25,7 @@ use self::generated_model::{
     COUNT_FEATURE_NAMES as MODEL_COUNT_FEATURE_NAMES, COUNT_MODEL, MODEL_INPUT_DTYPE,
     MODEL_THRESHOLD_POLICY, RETAINED_FEATURE_FAMILIES,
 };
-use self::lattice::CandidateLattice;
+use self::lattice::{CandidateLattice, CandidateRecord};
 use self::model::{normalized_borda, predict_probability_validated, validate_model, ModelError};
 use self::partition::FeatureError;
 use self::schema::{
@@ -47,6 +49,105 @@ pub(crate) enum FactorizedError {
     IdentityMismatch,
     #[error("factorized count-group mismatch")]
     CountGroupMismatch,
+}
+
+impl FactorizedError {
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            Self::Feature(
+                FeatureError::Malformed
+                | FeatureError::OutOfRange { .. }
+                | FeatureError::Overlap(_)
+                | FeatureError::IncompleteCoverage
+                | FeatureError::DomainCountMismatch,
+            ) => "feature_invalid_candidate",
+            Self::Feature(FeatureError::MissingContext(_)) => "feature_missing_context",
+            Self::Feature(FeatureError::NonFinite(_)) => "feature_nonfinite",
+            Self::Feature(FeatureError::SchemaMismatch) => "feature_schema",
+            Self::Io(_) => "io",
+            Self::Model(_) => "model",
+            Self::SchemaMismatch => "schema",
+            Self::IdentityMismatch => "identity",
+            Self::CountGroupMismatch => "count_group",
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct SelectorStatus<'a> {
+    error_code: Option<&'a str>,
+    excluded_candidate_count: usize,
+    fallback: bool,
+    requested_selector: &'static str,
+    schema_version: u32,
+    selector_used: &'static str,
+}
+
+impl<'a> SelectorStatus<'a> {
+    pub(crate) fn legacy() -> Self {
+        Self {
+            error_code: None,
+            excluded_candidate_count: 0,
+            fallback: false,
+            requested_selector: "legacy",
+            schema_version: 1,
+            selector_used: "legacy",
+        }
+    }
+
+    pub(crate) fn factorized_success(excluded_candidate_count: usize) -> Self {
+        Self {
+            error_code: None,
+            excluded_candidate_count,
+            fallback: false,
+            requested_selector: "factorized",
+            schema_version: 1,
+            selector_used: "factorized",
+        }
+    }
+
+    pub(crate) fn factorized_fallback(
+        error: &'a FactorizedError,
+        excluded_candidate_count: usize,
+    ) -> Self {
+        Self {
+            error_code: Some(error.code()),
+            excluded_candidate_count,
+            fallback: true,
+            requested_selector: "factorized",
+            schema_version: 1,
+            selector_used: "legacy",
+        }
+    }
+}
+
+fn temporary_status_path(path: &Path) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    path.with_file_name(format!(".{file_name}.tmp-{}", std::process::id()))
+}
+
+pub(crate) fn write_selector_status(
+    path: &Path,
+    status: &SelectorStatus<'_>,
+) -> Result<(), FactorizedError> {
+    let temporary = temporary_status_path(path);
+    let result = (|| {
+        let mut bytes = serde_json::to_vec(status).map_err(|_| FactorizedError::SchemaMismatch)?;
+        bytes.push(b'\n');
+        let mut file = std::fs::File::create(&temporary)?;
+        file.write_all(&bytes)?;
+        file.flush()?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
 }
 
 const FAMILY_ORDER: &[&str] = &[
@@ -408,6 +509,28 @@ fn choose_candidate(scores: &[(String, f64)]) -> Result<String, ModelError> {
         .ok_or(ModelError::EmptyGroup)
 }
 
+fn extract_masked_count_features(
+    global: &GlobalFeatures,
+    candidates: &[CandidateFeatures],
+    mask: FeatureMask,
+) -> Result<Vec<CountFeatures>, FeatureError> {
+    let mut counts = features::extract_count_features(global, candidates)?;
+    if !mask.global_count {
+        let retained = count_base_items()
+            .map_err(|_| FeatureError::SchemaMismatch)?
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        for count in &mut counts {
+            for (name, value) in COUNT_ITEM_FEATURE_NAMES.iter().zip(&mut count.values) {
+                if !retained.contains(name) {
+                    *value = 0.0;
+                }
+            }
+        }
+    }
+    Ok(counts)
+}
+
 pub(crate) fn select_factorized(
     lattice: &CandidateLattice,
     global: &GlobalFeatures,
@@ -519,7 +642,7 @@ pub(crate) fn select_factorized(
         }
     }
 
-    let expected_counts = features::extract_count_features(global, candidates)?;
+    let expected_counts = extract_masked_count_features(global, candidates, mask)?;
     let modal_count = global.modal_count as usize;
     if candidates.iter().any(|candidate| {
         candidate.values[6].to_bits()
@@ -608,6 +731,307 @@ pub(crate) fn select_factorized(
         num_domains: selected_count,
         canonical,
     })
+}
+
+#[derive(Debug)]
+pub(crate) struct RuntimeFactorizedSelection {
+    pub selection: FactorizedSelection,
+    pub excluded_candidate_count: usize,
+}
+
+pub(crate) struct RuntimeFactorizedAttempt {
+    pub result: Result<RuntimeFactorizedSelection, FactorizedError>,
+    pub excluded_candidate_count: usize,
+}
+
+fn same_measure(left: &MeasureLine, right: &MeasureLine) -> bool {
+    left.num_domains == right.num_domains
+        && left.min_size == right.min_size
+        && left.delineation == right.delineation
+        && left.max_cr.to_bits() == right.max_cr.to_bits()
+        && left.mean_cr.to_bits() == right.mean_cr.to_bits()
+        && left.density_min.to_bits() == right.density_min.to_bits()
+        && left.mean_density.to_bits() == right.mean_density.to_bits()
+}
+
+fn lattice_from_records(candidates: Vec<CandidateRecord>) -> CandidateLattice {
+    let mut groups = BTreeMap::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        groups
+            .entry(candidate.measure.num_domains)
+            .or_insert_with(Vec::new)
+            .push(index);
+    }
+    CandidateLattice { candidates, groups }
+}
+
+fn retained_counts_match(
+    original_counts: &BTreeSet<usize>,
+    candidates: &[CandidateRecord],
+) -> bool {
+    original_counts
+        == &candidates
+            .iter()
+            .map(|candidate| candidate.measure.num_domains)
+            .collect()
+}
+
+fn population_only_global(chain_len: usize, candidate_counts: &[usize]) -> GlobalFeatures {
+    let mut count_histogram = [0.0; 21];
+    let mut frequencies = BTreeMap::new();
+    for &count in candidate_counts {
+        count_histogram[if count <= 20 { count - 1 } else { 20 }] += 1.0;
+        *frequencies.entry(count).or_insert(0usize) += 1;
+    }
+    for value in &mut count_histogram {
+        *value /= candidate_counts.len() as f64;
+    }
+    let modal_count = frequencies
+        .into_iter()
+        .max_by_key(|&(count, frequency)| (frequency, std::cmp::Reverse(count)))
+        .map(|(count, _)| count)
+        .unwrap_or(0);
+    GlobalFeatures {
+        n_residues: chain_len as f64,
+        rg_normalized: 0.0,
+        inertia_ratio_21: 0.0,
+        inertia_ratio_31: 0.0,
+        nonlocal_contact_density: 0.0,
+        contact_order: 0.0,
+        helix_fraction: 0.0,
+        strand_fraction: 0.0,
+        coil_fraction: 0.0,
+        helix_blocks: 0.0,
+        strand_blocks: 0.0,
+        peeling_levels: 0.0,
+        finest_pus: 0.0,
+        candidate_total: candidate_counts.len() as f64,
+        available_count_total: candidate_counts
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .len() as f64,
+        count_histogram,
+        modal_count: modal_count as f64,
+    }
+}
+
+fn candidate_local(error: &FeatureError) -> bool {
+    !matches!(error, FeatureError::SchemaMismatch)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn select_runtime_factorized_inner(
+    measures: &[MeasureLine],
+    shortlisted_indices: &[usize],
+    chain_len: usize,
+    ca_coords: &[[f64; 3]],
+    dssp: Option<&DsspChain>,
+    peeling: Option<&crate::peeling::PeelingOutput>,
+    measure_corpus: Option<&MeasureCorpus>,
+    legacy_count: usize,
+    excluded_candidate_count: &mut usize,
+) -> Result<RuntimeFactorizedSelection, FactorizedError> {
+    let mask = embedded_feature_mask()?;
+    let dssp = dssp.ok_or(FeatureError::MissingContext("fresh DSSP result"))?;
+    let peeling = peeling.ok_or(FeatureError::MissingContext("fresh Peeling output"))?;
+    let measure_corpus =
+        measure_corpus.ok_or(FeatureError::MissingContext("fresh measure corpus"))?;
+    if chain_len == 0 || chain_len != ca_coords.len() {
+        return Err(FactorizedError::IdentityMismatch);
+    }
+    if measure_corpus.lines.len() != measures.len()
+        || measure_corpus
+            .lines
+            .iter()
+            .zip(measures)
+            .any(|(left, right)| !same_measure(left, right))
+        || measure_corpus.provenance.len() != measures.len()
+    {
+        return Err(FactorizedError::IdentityMismatch);
+    }
+    let context = prepare_factorized_context(
+        Some(ca_coords),
+        Some(dssp),
+        &peeling.iterations,
+        Some((&peeling.contact_matrix, &measure_corpus.provenance)),
+        mask,
+    )?;
+
+    let mut original_counts = BTreeSet::new();
+    let mut admitted_per_count = BTreeMap::new();
+    let mut seen = BTreeSet::new();
+    let mut candidates = Vec::new();
+    for &source_index in shortlisted_indices {
+        let measure = measures
+            .get(source_index)
+            .ok_or(FactorizedError::IdentityMismatch)?;
+        if measure.num_domains == 0 {
+            return Err(FactorizedError::IdentityMismatch);
+        }
+        original_counts.insert(measure.num_domains);
+        if admitted_per_count
+            .get(&measure.num_domains)
+            .is_some_and(|count| *count >= 3)
+        {
+            continue;
+        }
+        let one = match CandidateLattice::from_first_pass(measures, &[source_index], chain_len) {
+            Ok(one) => one,
+            Err(error) if candidate_local(&error) => {
+                *excluded_candidate_count += 1;
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let Some(candidate) = one.candidates.into_iter().next() else {
+            return Err(FactorizedError::IdentityMismatch);
+        };
+        let key = (
+            candidate.measure.num_domains,
+            candidate.partition.canonical.clone(),
+        );
+        if !seen.insert(key) {
+            continue;
+        }
+        *admitted_per_count
+            .entry(candidate.measure.num_domains)
+            .or_insert(0usize) += 1;
+        candidates.push(candidate);
+    }
+    if original_counts.is_empty() || !retained_counts_match(&original_counts, &candidates) {
+        return Err(FactorizedError::CountGroupMismatch);
+    }
+
+    let original_candidate_count = candidates.len();
+    for _ in 0..=original_candidate_count {
+        let candidate_counts = candidates
+            .iter()
+            .map(|candidate| candidate.measure.num_domains)
+            .collect::<Vec<_>>();
+        let global = if mask.global_count {
+            features::extract_global_features(&context, &candidate_counts)?
+        } else {
+            population_only_global(chain_len, &candidate_counts)
+        };
+        let modal_count = global.modal_count as usize;
+        let mut retained = Vec::with_capacity(candidates.len());
+        let mut candidate_features = Vec::with_capacity(candidates.len());
+        let mut removed = 0usize;
+
+        for candidate in candidates {
+            let extracted = (|| -> Result<(CandidateRecord, CandidateFeatures), FeatureError> {
+                let candidate = if mask.relative_hierarchy {
+                    let mut one = lattice_from_records(vec![candidate]);
+                    one.attach_hierarchy(&measure_corpus.provenance, &peeling.iterations)?;
+                    one.candidates.pop().ok_or(FeatureError::SchemaMismatch)?
+                } else {
+                    candidate
+                };
+                let mut row = features::extract_candidate_base_and_domain_with_mask(
+                    &candidate,
+                    &context,
+                    modal_count,
+                    mask,
+                )?;
+                features::populate_candidate_conditional_features(
+                    &candidate, &mut row, &context, mask,
+                )?;
+                Ok((candidate, row))
+            })();
+            match extracted {
+                Ok((candidate, row)) => {
+                    retained.push(candidate);
+                    candidate_features.push(row);
+                }
+                Err(error) if candidate_local(&error) => {
+                    removed += 1;
+                    *excluded_candidate_count += 1;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+
+        if removed != 0 {
+            if !retained_counts_match(&original_counts, &retained) {
+                return Err(FactorizedError::CountGroupMismatch);
+            }
+            candidates = retained;
+            continue;
+        }
+
+        let lattice = lattice_from_records(retained);
+        if mask.relative_hierarchy {
+            features::add_sibling_and_hierarchy_features(&lattice, &mut candidate_features)?;
+        }
+        let counts = extract_masked_count_features(&global, &candidate_features, mask)?;
+        let selection = select_factorized(
+            &lattice,
+            &global,
+            &counts,
+            &candidate_features,
+            legacy_count,
+        )?;
+        return Ok(RuntimeFactorizedSelection {
+            selection,
+            excluded_candidate_count: *excluded_candidate_count,
+        });
+    }
+    Err(FactorizedError::SchemaMismatch)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn attempt_runtime_factorized(
+    measures: &[MeasureLine],
+    shortlisted_indices: &[usize],
+    chain_len: usize,
+    ca_coords: &[[f64; 3]],
+    dssp: Option<&DsspChain>,
+    peeling: Option<&crate::peeling::PeelingOutput>,
+    measure_corpus: Option<&MeasureCorpus>,
+    legacy_count: usize,
+) -> RuntimeFactorizedAttempt {
+    let mut excluded_candidate_count = 0;
+    let result = select_runtime_factorized_inner(
+        measures,
+        shortlisted_indices,
+        chain_len,
+        ca_coords,
+        dssp,
+        peeling,
+        measure_corpus,
+        legacy_count,
+        &mut excluded_candidate_count,
+    );
+    RuntimeFactorizedAttempt {
+        result,
+        excluded_candidate_count,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
+pub(crate) fn select_runtime_factorized(
+    measures: &[MeasureLine],
+    shortlisted_indices: &[usize],
+    chain_len: usize,
+    ca_coords: &[[f64; 3]],
+    dssp: Option<&DsspChain>,
+    peeling: Option<&crate::peeling::PeelingOutput>,
+    measure_corpus: Option<&MeasureCorpus>,
+    legacy_count: usize,
+) -> Result<RuntimeFactorizedSelection, FactorizedError> {
+    attempt_runtime_factorized(
+        measures,
+        shortlisted_indices,
+        chain_len,
+        ca_coords,
+        dssp,
+        peeling,
+        measure_corpus,
+        legacy_count,
+    )
+    .result
 }
 
 fn dump_header() -> Vec<&'static str> {
@@ -887,12 +1311,14 @@ mod tests {
     use super::{
         choose_candidate, choose_count, derive_head_specs, derive_mask_from_names, dump_header,
         embedded_feature_mask, exact_name_match, install_failure_dump_header,
-        prepare_factorized_context, select_factorized, validate_policies, write_empty_feature_dump,
-        write_feature_dump, FeatureMask, StructuralContext,
+        prepare_factorized_context, select_factorized, select_runtime_factorized,
+        validate_policies, write_empty_feature_dump, write_feature_dump, write_selector_status,
+        FeatureMask, SelectorStatus, StructuralContext,
     };
     use crate::dssp::DsspChain;
-    use crate::peeling::algorithm::IterationResult;
+    use crate::peeling::algorithm::{IterationResult, PeelingOutput};
     use crate::peeling::contact_matrix::ContactMatrix;
+    use crate::sword::compute_measure::{MeasureCorpus, MeasureLine};
     use crate::sword::factorized_ranker::partition::FeatureError;
 
     #[test]
@@ -1256,6 +1682,309 @@ mod tests {
     fn unavailable_typed_cache_requests_whole_chain_fallback() {
         let result = prepare_factorized_context(None, None, &[], None, FeatureMask::all());
         assert!(matches!(result, Err(FeatureError::MissingContext(_))));
+    }
+
+    #[test]
+    fn factorized_runtime_errors_have_stable_status_categories() {
+        use crate::sword::factorized_ranker::model::ModelError;
+
+        let invalid = [
+            FeatureError::Malformed,
+            FeatureError::OutOfRange {
+                start: 0,
+                end: 2,
+                chain_len: 2,
+            },
+            FeatureError::Overlap(1),
+            FeatureError::IncompleteCoverage,
+            FeatureError::DomainCountMismatch,
+        ];
+        for error in invalid {
+            assert_eq!(
+                super::FactorizedError::Feature(error).code(),
+                "feature_invalid_candidate"
+            );
+        }
+        assert_eq!(
+            super::FactorizedError::Feature(FeatureError::MissingContext("fixture")).code(),
+            "feature_missing_context"
+        );
+        assert_eq!(
+            super::FactorizedError::Feature(FeatureError::NonFinite("fixture")).code(),
+            "feature_nonfinite"
+        );
+        assert_eq!(
+            super::FactorizedError::Feature(FeatureError::SchemaMismatch).code(),
+            "feature_schema"
+        );
+        assert_eq!(super::FactorizedError::SchemaMismatch.code(), "schema");
+        assert_eq!(super::FactorizedError::IdentityMismatch.code(), "identity");
+        assert_eq!(
+            super::FactorizedError::CountGroupMismatch.code(),
+            "count_group"
+        );
+        assert_eq!(
+            super::FactorizedError::Model(ModelError::EmptyForest).code(),
+            "model"
+        );
+        assert_eq!(
+            super::FactorizedError::Io(std::io::Error::other("fixture")).code(),
+            "io"
+        );
+    }
+
+    #[test]
+    fn factorized_runtime_status_bytes_are_canonical_and_atomic() {
+        let directory = tempfile::tempdir().unwrap();
+        let success_path = directory.path().join("success.json");
+        std::fs::write(&success_path, b"obsolete\n").unwrap();
+        write_selector_status(&success_path, &SelectorStatus::factorized_success(0)).unwrap();
+        assert_eq!(
+            std::fs::read(&success_path).unwrap(),
+            b"{\"error_code\":null,\"excluded_candidate_count\":0,\"fallback\":false,\"requested_selector\":\"factorized\",\"schema_version\":1,\"selector_used\":\"factorized\"}\n"
+        );
+
+        let legacy_path = directory.path().join("legacy.json");
+        write_selector_status(&legacy_path, &SelectorStatus::legacy()).unwrap();
+        assert_eq!(
+            std::fs::read(&legacy_path).unwrap(),
+            b"{\"error_code\":null,\"excluded_candidate_count\":0,\"fallback\":false,\"requested_selector\":\"legacy\",\"schema_version\":1,\"selector_used\":\"legacy\"}\n"
+        );
+
+        let fallback_path = directory.path().join("fallback.json");
+        let error = super::FactorizedError::Feature(FeatureError::MissingContext("cache"));
+        write_selector_status(
+            &fallback_path,
+            &SelectorStatus::factorized_fallback(&error, 2),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&fallback_path).unwrap(),
+            b"{\"error_code\":\"feature_missing_context\",\"excluded_candidate_count\":2,\"fallback\":true,\"requested_selector\":\"factorized\",\"schema_version\":1,\"selector_used\":\"legacy\"}\n"
+        );
+
+        let missing = directory.path().join("missing").join("status.json");
+        assert!(matches!(
+            write_selector_status(&missing, &SelectorStatus::legacy()),
+            Err(super::FactorizedError::Io(_))
+        ));
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    fn factorized_runtime_prunes_malformed_candidate_without_losing_sibling() {
+        use crate::dssp::types::BackboneResidue;
+        use crate::peeling::algorithm::{IterationResult, PeelingOutput, SsType};
+        use crate::sword::compute_measure::{MeasureCorpus, MeasureProvenance};
+
+        let chain_len = 14;
+        let coords = (0..chain_len)
+            .map(|index| [index as f64, 0.0, 0.0])
+            .collect::<Vec<_>>();
+        let mut dssp = DsspChain::new();
+        for _ in 0..chain_len {
+            dssp.push(BackboneResidue {
+                aa: 'A',
+                ..BackboneResidue::default()
+            });
+        }
+        let measures = vec![
+            MeasureLine {
+                num_domains: 2,
+                min_size: 7,
+                delineation: "malformed".to_string(),
+                max_cr: 0.1,
+                mean_cr: 0.0,
+                density_min: 1.0,
+                mean_density: 1.0,
+            },
+            MeasureLine {
+                num_domains: 2,
+                min_size: 7,
+                delineation: "0-6 7-13".to_string(),
+                max_cr: 0.2,
+                mean_cr: 0.0,
+                density_min: 2.0,
+                mean_density: 2.0,
+            },
+        ];
+        let provenance = vec![
+            MeasureProvenance::default(),
+            MeasureProvenance {
+                canonical_pu_key: "0-6 7-13".to_string(),
+                hierarchy_path_count: 1,
+                ..MeasureProvenance::default()
+            },
+        ];
+        let corpus = MeasureCorpus {
+            lines: measures.clone(),
+            provenance,
+        };
+        let peeling = PeelingOutput {
+            contact_matrix: ContactMatrix::from_ca_coords(&coords, 6.0, 1.5),
+            iterations: vec![IterationResult {
+                max_cr: 0.0,
+                min_density: 0.0,
+                ci: 0.0,
+                r: 0.0,
+                num_pus: 2,
+                pu_boundaries: vec![[0, 6], [7, 13]],
+            }],
+            final_pu_contacts: Vec::new(),
+            final_pu_delineation: Vec::new(),
+            true_nums: (1..=chain_len as i32).collect(),
+            ss_types: vec![SsType::Coil; chain_len],
+        };
+
+        let result = select_runtime_factorized(
+            &measures,
+            &[0, 1],
+            chain_len,
+            &coords,
+            Some(&dssp),
+            Some(&peeling),
+            Some(&corpus),
+            2,
+        )
+        .unwrap();
+        assert_eq!(result.excluded_candidate_count, 1);
+        assert_eq!(result.selection.measure_index, 1);
+        assert_eq!(result.selection.num_domains, 2);
+        assert_eq!(result.selection.canonical, "0-6 7-13");
+    }
+
+    fn runtime_measure(count: usize, delineation: &str, max_cr: f64) -> MeasureLine {
+        use crate::sword::compute_measure::MeasureLine;
+
+        MeasureLine {
+            num_domains: count,
+            min_size: 7,
+            delineation: delineation.to_string(),
+            max_cr,
+            mean_cr: 0.0,
+            density_min: 2.0,
+            mean_density: 2.0,
+        }
+    }
+
+    fn runtime_inputs(
+        measures: Vec<MeasureLine>,
+        pu_boundaries: Vec<[usize; 2]>,
+    ) -> (Vec<[f64; 3]>, DsspChain, PeelingOutput, MeasureCorpus) {
+        use crate::dssp::types::BackboneResidue;
+        use crate::peeling::algorithm::{IterationResult, PeelingOutput, SsType};
+        use crate::sword::compute_measure::MeasureProvenance;
+
+        let chain_len = 14;
+        let coords = (0..chain_len)
+            .map(|index| [index as f64, 0.0, 0.0])
+            .collect::<Vec<_>>();
+        let mut dssp = DsspChain::new();
+        for _ in 0..chain_len {
+            dssp.push(BackboneResidue {
+                aa: 'A',
+                ..BackboneResidue::default()
+            });
+        }
+        let corpus = MeasureCorpus {
+            provenance: vec![MeasureProvenance::default(); measures.len()],
+            lines: measures,
+        };
+        let peeling = PeelingOutput {
+            contact_matrix: ContactMatrix::from_ca_coords(&coords, 6.0, 1.5),
+            iterations: vec![IterationResult {
+                max_cr: 0.0,
+                min_density: 0.0,
+                ci: 0.0,
+                r: 0.0,
+                num_pus: pu_boundaries.len(),
+                pu_boundaries,
+            }],
+            final_pu_contacts: Vec::new(),
+            final_pu_delineation: Vec::new(),
+            true_nums: (1..=chain_len as i32).collect(),
+            ss_types: vec![SsType::Coil; chain_len],
+        };
+        (coords, dssp, peeling, corpus)
+    }
+
+    #[test]
+    fn factorized_runtime_recomputes_after_extraction_failure_and_counts_each_exclusion() {
+        let measures = vec![
+            runtime_measure(2, "malformed", 0.1),
+            runtime_measure(2, "0-5 6-13", f64::NAN),
+            runtime_measure(2, "0-6 7-13", 0.2),
+        ];
+        let (coords, dssp, peeling, corpus) = runtime_inputs(
+            measures.clone(),
+            (0..14).map(|index| [index, index]).collect(),
+        );
+        let result = select_runtime_factorized(
+            &measures,
+            &[0, 1, 2],
+            14,
+            &coords,
+            Some(&dssp),
+            Some(&peeling),
+            Some(&corpus),
+            2,
+        )
+        .unwrap();
+        assert_eq!(result.excluded_candidate_count, 2);
+        assert_eq!(result.selection.measure_index, 2);
+        assert_eq!(result.selection.canonical, "0-6 7-13");
+    }
+
+    #[test]
+    fn factorized_runtime_hierarchy_failure_is_local_to_one_candidate() {
+        let measures = vec![
+            runtime_measure(2, "0-5 6-13", 0.1),
+            runtime_measure(2, "0-6 7-13", 0.2),
+        ];
+        let (coords, dssp, peeling, corpus) =
+            runtime_inputs(measures.clone(), vec![[0, 6], [7, 13]]);
+        let result = select_runtime_factorized(
+            &measures,
+            &[0, 1],
+            14,
+            &coords,
+            Some(&dssp),
+            Some(&peeling),
+            Some(&corpus),
+            2,
+        )
+        .unwrap();
+        assert_eq!(result.excluded_candidate_count, 1);
+        assert_eq!(result.selection.measure_index, 1);
+    }
+
+    #[test]
+    fn factorized_runtime_count_loss_falls_back_without_post_cap_backfill() {
+        let measures = vec![
+            runtime_measure(2, "0-3 4-13", f64::NAN),
+            runtime_measure(2, "0-4 5-13", f64::NAN),
+            runtime_measure(2, "0-5 6-13", f64::NAN),
+            runtime_measure(2, "0-6 7-13", 0.2),
+        ];
+        let (coords, dssp, peeling, corpus) = runtime_inputs(
+            measures.clone(),
+            (0..14).map(|index| [index, index]).collect(),
+        );
+        let attempt = super::attempt_runtime_factorized(
+            &measures,
+            &[0, 1, 2, 3],
+            14,
+            &coords,
+            Some(&dssp),
+            Some(&peeling),
+            Some(&corpus),
+            2,
+        );
+        assert_eq!(attempt.excluded_candidate_count, 3);
+        assert!(matches!(
+            attempt.result,
+            Err(super::FactorizedError::CountGroupMismatch)
+        ));
     }
 
     #[test]

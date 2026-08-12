@@ -61,6 +61,18 @@ struct Cli {
     #[arg(long)]
     use_pairwise_reranker: bool,
 
+    /// Select domain count and partition with the embedded factorized structural
+    /// ranker. Experimental and off by default; incomplete evidence falls back
+    /// to the legacy selector.
+    #[arg(long, conflicts_with_all = [
+        "use_pairwise_reranker",
+        "use_count_calibration",
+        "count_lambda",
+        "use_geometry_metrics",
+        "geometry_lambda",
+    ])]
+    use_factorized_ranker: bool,
+
     /// Bias domain-count selection toward a length-predicted count (experimental)
     #[arg(long)]
     use_count_calibration: bool,
@@ -413,12 +425,14 @@ fn setup_logging(verbosity: u8, quiet: bool) {
         // Full trace: timestamps, spans, level, target
         tracing_subscriber::fmt()
             .with_env_filter(env_filter)
+            .with_writer(std::io::stderr)
             .with_span_events(FmtSpan::CLOSE)
             .init();
     } else {
         // Compact: no timestamps, colored level prefix
         tracing_subscriber::fmt()
             .with_env_filter(env_filter)
+            .with_writer(std::io::stderr)
             .without_time()
             .with_target(verbosity >= 2)
             .init();
@@ -674,6 +688,7 @@ fn process_entry(
         energy_config: Some(rerank_energy_config),
         chain_id: chain_id.to_string(),
         use_pairwise_reranker: cli.use_pairwise_reranker,
+        use_factorized_ranker: cli.use_factorized_ranker,
         use_count_calibration: cli.use_count_calibration,
         count_lambda: cli.count_lambda,
         use_geometry_metrics: cli.use_geometry_metrics,
@@ -1094,5 +1109,42 @@ fn resolve_input(
         Ok((path, pdb_id.to_uppercase(), true))
     } else {
         anyhow::bail!("No input source specified");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::{error::ErrorKind, Parser};
+
+    #[test]
+    fn factorized_cli_defaults_off_and_explicit_flag_enables_it() {
+        let default = Cli::try_parse_from(["sword2"]).unwrap();
+        assert!(!default.use_factorized_ranker);
+
+        let enabled = Cli::try_parse_from(["sword2", "--use-factorized-ranker"]).unwrap();
+        assert!(enabled.use_factorized_ranker);
+    }
+
+    #[test]
+    fn factorized_cli_conflicts_with_every_legacy_experimental_selector() {
+        for conflicting in [
+            vec!["--use-pairwise-reranker"],
+            vec!["--use-count-calibration"],
+            vec!["--count-lambda", "0.1"],
+            vec!["--use-geometry-metrics"],
+            vec!["--geometry-lambda", "0.1"],
+        ] {
+            let mut args = vec!["sword2", "--use-factorized-ranker"];
+            args.extend(conflicting);
+            let error = Cli::try_parse_from(args).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+        }
+    }
+
+    #[test]
+    fn factorized_cli_does_not_expose_future_legacy_selector_flag() {
+        let error = Cli::try_parse_from(["sword2", "--legacy-selector"]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::UnknownArgument);
     }
 }
