@@ -1864,6 +1864,8 @@ def _split_locked_chainsaw_output(
             raise LockedBenchmarkError("locked Chainsaw output contains duplicate predictions")
         if not rows:
             continue
+        if rows[0].get("ndom") == "0" and rows[0].get("chopping") == "NULL":
+            continue
         output = outputs[entry_id]
         output.parent.mkdir(parents=True, exist_ok=True)
         if output.exists() or output.is_symlink():

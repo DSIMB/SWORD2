@@ -13,6 +13,7 @@ from benchmark.run_benchmark import (
     _eligible_resource_assignments,
     _gnu_time_version,
     _normalized_command,
+    _split_locked_chainsaw_output,
     _split_locked_merizo_stdout,
     _validate_locked_factorized_outcome,
     _validate_locked_jobs,
@@ -459,3 +460,24 @@ def test_locked_merizo_split_accepts_exact_repeated_batch_headers(tmp_path: Path
             "input\tndom\tresult\n",
             altered,
         )
+
+
+def test_locked_chainsaw_split_treats_null_zero_domain_rows_as_failures(
+    tmp_path: Path,
+):
+    combined = tmp_path / "combined.tsv"
+    combined.write_text(
+        "chain_id\tsequence_md5\tnres\tndom\tchopping\tconfidence\ttime_sec\n"
+        "validA\taaaa\t100\t2\t1-40|41-100\t0.9\t0.1\n"
+        "nullB\tbbbb\t80\t0\tNULL\t0.8\t0.1\n"
+    )
+    outputs = {
+        "validA": tmp_path / "validA.tsv",
+        "nullB": tmp_path / "nullB.tsv",
+    }
+
+    successes = _split_locked_chainsaw_output(combined, outputs)
+
+    assert successes == {"validA"}
+    assert outputs["validA"].is_file()
+    assert not outputs["nullB"].exists()
