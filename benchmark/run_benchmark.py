@@ -12,6 +12,7 @@ import socket
 import subprocess
 import sys
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -57,6 +58,10 @@ from benchmark.factorized_ranker.runtime_freeze import (
     hash_file_or_tree,
     sha256_file,
     verify_runtime_freeze,
+)
+from benchmark.factorized_ranker.eligibility import (
+    POLICY as FACTORIZED_ELIGIBILITY_POLICY,
+    verify_eligibility_manifest,
 )
 
 
@@ -198,7 +203,7 @@ class BatchedToolResult:
         yield self.batch_n_entries
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the SWORD2 benchmark harness")
     parser.add_argument("--dataset", default="cath663", help="Dataset key, e.g. cath663")
     parser.add_argument("--limit", type=int, default=None, help="Limit entries for smoke runs")
@@ -251,7 +256,9 @@ def parse_args() -> argparse.Namespace:
         help="Existing scores CSV to summarize without running tools",
     )
     parser.add_argument("--locked-factorized-manifest", type=Path, default=None)
+    parser.add_argument("--locked-eligibility-manifest", type=Path, default=None)
     parser.add_argument("--locked-role", choices=LOCKED_ROLES, default=None)
+    parser.add_argument("--locked-jobs", type=int, default=None)
     parser.add_argument(
         "--locked-artifact",
         action="append",
@@ -259,7 +266,7 @@ def parse_args() -> argparse.Namespace:
         metavar="ROLE=PATH",
     )
     parser.add_argument("--chainsaw-expected-success-ids", type=Path, default=None)
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def _load_runs_for_summary(scores_csv: Path, results_dir: Path) -> pd.DataFrame | None:
@@ -886,6 +893,31 @@ class LockedBenchmarkError(ValueError):
     pass
 
 
+def _validate_locked_jobs(role: str, jobs: int | None) -> int:
+    expected = 1 if role == "paired-sword-resources" else 32
+    if role not in LOCKED_ROLES or type(jobs) is not int or jobs != expected:
+        raise LockedBenchmarkError(
+            f"locked role {role!r} requires exactly {expected} workers"
+        )
+    return jobs
+
+
+def _eligible_resource_assignments(
+    *,
+    dataset_ids: tuple[str, ...],
+    eligible_ids: frozenset[str],
+) -> dict[str, str]:
+    canonical_dataset = [_locked_entry_id(entry_id) for entry_id in dataset_ids]
+    if len(canonical_dataset) != len(set(canonical_dataset)):
+        raise LockedBenchmarkError("locked dataset IDs contain duplicates")
+    canonical_eligible = {_locked_entry_id(entry_id) for entry_id in eligible_ids}
+    if not canonical_eligible.issubset(canonical_dataset):
+        raise LockedBenchmarkError("eligible resource IDs are not a dataset subset")
+    return counterbalanced_pair_orders(
+        [entry_id for entry_id in canonical_dataset if entry_id in canonical_eligible]
+    )
+
+
 @dataclass(frozen=True)
 class LockedPreflight:
     repo_root: Path
@@ -893,6 +925,11 @@ class LockedPreflight:
     runtime_manifest: dict[str, object]
     runtime_manifest_sha256: str
     model_manifest_sha256: str
+    eligibility_manifest: dict[str, object]
+    eligibility_manifest_sha256: str
+    eligibility_policy: str
+    eligible_ids: tuple[str, ...]
+    ineligible_ids: tuple[str, ...]
     dataset_file: Path
     dataset_sha256: str
     dataset_ids: tuple[str, ...]
@@ -1085,6 +1122,9 @@ def _locked_preflight(args: argparse.Namespace) -> LockedPreflight:
         raise LockedBenchmarkError(
             "locked collection requires ambient SWORD2_EXPERIMENTS to be unset"
         )
+    if args.locked_eligibility_manifest is None:
+        raise LockedBenchmarkError("locked collection requires an eligibility manifest")
+    _validate_locked_jobs(args.locked_role, args.locked_jobs)
     selected_tools, artifact_paths = _locked_role_contract(args)
     for name, expected in LOCKED_ENVIRONMENT.items():
         if os.environ.get(name) != expected:
@@ -1136,6 +1176,38 @@ def _locked_preflight(args: argparse.Namespace) -> LockedPreflight:
             )
         )
 
+    eligibility_path = Path(args.locked_eligibility_manifest)
+    eligibility_manifest = verify_eligibility_manifest(
+        eligibility_path,
+        dataset_metadata=dataset_file,
+        cache_dir=cache_root,
+        runtime_manifest=runtime_path,
+        binary=binary,
+        repo_root=repo_root,
+    )
+    eligibility_manifest_sha256 = sha256_file(eligibility_path)
+    expected_eligibility_graph = {
+        "dataset": args.dataset,
+        "dataset_sha256": dataset_sha256,
+        "dataset_ids": raw_ids,
+        "dataset_id_set_sha256": canonical_id_set_hash(ids),
+        "structure_sha256s": dict(sorted(structure_hashes.items())),
+        "structure_tree_sha256": _length_framed_mapping_hash(structure_hashes),
+        "runtime_manifest_sha256": runtime_manifest_sha256,
+        "runtime_source_git_commit": runtime_manifest["runtime_source_git_commit"],
+        "binary_sha256": runtime_manifest["binary_sha256"],
+        "policy": FACTORIZED_ELIGIBILITY_POLICY,
+    }
+    for field, expected in expected_eligibility_graph.items():
+        if eligibility_manifest.get(field) != expected:
+            raise LockedBenchmarkError(
+                f"eligibility manifest disagrees with locked preflight field {field}"
+            )
+    eligible_ids = tuple(str(value) for value in eligibility_manifest["eligible_ids"])
+    ineligible_ids = tuple(
+        str(value) for value in eligibility_manifest["ineligible_ids"]
+    )
+
     external_artifacts: dict[str, dict[str, object]] = {}
     for role, path in sorted(artifact_paths.items()):
         descriptor = hash_file_or_tree(path)
@@ -1173,6 +1245,7 @@ def _locked_preflight(args: argparse.Namespace) -> LockedPreflight:
         ("cache", cache_root),
         ("dataset", dataset_file),
         ("runtime_manifest", runtime_path),
+        ("eligibility_manifest", eligibility_path),
         ("binary", binary),
     ]
     inputs.extend((role, path) for role, path in artifact_paths.items())
@@ -1186,6 +1259,11 @@ def _locked_preflight(args: argparse.Namespace) -> LockedPreflight:
         runtime_manifest=runtime_manifest,
         runtime_manifest_sha256=runtime_manifest_sha256,
         model_manifest_sha256=model_manifest_sha256,
+        eligibility_manifest=eligibility_manifest,
+        eligibility_manifest_sha256=eligibility_manifest_sha256,
+        eligibility_policy=FACTORIZED_ELIGIBILITY_POLICY,
+        eligible_ids=eligible_ids,
+        ineligible_ids=ineligible_ids,
         dataset_file=dataset_file.resolve(strict=True),
         dataset_sha256=dataset_sha256,
         dataset_ids=tuple(sorted(ids)),
@@ -1271,6 +1349,11 @@ def _normalized_command(
         "<runtime_manifest>",
         must_exist=True,
     )
+    add_path(
+        Path(args.locked_eligibility_manifest),
+        "<eligibility_manifest>",
+        must_exist=True,
+    )
     if args.chainsaw_expected_success_ids is not None:
         add_path(
             Path(args.chainsaw_expected_success_ids),
@@ -1312,6 +1395,7 @@ def _normalized_command(
         "--cache-dir": "<cache>",
         "--results-dir": "<results>",
         "--locked-factorized-manifest": "<runtime_manifest>",
+        "--locked-eligibility-manifest": "<eligibility_manifest>",
         "--chainsaw-expected-success-ids": "<chainsaw_expected_success_ids>",
     }
     for index, token in enumerate(normalized):
@@ -1451,6 +1535,123 @@ def _require_locked_sword_success(row: LockedRunRow, expected_selector: str) -> 
         raise LockedBenchmarkError(
             "locked SWORD status does not prove the requested selector"
         )
+
+
+def _require_locked_structural_abstention(row: LockedRunRow) -> None:
+    if not (
+        row.requested_selector == "factorized"
+        and row.selector_used == "legacy"
+        and row.fallback is True
+        and row.error_code == "structural_quality_abstention"
+        and row.selector_warning_code == "factorized_fallback"
+        and row.excluded_candidate_count == 0
+    ):
+        raise LockedBenchmarkError("locked structural abstention is inconsistent")
+
+
+def _validate_locked_factorized_outcome(
+    entry_id: str,
+    row: LockedRunRow,
+    eligible_ids: frozenset[str],
+) -> bool:
+    if row.entry_id != entry_id:
+        raise LockedBenchmarkError("locked factorized result identity mismatch")
+    if entry_id in eligible_ids:
+        _require_locked_sword_success(row, "factorized")
+        return True
+    _require_locked_structural_abstention(row)
+    return False
+
+
+def _validate_locked_role_evidence(
+    preflight: LockedPreflight,
+    args: argparse.Namespace,
+    *,
+    scores: list[ScoreRow],
+    runs: list[LockedRunRow],
+) -> frozenset[str]:
+    dataset_ids = frozenset(preflight.dataset_ids)
+    eligible_ids = frozenset(preflight.eligible_ids)
+    ineligible_ids = frozenset(preflight.ineligible_ids)
+    if (
+        eligible_ids & ineligible_ids
+        or eligible_ids | ineligible_ids != dataset_ids
+    ):
+        raise LockedBenchmarkError(
+            "locked eligibility sets do not partition the dataset"
+        )
+
+    sword_runs = [row for row in runs if row.tool == "sword2-rust"]
+    sword_score_ids = {
+        row.entry_id for row in scores if row.tool == "sword2-rust"
+    }
+    if args.locked_role == "factorized-accuracy":
+        if (
+            len(sword_runs) != len(dataset_ids)
+            or {row.entry_id for row in sword_runs} != dataset_ids
+            or any(row.selector_variant != "factorized" for row in sword_runs)
+        ):
+            raise LockedBenchmarkError(
+                "factorized run coverage does not match the locked dataset"
+            )
+        actual_abstentions: set[str] = set()
+        for row in sword_runs:
+            if not _validate_locked_factorized_outcome(
+                row.entry_id, row, eligible_ids
+            ):
+                actual_abstentions.add(row.entry_id)
+        if sword_score_ids != eligible_ids:
+            raise LockedBenchmarkError(
+                "factorized score coverage does not match eligible IDs"
+            )
+        if actual_abstentions != ineligible_ids:
+            raise LockedBenchmarkError(
+                "factorized abstentions do not match ineligible IDs"
+            )
+        return frozenset(actual_abstentions)
+
+    if args.locked_role == "legacy-accuracy":
+        if (
+            len(sword_runs) != len(dataset_ids)
+            or {row.entry_id for row in sword_runs} != dataset_ids
+            or any(row.selector_variant != "legacy" for row in sword_runs)
+        ):
+            raise LockedBenchmarkError(
+                "legacy SWORD run coverage does not match the locked dataset"
+            )
+        for row in sword_runs:
+            _require_locked_sword_success(row, "legacy")
+        if sword_score_ids != dataset_ids:
+            raise LockedBenchmarkError(
+                "legacy SWORD score coverage does not match the locked dataset"
+            )
+        return frozenset()
+
+    if args.locked_role == "paired-sword-resources":
+        if scores:
+            raise LockedBenchmarkError(
+                "resource-only collection unexpectedly contains scores"
+            )
+        expected_pairs = {
+            (entry_id, selector)
+            for entry_id in eligible_ids
+            for selector in ("legacy", "factorized")
+        }
+        actual_pairs = [
+            (row.entry_id, row.selector_variant) for row in sword_runs
+        ]
+        if (
+            len(actual_pairs) != len(expected_pairs)
+            or set(actual_pairs) != expected_pairs
+        ):
+            raise LockedBenchmarkError(
+                "paired resource coverage does not match eligible IDs"
+            )
+        for row in sword_runs:
+            _require_locked_sword_success(row, row.selector_variant)
+        return frozenset()
+
+    raise LockedBenchmarkError("unknown locked role")
 
 
 def _locked_competitor_row(
@@ -1769,7 +1970,10 @@ def _run_locked_pairs(
     preflight: LockedPreflight,
     args: argparse.Namespace,
 ) -> tuple[list[ScoreRow], list[LockedRunRow], list[FailureRow], dict[str, object]]:
-    assignments = counterbalanced_pair_orders(list(preflight.dataset_ids))
+    assignments = _eligible_resource_assignments(
+        dataset_ids=preflight.dataset_ids,
+        eligible_ids=frozenset(preflight.eligible_ids),
+    )
     structures = {structure.entry.entry_id: structure for structure in preflight.structures}
     rows: list[LockedRunRow] = []
     runs_path = Path(args.results_dir) / "runs.csv"
@@ -1821,14 +2025,25 @@ def _run_locked_accuracy(
     args: argparse.Namespace,
 ) -> tuple[list[ScoreRow], list[LockedRunRow], list[FailureRow], None]:
     selector = "factorized" if args.locked_role == "factorized-accuracy" else "legacy"
+    _validate_locked_jobs(args.locked_role, args.locked_jobs)
     scores: list[ScoreRow] = []
     runs: list[LockedRunRow] = []
     failures: list[FailureRow] = []
     runs_path = Path(args.results_dir) / "runs.csv"
     _atomic_write_rows(write_locked_runs_csv, runs, runs_path)
-    for structure in sorted(preflight.structures, key=lambda item: item.entry.entry_id):
-        process_dir = Path(args.results_dir) / "raw" / "sword2-rust" / structure.entry.entry_id
-        predictions, row = _locked_sword_run(
+
+    structures = sorted(
+        preflight.structures, key=lambda item: item.entry.entry_id
+    )
+
+    def run_sword(structure: CanonicalStructure):
+        process_dir = (
+            Path(args.results_dir)
+            / "raw"
+            / "sword2-rust"
+            / structure.entry.entry_id
+        )
+        return structure, _locked_sword_run(
             structure,
             selector,
             process_dir,
@@ -1838,19 +2053,37 @@ def _run_locked_accuracy(
             preflight=preflight,
             args=args,
         )
-        scores.extend(
-            score_prediction(
-                structure.entry,
-                structure.numbering,
-                prediction,
-                runtime_s=row.runtime_s,
-                peak_rss_mb=(row.peak_rss_kb / 1024.0 if row.peak_rss_kb else None),
-            )
-            for prediction in predictions
-        )
-        runs.append(row)
-        _atomic_write_rows(write_locked_runs_csv, runs, runs_path)
-        _require_locked_sword_success(row, selector)
+
+    eligible_ids = frozenset(preflight.eligible_ids)
+    with ThreadPoolExecutor(max_workers=args.locked_jobs) as executor:
+        results = executor.map(run_sword, structures)
+        for structure, (predictions, row) in results:
+            runs.append(row)
+            _atomic_write_rows(write_locked_runs_csv, runs, runs_path)
+            if selector == "factorized":
+                should_score = _validate_locked_factorized_outcome(
+                    structure.entry.entry_id,
+                    row,
+                    eligible_ids,
+                )
+            else:
+                _require_locked_sword_success(row, selector)
+                should_score = True
+            if should_score:
+                scores.extend(
+                    score_prediction(
+                        structure.entry,
+                        structure.numbering,
+                        prediction,
+                        runtime_s=row.runtime_s,
+                        peak_rss_mb=(
+                            row.peak_rss_kb / 1024.0
+                            if row.peak_rss_kb
+                            else None
+                        ),
+                    )
+                    for prediction in predictions
+                )
     if args.locked_role == "legacy-accuracy":
         merizo_scores, merizo_runs = _locked_merizo_accuracy(preflight, args)
         scores.extend(merizo_scores)
@@ -1891,7 +2124,7 @@ def _locked_intent_payload(
     created_at: str,
 ) -> dict[str, object]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "started",
         "created_at": created_at,
         "locked_role": args.locked_role,
@@ -1900,6 +2133,17 @@ def _locked_intent_payload(
         "dataset_id_count": len(preflight.dataset_ids),
         "dataset_id_set_sha256": preflight.dataset_id_set_sha256,
         "runtime_manifest_sha256": preflight.runtime_manifest_sha256,
+        "eligibility_manifest_sha256": preflight.eligibility_manifest_sha256,
+        "eligibility_policy": preflight.eligibility_policy,
+        "factorized_eligible_count": len(preflight.eligible_ids),
+        "factorized_eligible_id_set_sha256": preflight.eligibility_manifest[
+            "eligible_id_set_sha256"
+        ],
+        "structural_abstention_count": len(preflight.ineligible_ids),
+        "structural_abstention_id_set_sha256": preflight.eligibility_manifest[
+            "ineligible_id_set_sha256"
+        ],
+        "locked_jobs": args.locked_jobs,
         "model_manifest_sha256": preflight.model_manifest_sha256,
         "binary_sha256": preflight.runtime_manifest["binary_sha256"],
         "structure_tree_sha256": preflight.structure_tree_sha256,
@@ -1926,8 +2170,28 @@ def _locked_manifest_payload(
         binary=preflight.binary,
         repo_root=preflight.repo_root,
     )
-    if current_runtime != preflight.runtime_manifest or sha256_file(runtime_path) != preflight.runtime_manifest_sha256:
+    if (
+        current_runtime != preflight.runtime_manifest
+        or sha256_file(runtime_path) != preflight.runtime_manifest_sha256
+    ):
         raise LockedBenchmarkError("runtime freeze changed during locked collection")
+    eligibility_path = Path(args.locked_eligibility_manifest)
+    current_eligibility = verify_eligibility_manifest(
+        eligibility_path,
+        dataset_metadata=preflight.dataset_file,
+        cache_dir=Path(args.cache_dir),
+        runtime_manifest=runtime_path,
+        binary=preflight.binary,
+        repo_root=preflight.repo_root,
+    )
+    if (
+        current_eligibility != preflight.eligibility_manifest
+        or sha256_file(eligibility_path)
+        != preflight.eligibility_manifest_sha256
+    ):
+        raise LockedBenchmarkError(
+            "eligibility manifest changed during locked collection"
+        )
     if sha256_file(preflight.dataset_file) != preflight.dataset_sha256:
         raise LockedBenchmarkError("dataset metadata changed during locked collection")
     if preflight.expected_chainsaw_path is not None:
@@ -1983,6 +2247,28 @@ def _locked_manifest_payload(
         "factorized": sum(row.selector_variant == "factorized" for row in runs),
     }
     fallback_count = sum(row.fallback is True for row in runs)
+    actual_abstention_ids = _validate_locked_role_evidence(
+        preflight,
+        args,
+        scores=scores,
+        runs=runs,
+    )
+    expected_fallback_count = (
+        len(preflight.ineligible_ids)
+        if args.locked_role == "factorized-accuracy"
+        else 0
+    )
+    if fallback_count != expected_fallback_count:
+        raise LockedBenchmarkError(
+            "locked fallback count disagrees with the role contract"
+        )
+    if (
+        args.locked_role == "factorized-accuracy"
+        and actual_abstention_ids != frozenset(preflight.ineligible_ids)
+    ):
+        raise LockedBenchmarkError(
+            "locked structural abstention set disagrees with eligibility"
+        )
     exclusion_count = sum(
         row.excluded_candidate_count
         for row in runs
@@ -2011,7 +2297,7 @@ def _locked_manifest_payload(
                 raise LockedBenchmarkError("locked raw evidence contains a nonregular file")
             raw_evidence[path.relative_to(Path(args.results_dir)).as_posix()] = sha256_file(path)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "complete",
         "created_at": created_at,
         "completed_at": completed_at,
@@ -2044,6 +2330,17 @@ def _locked_manifest_payload(
         "order_design": order,
         "model_manifest_sha256": preflight.model_manifest_sha256,
         "runtime_manifest_sha256": preflight.runtime_manifest_sha256,
+        "eligibility_manifest_sha256": preflight.eligibility_manifest_sha256,
+        "eligibility_policy": preflight.eligibility_policy,
+        "factorized_eligible_count": len(preflight.eligible_ids),
+        "factorized_eligible_id_set_sha256": preflight.eligibility_manifest[
+            "eligible_id_set_sha256"
+        ],
+        "structural_abstention_count": len(preflight.ineligible_ids),
+        "structural_abstention_id_set_sha256": preflight.eligibility_manifest[
+            "ineligible_id_set_sha256"
+        ],
+        "locked_jobs": args.locked_jobs,
         "binary_sha256": preflight.runtime_manifest["binary_sha256"],
         "runtime_source_git_commit": preflight.runtime_manifest["runtime_source_git_commit"],
         "runtime_input_tree_sha256": preflight.runtime_manifest["runtime_input_tree_sha256"],
@@ -2129,21 +2426,30 @@ def _run_locked_benchmark(args: argparse.Namespace) -> int:
 
 def main() -> int:
     args = parse_args()
-    locked_manifest_set = args.locked_factorized_manifest is not None
-    locked_role_set = args.locked_role is not None
-    if locked_manifest_set != locked_role_set:
+    locked_inputs_set = [
+        args.locked_factorized_manifest is not None,
+        args.locked_eligibility_manifest is not None,
+        args.locked_role is not None,
+        args.locked_jobs is not None,
+    ]
+    if any(locked_inputs_set) and not all(locked_inputs_set):
         print(
-            "locked-factorized-manifest and locked-role are required together",
+            "locked runtime, eligibility, role, and jobs are required together",
             file=sys.stderr,
         )
         return 2
-    if locked_manifest_set:
+    if all(locked_inputs_set):
         try:
             return _run_locked_benchmark(args)
         except (OSError, ValueError) as error:
             print(f"locked benchmark evidence is invalid: {error}", file=sys.stderr)
             return 2
-    if args.locked_artifact or args.chainsaw_expected_success_ids is not None:
+    if (
+        args.locked_artifact
+        or args.chainsaw_expected_success_ids is not None
+        or args.locked_eligibility_manifest is not None
+        or args.locked_jobs is not None
+    ):
         print("locked-only inputs require locked collection mode", file=sys.stderr)
         return 2
     args.results_dir.mkdir(parents=True, exist_ok=True)

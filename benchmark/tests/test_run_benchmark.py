@@ -9,9 +9,14 @@ import pytest
 
 import benchmark.run_benchmark as run_benchmark
 from benchmark.run_benchmark import (
+    LockedBenchmarkError,
+    _eligible_resource_assignments,
     _gnu_time_version,
     _normalized_command,
     _split_locked_merizo_stdout,
+    _validate_locked_factorized_outcome,
+    _validate_locked_jobs,
+    _validate_locked_role_evidence,
     counterbalanced_pair_orders,
     parse_selector_status,
 )
@@ -23,6 +28,7 @@ from benchmark.score import LockedRunRow, RunRow, write_locked_runs_csv, write_r
 LEGACY_STATUS = b'{"error_code":null,"excluded_candidate_count":0,"fallback":false,"requested_selector":"legacy","schema_version":1,"selector_used":"legacy"}\n'
 FACTORIZED_STATUS = b'{"error_code":null,"excluded_candidate_count":2,"fallback":false,"requested_selector":"factorized","schema_version":1,"selector_used":"factorized"}\n'
 FALLBACK_STATUS = b'{"error_code":"feature_missing_context","excluded_candidate_count":2,"fallback":true,"requested_selector":"factorized","schema_version":1,"selector_used":"legacy"}\n'
+STRUCTURAL_ABSTENTION_STATUS = b'{"error_code":"structural_quality_abstention","excluded_candidate_count":0,"fallback":true,"requested_selector":"factorized","schema_version":1,"selector_used":"legacy"}\n'
 
 
 def test_installed_gnu_time_version_accepts_distribution_capitalization():
@@ -82,6 +88,253 @@ def test_locked_rss_and_selector_status_are_exact_and_fail_closed():
         parse_selector_status(FACTORIZED_STATUS.replace(b'"schema_version":1', b'"schema_version":1,"schema_version":1'), "factorized")
 
 
+def test_structural_abstention_status_is_valid_only_when_success_not_required():
+    parsed = parse_selector_status(
+        STRUCTURAL_ABSTENTION_STATUS,
+        "factorized",
+        require_success=False,
+    )
+    assert parsed["error_code"] == "structural_quality_abstention"
+    with pytest.raises(ValueError):
+        parse_selector_status(
+            STRUCTURAL_ABSTENTION_STATUS,
+            "factorized",
+            require_success=True,
+        )
+
+
+def _factorized_row(
+    entry_id: str,
+    *,
+    success: bool,
+    code: str = "structural_quality_abstention",
+    exclusions: int = 0,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        entry_id=entry_id,
+        requested_selector="factorized",
+        selector_used="factorized" if success else "legacy",
+        fallback=not success,
+        error_code="" if success else code,
+        selector_warning_code="" if success else "factorized_fallback",
+        excluded_candidate_count=exclusions,
+    )
+
+
+def test_factorized_outcome_scores_eligible_and_retains_ineligible_run_only():
+    eligible = frozenset({"a"})
+    assert _validate_locked_factorized_outcome(
+        "a", _factorized_row("a", success=True), eligible
+    )
+    assert not _validate_locked_factorized_outcome(
+        "b", _factorized_row("b", success=False), eligible
+    )
+
+
+@pytest.mark.parametrize(
+    ("entry_id", "row"),
+    [
+        ("a", _factorized_row("a", success=False)),
+        ("b", _factorized_row("b", success=True)),
+        (
+            "b",
+            _factorized_row(
+                "b", success=False, code="feature_missing_context"
+            ),
+        ),
+        ("b", _factorized_row("b", success=False, exclusions=1)),
+    ],
+)
+def test_expected_abstention_rejects_wrong_id_error_or_exclusion(
+    entry_id: str, row: SimpleNamespace
+):
+    with pytest.raises(LockedBenchmarkError):
+        _validate_locked_factorized_outcome(entry_id, row, frozenset({"a"}))
+
+
+def test_resource_assignments_use_only_eligible_ids():
+    assignments = _eligible_resource_assignments(
+        dataset_ids=("a", "b", "c"),
+        eligible_ids=frozenset({"a", "c"}),
+    )
+    assert set(assignments) == {"a", "c"}
+    assert "b" not in assignments
+
+
+def test_locked_worker_contract_is_role_specific():
+    assert _validate_locked_jobs("factorized-accuracy", 32) == 32
+    assert _validate_locked_jobs("legacy-accuracy", 32) == 32
+    assert _validate_locked_jobs("paired-sword-resources", 1) == 1
+    with pytest.raises(LockedBenchmarkError):
+        _validate_locked_jobs("factorized-accuracy", 31)
+    with pytest.raises(LockedBenchmarkError):
+        _validate_locked_jobs("paired-sword-resources", 2)
+
+
+def test_factorized_accuracy_parallelizes_runs_and_does_not_score_abstentions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    structures = tuple(
+        SimpleNamespace(
+            entry=SimpleNamespace(entry_id=entry_id),
+            numbering=SimpleNamespace(),
+        )
+        for entry_id in ("a", "b")
+    )
+    preflight = SimpleNamespace(structures=structures, eligible_ids=("a",))
+    args = SimpleNamespace(
+        locked_role="factorized-accuracy",
+        locked_jobs=32,
+        results_dir=tmp_path,
+    )
+    executor_workers: list[int] = []
+    real_executor = run_benchmark.ThreadPoolExecutor
+
+    def executor(*, max_workers: int):
+        executor_workers.append(max_workers)
+        return real_executor(max_workers=max_workers)
+
+    def locked_run(structure, selector, process_dir, **kwargs):
+        entry_id = structure.entry.entry_id
+        row = _factorized_row(entry_id, success=entry_id == "a")
+        row.tool = "sword2-rust"
+        row.selector_variant = selector
+        row.pair_position = ""
+        row.runtime_s = 1.0
+        row.peak_rss_kb = 1024
+        return [SimpleNamespace(name="prediction")], row
+
+    scored: list[str] = []
+
+    def score(entry, numbering, prediction, **kwargs):
+        scored.append(entry.entry_id)
+        return SimpleNamespace(
+            entry_id=entry.entry_id,
+            tool="sword2-rust",
+            variant="optimal",
+            partition="Optimal partition",
+        )
+
+    monkeypatch.setattr(run_benchmark, "ThreadPoolExecutor", executor)
+    monkeypatch.setattr(run_benchmark, "_locked_sword_run", locked_run)
+    monkeypatch.setattr(run_benchmark, "score_prediction", score)
+    monkeypatch.setattr(run_benchmark, "_atomic_write_rows", lambda *args: None)
+
+    scores, runs, failures, order = run_benchmark._run_locked_accuracy(
+        preflight, args
+    )
+
+    assert executor_workers == [32]
+    assert scored == ["a"]
+    assert [row.entry_id for row in runs] == ["a", "b"]
+    assert [row.entry_id for row in scores] == ["a"]
+    assert failures == []
+    assert order is None
+
+
+def test_locked_factorized_role_evidence_matches_frozen_eligibility_sets():
+    eligible = _factorized_row("a", success=True)
+    eligible.tool = "sword2-rust"
+    eligible.selector_variant = "factorized"
+    abstained = _factorized_row("b", success=False)
+    abstained.tool = "sword2-rust"
+    abstained.selector_variant = "factorized"
+    preflight = SimpleNamespace(
+        dataset_ids=("a", "b"),
+        eligible_ids=("a",),
+        ineligible_ids=("b",),
+    )
+    args = SimpleNamespace(locked_role="factorized-accuracy")
+    scores = [SimpleNamespace(entry_id="a", tool="sword2-rust")]
+
+    assert _validate_locked_role_evidence(
+        preflight, args, scores=scores, runs=[eligible, abstained]
+    ) == frozenset({"b"})
+
+    with pytest.raises(LockedBenchmarkError):
+        _validate_locked_role_evidence(
+            preflight,
+            args,
+            scores=[*scores, SimpleNamespace(entry_id="b", tool="sword2-rust")],
+            runs=[eligible, abstained],
+        )
+
+
+def test_locked_intent_binds_eligibility_population_and_worker_contract():
+    preflight = SimpleNamespace(
+        dataset_sha256="d" * 64,
+        dataset_ids=("a", "b"),
+        dataset_id_set_sha256="i" * 64,
+        runtime_manifest_sha256="r" * 64,
+        model_manifest_sha256="m" * 64,
+        runtime_manifest={"binary_sha256": "b" * 64},
+        structure_tree_sha256="s" * 64,
+        selected_tools=("sword2-rust",),
+        external_artifacts={},
+        eligibility_manifest_sha256="e" * 64,
+        eligibility_policy="strict_complete_backbone_v1",
+        eligible_ids=("a",),
+        ineligible_ids=("b",),
+        eligibility_manifest={
+            "eligible_id_set_sha256": "a" * 64,
+            "ineligible_id_set_sha256": "c" * 64,
+        },
+    )
+    args = SimpleNamespace(
+        locked_role="factorized-accuracy",
+        dataset="cath663",
+        locked_jobs=32,
+    )
+
+    payload = run_benchmark._locked_intent_payload(
+        preflight, args, "2026-08-12T00:00:00+00:00"
+    )
+
+    assert payload["schema_version"] == 2
+    assert payload["eligibility_manifest_sha256"] == "e" * 64
+    assert payload["factorized_eligible_count"] == 1
+    assert payload["structural_abstention_count"] == 1
+    assert payload["locked_jobs"] == 32
+
+
+def test_locked_parser_requires_explicit_eligibility_and_worker_inputs():
+    args = run_benchmark.parse_args(
+        [
+            "--locked-factorized-manifest",
+            "runtime.json",
+            "--locked-eligibility-manifest",
+            "eligibility.json",
+            "--locked-role",
+            "factorized-accuracy",
+            "--locked-jobs",
+            "32",
+        ]
+    )
+    assert args.locked_eligibility_manifest == Path("eligibility.json")
+    assert args.locked_jobs == 32
+
+
+def test_locked_mode_rejects_a_partial_authority_tuple(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        run_benchmark.sys,
+        "argv",
+        [
+            "run_benchmark",
+            "--locked-factorized-manifest",
+            "runtime.json",
+            "--locked-eligibility-manifest",
+            "eligibility.json",
+            "--locked-role",
+            "factorized-accuracy",
+        ],
+    )
+
+    assert run_benchmark.main() == 2
+
+
 def test_locked_run_header_is_separate_and_ordinary_header_is_unchanged(tmp_path: Path):
     ordinary_path = tmp_path / "ordinary.csv"
     locked_path = tmp_path / "locked.csv"
@@ -113,7 +366,13 @@ def test_locked_top_level_command_normalizes_relative_and_embedded_paths(
     monkeypatch.chdir(tmp_path)
     for path in (tmp_path / "cache", tmp_path / "tool"):
         path.mkdir()
-    for path in (tmp_path / "sword2", tmp_path / "runtime.json", tmp_path / "ids.txt", tmp_path / "tool/python"):
+    for path in (
+        tmp_path / "sword2",
+        tmp_path / "runtime.json",
+        tmp_path / "eligibility.json",
+        tmp_path / "ids.txt",
+        tmp_path / "tool/python",
+    ):
         path.write_text("x")
     preflight = SimpleNamespace(
         repo_root=tmp_path.resolve(),
@@ -125,6 +384,7 @@ def test_locked_top_level_command_normalizes_relative_and_embedded_paths(
         cache_dir=Path("cache"),
         results_dir=(tmp_path / "results").absolute(),
         locked_factorized_manifest=Path("runtime.json"),
+        locked_eligibility_manifest=Path("eligibility.json"),
         chainsaw_expected_success_ids=Path("ids.txt"),
         locked_artifact=["merizo_python=tool/python"],
     )
@@ -133,6 +393,7 @@ def test_locked_top_level_command_normalizes_relative_and_embedded_paths(
         "--cache-dir", "cache",
         "--results-dir", "results",
         "--locked-factorized-manifest", "runtime.json",
+        "--locked-eligibility-manifest", "eligibility.json",
         "--chainsaw-expected-success-ids", "ids.txt",
         "--locked-artifact", "merizo_python=tool/python",
     ]
@@ -142,6 +403,7 @@ def test_locked_top_level_command_normalizes_relative_and_embedded_paths(
         "--cache-dir", "<cache>",
         "--results-dir", "<results>",
         "--locked-factorized-manifest", "<runtime_manifest>",
+        "--locked-eligibility-manifest", "<eligibility_manifest>",
         "--chainsaw-expected-success-ids", "<chainsaw_expected_success_ids>",
         "--locked-artifact", "merizo_python=<locked_artifact:merizo_python>",
     ]
