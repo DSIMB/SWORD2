@@ -1018,7 +1018,7 @@ def _gnu_time_version() -> str:
         text=True,
     )
     version = "\n".join(part.strip() for part in (completed.stdout, completed.stderr) if part.strip())
-    if completed.returncode != 0 or "GNU time" not in version:
+    if completed.returncode != 0 or "gnu time" not in version.casefold():
         raise LockedBenchmarkError("/usr/bin/time is not GNU time")
     return version
 

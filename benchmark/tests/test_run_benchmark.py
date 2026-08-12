@@ -9,6 +9,7 @@ import pytest
 
 import benchmark.run_benchmark as run_benchmark
 from benchmark.run_benchmark import (
+    _gnu_time_version,
     _normalized_command,
     _split_locked_merizo_stdout,
     counterbalanced_pair_orders,
@@ -22,6 +23,10 @@ from benchmark.score import LockedRunRow, RunRow, write_locked_runs_csv, write_r
 LEGACY_STATUS = b'{"error_code":null,"excluded_candidate_count":0,"fallback":false,"requested_selector":"legacy","schema_version":1,"selector_used":"legacy"}\n'
 FACTORIZED_STATUS = b'{"error_code":null,"excluded_candidate_count":2,"fallback":false,"requested_selector":"factorized","schema_version":1,"selector_used":"factorized"}\n'
 FALLBACK_STATUS = b'{"error_code":"feature_missing_context","excluded_candidate_count":2,"fallback":true,"requested_selector":"factorized","schema_version":1,"selector_used":"legacy"}\n'
+
+
+def test_installed_gnu_time_version_accepts_distribution_capitalization():
+    assert "gnu time" in _gnu_time_version().casefold()
 
 
 def test_locked_artifact_recheck_paths_preserve_symlink_identity(
