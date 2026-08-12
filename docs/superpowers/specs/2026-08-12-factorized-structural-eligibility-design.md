@@ -141,8 +141,8 @@ The Rust inspector produces a canonical, schema-versioned record with:
 - structural coverage as complete count divided by candidate count;
 - `eligible`;
 - one entry per incomplete residue containing original author residue number,
-  chain identifier, and a sorted `missing_atoms` list drawn from `N`, `CA`, `C`,
-  and `O`;
+  chain identifier, and a `missing_atoms` subsequence in the canonical backbone
+  order `N`, `CA`, `C`, `O`;
 - a stable reason code for an empty candidate-residue population.
 
 Structural coverage is `0.0` when the candidate-residue count is zero; otherwise
@@ -292,7 +292,7 @@ remain invalid locked evidence.
 ### Rust unit and integration tests
 
 - A complete standard residue is eligible.
-- Missing N, CA, C, or O is reported with the exact sorted missing-atom list.
+- Missing N, CA, C, or O is reported in canonical backbone order.
 - NaN or infinite required coordinates are ineligible.
 - Blank and `A` alternate locations match DSSP semantics; other alternate
   locations alone do not satisfy eligibility.
