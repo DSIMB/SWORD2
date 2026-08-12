@@ -29,14 +29,18 @@ from benchmark.factorized_ranker.runtime_freeze import (
     sha256_file,
     verify_runtime_freeze,
 )
+from benchmark.factorized_ranker.eligibility import (
+    POLICY as FACTORIZED_ELIGIBILITY_POLICY,
+    load_eligibility_manifest,
+)
 from benchmark.factorized_ranker.model_artifact import verify_top_level_manifest
 from benchmark.datasets import CathEntry, parse_cath_domain_string, read_merizo_csv
 from benchmark.score import FailureRow, LockedRunRow
 from benchmark.stats import paired_chain_bootstrap
 
 
-ACCEPTANCE_SCHEMA_VERSION = 1
-COVERAGE_SCHEMA_VERSION = 1
+ACCEPTANCE_SCHEMA_VERSION = 2
+COVERAGE_SCHEMA_VERSION = 2
 LOCKED_POPULATION_SIZE = 663
 BOOTSTRAP = {
     "method": "paired_chain_mean_delta",
@@ -89,6 +93,13 @@ LOCKED_MANIFEST_KEYS = {
     "order_design",
     "model_manifest_sha256",
     "runtime_manifest_sha256",
+    "eligibility_manifest_sha256",
+    "eligibility_policy",
+    "factorized_eligible_count",
+    "factorized_eligible_id_set_sha256",
+    "structural_abstention_count",
+    "structural_abstention_id_set_sha256",
+    "locked_jobs",
     "binary_sha256",
     "runtime_source_git_commit",
     "runtime_input_tree_sha256",
@@ -123,10 +134,17 @@ COVERAGE_KEYS = {
     "roles",
     "model_manifest_sha256",
     "runtime_manifest_sha256",
+    "eligibility_manifest_sha256",
+    "eligibility_policy",
     "binary_sha256",
     "dataset_sha256",
     "dataset_id_count",
     "dataset_id_set_sha256",
+    "factorized_eligible_count",
+    "factorized_eligible_id_set_sha256",
+    "structural_abstention_count",
+    "structural_abstention_id_set_sha256",
+    "factorized_structural_coverage",
     "chainsaw_success_count",
     "chainsaw_success_id_set_sha256",
     "chainsaw_failure_count",
@@ -172,6 +190,7 @@ EVIDENCE_ARGUMENT_NAMES = (
     "chainsaw_expected_success_ids",
     "model_manifest",
     "runtime_manifest",
+    "eligibility_manifest",
     "standalone_baseline",
 )
 
@@ -352,7 +371,7 @@ def _load_locked_manifest(path: Path, role: str) -> dict[str, object]:
         raise InvalidEvidence(f"locked {role} manifest schema mismatch")
     if (
         type(manifest["schema_version"]) is not int
-        or manifest["schema_version"] != 1
+        or manifest["schema_version"] != 2
         or manifest["status"] != "complete"
     ):
         raise InvalidEvidence(f"locked {role} manifest is incomplete")
@@ -365,6 +384,23 @@ def _load_locked_manifest(path: Path, role: str) -> dict[str, object]:
         raise InvalidEvidence(f"locked {role} dataset ID hash mismatch")
     if manifest["sword2_threads"] != 1:
         raise InvalidEvidence(f"locked {role} thread count mismatch")
+    expected_jobs = 1 if role == "paired-sword-resources" else 32
+    if manifest["locked_jobs"] != expected_jobs:
+        raise InvalidEvidence(f"locked {role} worker count mismatch")
+    if manifest["eligibility_policy"] != FACTORIZED_ELIGIBILITY_POLICY:
+        raise InvalidEvidence(f"locked {role} eligibility policy mismatch")
+    if (
+        _ordinary_int(
+            manifest["factorized_eligible_count"],
+            f"locked {role} eligible count",
+        )
+        + _ordinary_int(
+            manifest["structural_abstention_count"],
+            f"locked {role} structural-abstention count",
+        )
+        != len(ids)
+    ):
+        raise InvalidEvidence(f"locked {role} eligibility counts mismatch")
     if manifest["dataset"] != "cath663":
         raise InvalidEvidence(f"locked {role} dataset name mismatch")
     expected_tools = {
@@ -398,6 +434,9 @@ def _load_locked_manifest(path: Path, role: str) -> dict[str, object]:
         "raw_evidence_tree_sha256",
         "model_manifest_sha256",
         "runtime_manifest_sha256",
+        "eligibility_manifest_sha256",
+        "factorized_eligible_id_set_sha256",
+        "structural_abstention_id_set_sha256",
         "binary_sha256",
         "runtime_input_tree_sha256",
         "evidence_tool_tree_sha256",
@@ -445,6 +484,9 @@ def _load_locked_manifest(path: Path, role: str) -> dict[str, object]:
         or option_value("--cache-dir") != "<cache>"
         or option_value("--results-dir") != "<results>"
         or option_value("--locked-factorized-manifest") != "<runtime_manifest>"
+        or option_value("--locked-eligibility-manifest")
+        != "<eligibility_manifest>"
+        or option_value("--locked-jobs") != str(expected_jobs)
         or option_value("--sword2-threads") != "1"
         or option_value("--tools") != ",".join(expected_tools)
         or normalized_argv.count("--strict") != 1
@@ -625,6 +667,7 @@ def _validate_sword_run(
     result_root: Path,
     *,
     resource: bool,
+    structural_abstention: bool = False,
 ) -> None:
     if row["tool"] != "sword2-rust" or row["selector_variant"] != selector:
         raise InvalidEvidence("locked SWORD selector row mismatch")
@@ -640,10 +683,24 @@ def _validate_sword_run(
         raise InvalidEvidence("locked SWORD runtime/RSS/status values are malformed") from error
     if not math.isfinite(runtime) or runtime <= 0 or rss <= 0 or exclusions < 0:
         raise InvalidEvidence("locked SWORD runtime/RSS/status values are invalid")
-    if (
+    fallback = _parse_bool_cell(row["fallback"], "locked fallback")
+    if structural_abstention:
+        if not (
+            selector == "factorized"
+            and row["requested_selector"] == "factorized"
+            and row["selector_used"] == "legacy"
+            and fallback is True
+            and row["error_code"] == "structural_quality_abstention"
+            and row["selector_warning_code"] == "factorized_fallback"
+            and exclusions == 0
+        ):
+            raise InvalidEvidence(
+                "locked structural abstention status is inconsistent"
+            )
+    elif (
         row["requested_selector"] != selector
         or row["selector_used"] != selector
-        or _parse_bool_cell(row["fallback"], "locked fallback")
+        or fallback
         or row["error_code"]
         or row["selector_warning_code"]
     ):
@@ -708,10 +765,24 @@ def _validate_sword_run(
     from benchmark.run_benchmark import parse_selector_status
 
     try:
-        parsed_status = parse_selector_status(status_path.read_bytes(), selector)
+        parsed_status = parse_selector_status(
+            status_path.read_bytes(),
+            selector,
+            require_success=not structural_abstention,
+        )
     except ValueError as error:
         raise InvalidEvidence("locked SWORD status bytes are invalid") from error
-    if int(parsed_status["excluded_candidate_count"]) != exclusions:
+    parsed_error = (
+        "" if parsed_status["error_code"] is None else str(parsed_status["error_code"])
+    )
+    if (
+        int(parsed_status["excluded_candidate_count"]) != exclusions
+        or str(parsed_status["requested_selector"])
+        != row["requested_selector"]
+        or str(parsed_status["selector_used"]) != row["selector_used"]
+        or bool(parsed_status["fallback"]) is not fallback
+        or parsed_error != row["error_code"]
+    ):
         raise InvalidEvidence("locked SWORD exclusion count disagrees with status bytes")
     if resource:
         if row["pair_order"] not in {"legacy_first", "factorized_first"} or row["pair_position"] not in {"1", "2"}:
@@ -806,6 +877,8 @@ def _validate_role_runs(
     rows: list[dict[str, str]],
     manifest: Mapping[str, object],
     expected_ids: set[str],
+    factorized_eligible_ids: set[str],
+    structural_abstention_ids: set[str],
     chainsaw_ids: set[str],
     result_root: Path,
 ) -> tuple[int, int]:
@@ -824,12 +897,13 @@ def _validate_role_runs(
     fallback_count = 0
     exclusions = 0
     if role == "paired-sword-resources":
-        if len(rows) != 2 * len(expected_ids):
+        resource_ids = factorized_eligible_ids
+        if len(rows) != 2 * len(resource_ids):
             raise InvalidEvidence("paired resource rows are incomplete")
         by_id: dict[str, list[dict[str, str]]] = {}
         for row in rows:
             by_id.setdefault(row["entry_id"], []).append(row)
-        if set(by_id) != expected_ids:
+        if set(by_id) != resource_ids:
             raise InvalidEvidence("paired resource ID set mismatch")
         assignments = manifest["order_design"]
         if not isinstance(assignments, dict):
@@ -843,10 +917,10 @@ def _validate_role_runs(
         ):
             raise InvalidEvidence("paired resource assignments are malformed")
         frozen = {entry_id: first for entry_id, first in assignment_rows}
-        if set(frozen) != expected_ids:
+        if set(frozen) != resource_ids:
             raise InvalidEvidence("paired resource order assignment mismatch")
         ordered = sorted(
-            expected_ids,
+            resource_ids,
             key=lambda entry_id: (
                 hashlib.sha256(b"37\0" + entry_id.encode("utf-8")).digest(),
                 entry_id,
@@ -895,8 +969,32 @@ def _validate_role_runs(
         if len(sword_rows) != len(expected_ids) or {row["entry_id"] for row in sword_rows} != expected_ids:
             raise InvalidEvidence(f"locked {role} SWORD run coverage mismatch")
         for row in sword_rows:
-            _validate_sword_run(row, selector, manifest, result_root, resource=False)
+            structural_abstention = (
+                role == "factorized-accuracy"
+                and row["entry_id"] in structural_abstention_ids
+            )
+            _validate_sword_run(
+                row,
+                selector,
+                manifest,
+                result_root,
+                resource=False,
+                structural_abstention=structural_abstention,
+            )
+            fallback_count += int(
+                _parse_bool_cell(row["fallback"], "locked fallback")
+            )
             exclusions += int(row["excluded_candidate_count"])
+        if role == "factorized-accuracy":
+            observed_abstentions = {
+                row["entry_id"]
+                for row in sword_rows
+                if _parse_bool_cell(row["fallback"], "locked fallback")
+            }
+            if observed_abstentions != structural_abstention_ids:
+                raise InvalidEvidence(
+                    "factorized abstention IDs disagree with eligibility"
+                )
         other = [row for row in rows if row["tool"] != "sword2-rust"]
         if role == "factorized-accuracy":
             if other:
@@ -961,6 +1059,7 @@ def _validate_external_artifacts(manifest: Mapping[str, object]) -> None:
 def _validate_manifest_accounting(
     manifest: Mapping[str, object],
     expected_ids: set[str],
+    factorized_eligible_ids: set[str],
     chainsaw_ids: set[str],
     score_rows: list[dict[str, str]] | None,
     failure_rows: list[dict[str, str]],
@@ -969,11 +1068,11 @@ def _validate_manifest_accounting(
     expected_success: dict[str, set[str]]
     if role == "paired-sword-resources":
         expected_success = {
-            "sword2-rust:factorized": expected_ids,
-            "sword2-rust:legacy": expected_ids,
+            "sword2-rust:factorized": factorized_eligible_ids,
+            "sword2-rust:legacy": factorized_eligible_ids,
         }
     elif role == "factorized-accuracy":
-        expected_success = {"sword2-rust": expected_ids}
+        expected_success = {"sword2-rust": factorized_eligible_ids}
     else:
         expected_success = {
             "sword2-rust": expected_ids,
@@ -1122,6 +1221,12 @@ def _manifest_common_identity(manifest: Mapping[str, object]) -> dict[str, objec
             "structure_tree_sha256",
             "model_manifest_sha256",
             "runtime_manifest_sha256",
+            "eligibility_manifest_sha256",
+            "eligibility_policy",
+            "factorized_eligible_count",
+            "factorized_eligible_id_set_sha256",
+            "structural_abstention_count",
+            "structural_abstention_id_set_sha256",
             "binary_sha256",
             "runtime_source_git_commit",
             "runtime_input_tree_sha256",
@@ -1195,6 +1300,32 @@ def _build_coverage_attestation(
         )
     metadata = {entry.entry_id: entry for entry in metadata_entries}
     expected_ids = set(metadata)
+    try:
+        eligibility = load_eligibility_manifest(paths["eligibility_manifest"])
+    except (OSError, ValueError) as error:
+        raise InvalidEvidence("eligibility manifest is invalid") from error
+    eligibility_hash = sha256_file(paths["eligibility_manifest"])
+    if (
+        eligibility["dataset"] != "cath663"
+        or eligibility["dataset_sha256"]
+        != sha256_file(paths["dataset_metadata"])
+        or eligibility["dataset_ids"] != metadata_ids
+        or eligibility["dataset_id_count"] != expected_population
+        or eligibility["dataset_id_set_sha256"] != metadata_id_hash
+        or eligibility["runtime_manifest_sha256"] != runtime_hash
+        or eligibility["runtime_source_git_commit"]
+        != runtime_manifest["runtime_source_git_commit"]
+        or eligibility["binary_sha256"] != runtime_manifest["binary_sha256"]
+        or eligibility["policy"] != FACTORIZED_ELIGIBILITY_POLICY
+    ):
+        raise InvalidEvidence("eligibility authority chain mismatch")
+    factorized_eligible_ids = set(eligibility["eligible_ids"])
+    structural_abstention_ids = set(eligibility["ineligible_ids"])
+    if (
+        factorized_eligible_ids & structural_abstention_ids
+        or factorized_eligible_ids | structural_abstention_ids != expected_ids
+    ):
+        raise InvalidEvidence("eligibility IDs do not partition the dataset")
     chainsaw_tuple = _load_expected_ids(paths["chainsaw_expected_success_ids"])
     chainsaw_ids = set(chainsaw_tuple)
     if not chainsaw_ids or not chainsaw_ids.issubset(expected_ids):
@@ -1219,6 +1350,19 @@ def _build_coverage_attestation(
         or common["dataset_id_set_sha256"] != metadata_id_hash
         or common["model_manifest_sha256"] != model_hash
         or common["runtime_manifest_sha256"] != runtime_hash
+        or common["eligibility_manifest_sha256"] != eligibility_hash
+        or common["eligibility_policy"] != eligibility["policy"]
+        or common["factorized_eligible_count"]
+        != len(factorized_eligible_ids)
+        or common["factorized_eligible_id_set_sha256"]
+        != eligibility["eligible_id_set_sha256"]
+        or common["structural_abstention_count"]
+        != len(structural_abstention_ids)
+        or common["structural_abstention_id_set_sha256"]
+        != eligibility["ineligible_id_set_sha256"]
+        or common["structure_sha256s"] != eligibility["structure_sha256s"]
+        or common["structure_tree_sha256"]
+        != eligibility["structure_tree_sha256"]
         or common["binary_sha256"] != runtime_manifest["binary_sha256"]
         or common["runtime_source_git_commit"]
         != runtime_manifest["runtime_source_git_commit"]
@@ -1275,6 +1419,7 @@ def _build_coverage_attestation(
         _validate_manifest_accounting(
             manifest,
             expected_ids,
+            factorized_eligible_ids,
             chainsaw_ids,
             score_rows.get(short_role),
             failure_rows[short_role],
@@ -1283,6 +1428,8 @@ def _build_coverage_attestation(
             run_rows[short_role],
             manifest,
             expected_ids,
+            factorized_eligible_ids,
+            structural_abstention_ids,
             chainsaw_ids,
             paths[f"{prefix}_manifest"].parent,
         )
@@ -1298,7 +1445,7 @@ def _build_coverage_attestation(
         score_rows["factorized"],
         role="factorized-accuracy",
         metadata=metadata,
-        expected_ids=expected_ids,
+        expected_ids=factorized_eligible_ids,
         chainsaw_ids=chainsaw_ids,
     )
 
@@ -1323,17 +1470,30 @@ def _build_coverage_attestation(
         },
         "model_manifest_sha256": model_hash,
         "runtime_manifest_sha256": runtime_hash,
+        "eligibility_manifest_sha256": eligibility_hash,
+        "eligibility_policy": str(eligibility["policy"]),
         "binary_sha256": runtime_manifest["binary_sha256"],
         "dataset_sha256": sha256_file(paths["dataset_metadata"]),
         "dataset_id_count": expected_population,
         "dataset_id_set_sha256": metadata_id_hash,
+        "factorized_eligible_count": len(factorized_eligible_ids),
+        "factorized_eligible_id_set_sha256": eligibility[
+            "eligible_id_set_sha256"
+        ],
+        "structural_abstention_count": len(structural_abstention_ids),
+        "structural_abstention_id_set_sha256": eligibility[
+            "ineligible_id_set_sha256"
+        ],
+        "factorized_structural_coverage": (
+            len(factorized_eligible_ids) / expected_population
+        ),
         "chainsaw_success_count": len(chainsaw_ids),
         "chainsaw_success_id_set_sha256": canonical_id_set_hash(chainsaw_ids),
         "chainsaw_failure_count": len(expected_ids - chainsaw_ids),
         "chainsaw_failure_id_set_sha256": canonical_id_set_hash(
             expected_ids - chainsaw_ids
         ),
-        "resource_pair_count": expected_population,
+        "resource_pair_count": len(factorized_eligible_ids),
         "resource_order_sha256": resource_order["assignments_sha256"],
         "selector_counts": selector_counts,
         "fallback_count": sum(
@@ -1355,13 +1515,16 @@ def _validate_coverage_payload(payload: Mapping[str, object]) -> None:
         or payload["schema_version"] != COVERAGE_SCHEMA_VERSION
         or payload["valid"] is not True
     ):
-        raise InvalidEvidence("coverage attestation is not valid schema v1")
+        raise InvalidEvidence("coverage attestation is not valid schema v2")
     for field in (
         "model_manifest_sha256",
         "runtime_manifest_sha256",
+        "eligibility_manifest_sha256",
         "binary_sha256",
         "dataset_sha256",
         "dataset_id_set_sha256",
+        "factorized_eligible_id_set_sha256",
+        "structural_abstention_id_set_sha256",
         "chainsaw_success_id_set_sha256",
         "chainsaw_failure_id_set_sha256",
         "resource_order_sha256",
@@ -1369,6 +1532,8 @@ def _validate_coverage_payload(payload: Mapping[str, object]) -> None:
         _hash_value(payload[field], f"coverage {field}")
     for field in (
         "dataset_id_count",
+        "factorized_eligible_count",
+        "structural_abstention_count",
         "chainsaw_success_count",
         "chainsaw_failure_count",
         "resource_pair_count",
@@ -1376,6 +1541,12 @@ def _validate_coverage_payload(payload: Mapping[str, object]) -> None:
         "excluded_candidate_count",
     ):
         _ordinary_int(payload[field], f"coverage {field}")
+    if payload["eligibility_policy"] != FACTORIZED_ELIGIBILITY_POLICY:
+        raise InvalidEvidence("coverage eligibility policy mismatch")
+    structural_coverage = _finite_float(
+        payload["factorized_structural_coverage"],
+        "coverage factorized structural coverage",
+    )
     if payload["roles"] != {
         "legacy": "legacy-accuracy",
         "factorized": "factorized-accuracy",
@@ -1388,10 +1559,17 @@ def _validate_coverage_payload(payload: Mapping[str, object]) -> None:
     for value in evidence.values():
         _hash_value(value, "coverage evidence hash")
     if (
-        payload["resource_pair_count"] != payload["dataset_id_count"]
+        payload["factorized_eligible_count"]
+        + payload["structural_abstention_count"]
+        != payload["dataset_id_count"]
+        or payload["resource_pair_count"]
+        != payload["factorized_eligible_count"]
         or payload["chainsaw_success_count"] + payload["chainsaw_failure_count"]
         != payload["dataset_id_count"]
-        or payload["fallback_count"] != 0
+        or payload["fallback_count"]
+        != payload["structural_abstention_count"]
+        or structural_coverage
+        != payload["factorized_eligible_count"] / payload["dataset_id_count"]
     ):
         raise InvalidEvidence("coverage denominator/fallback accounting mismatch")
     selector_counts = payload["selector_counts"]
@@ -1407,10 +1585,11 @@ def _validate_coverage_payload(payload: Mapping[str, object]) -> None:
     ):
         raise InvalidEvidence("coverage selector-count records are invalid")
     population = payload["dataset_id_count"]
+    eligible = payload["factorized_eligible_count"]
     if selector_counts != {
         "legacy": {"legacy": population, "factorized": 0},
         "factorized": {"legacy": 0, "factorized": population},
-        "resource": {"legacy": population, "factorized": population},
+        "resource": {"legacy": eligible, "factorized": eligible},
     }:
         raise InvalidEvidence("coverage selector counts do not prove complete roles")
 
@@ -1908,17 +2087,49 @@ def _build_acceptance_payload(
     all_ids = {entry.entry_id for entry in metadata_entries}
     if len(all_ids) != coverage["dataset_id_count"]:
         raise InvalidEvidence("metric population differs from coverage")
-    chainsaw_ids = expected_ids
+    try:
+        eligibility = load_eligibility_manifest(paths["eligibility_manifest"])
+    except (OSError, ValueError) as error:
+        raise InvalidEvidence("metric eligibility manifest is invalid") from error
+    eligible_ids = set(eligibility["eligible_ids"])
+    structural_abstention_ids = set(eligibility["ineligible_ids"])
+    if (
+        eligible_ids | structural_abstention_ids != all_ids
+        or eligible_ids & structural_abstention_ids
+        or sha256_file(paths["eligibility_manifest"])
+        != coverage["eligibility_manifest_sha256"]
+        or len(eligible_ids) != coverage["factorized_eligible_count"]
+        or eligibility["eligible_id_set_sha256"]
+        != coverage["factorized_eligible_id_set_sha256"]
+        or len(structural_abstention_ids)
+        != coverage["structural_abstention_count"]
+        or eligibility["ineligible_id_set_sha256"]
+        != coverage["structural_abstention_id_set_sha256"]
+    ):
+        raise InvalidEvidence("metric eligibility differs from validated coverage")
+    chainsaw_ids = expected_ids & eligible_ids
+    if not chainsaw_ids:
+        raise InvalidEvidence(
+            "no frozen Chainsaw success remains in the eligible population"
+        )
 
     factorized = _select_score_rows(
         paths["factorized_scores"],
         tool="sword2-rust",
-        expected_ids=all_ids,
+        expected_ids=eligible_ids,
         rank_one=True,
         description="factorized",
         source_role="factorized_scores",
     )
-    merizo = _select_score_rows(
+    legacy_full = _select_score_rows(
+        paths["legacy_scores"],
+        tool="sword2-rust",
+        expected_ids=all_ids,
+        rank_one=True,
+        description="runtime legacy",
+        source_role="legacy_scores",
+    )
+    merizo_full = _select_score_rows(
         paths["legacy_scores"],
         tool="merizo",
         expected_ids=all_ids,
@@ -1926,20 +2137,32 @@ def _build_acceptance_payload(
         description="merizo",
         source_role="legacy_scores",
     )
-    chainsaw = _select_score_rows(
+    chainsaw_full = _select_score_rows(
         paths["legacy_scores"],
         tool="chainsaw",
-        expected_ids=chainsaw_ids,
+        expected_ids=expected_ids,
         rank_one=False,
         description="chainsaw",
         source_role="legacy_scores",
     )
-    standalone = _load_standalone_metrics(paths["standalone_baseline"], all_ids)
+    standalone_full = _load_standalone_metrics(
+        paths["standalone_baseline"], all_ids
+    )
+
+    def restrict(frame: pd.DataFrame, ids: set[str]) -> pd.DataFrame:
+        restricted = frame.loc[sorted(ids)].copy()
+        restricted.attrs = dict(frame.attrs)
+        return restricted
+
+    legacy = restrict(legacy_full, eligible_ids)
+    merizo = restrict(merizo_full, eligible_ids)
+    chainsaw = restrict(chainsaw_full, chainsaw_ids)
+    standalone = restrict(standalone_full, eligible_ids)
     factorized["continuity_cohort"] = pd.Series(
         _truth_cohorts(paths["dataset_metadata"], all_ids)
     ).reindex(factorized.index)
     legacy_resources, factorized_resources = _resource_metric_frames(
-        paths["resource_runs"], all_ids
+        paths["resource_runs"], eligible_ids
     )
 
     try:
@@ -1957,12 +2180,60 @@ def _build_acceptance_payload(
     diagnostics = {
         "accuracy": accuracy["diagnostics"],
         "resources": resources["diagnostics"],
+        "structural_coverage": {
+            "full_denominator": len(all_ids),
+            "factorized_eligible_count": len(eligible_ids),
+            "structural_abstention_count": len(structural_abstention_ids),
+            "factorized_structural_coverage": coverage[
+                "factorized_structural_coverage"
+            ],
+            "ineligibility_reason_counts": eligibility[
+                "ineligibility_reason_counts"
+            ],
+        },
+        "conditional_mean_ndo": {
+            "factorized": float(
+                _numeric_column(factorized, "ndo", "factorized scores").mean()
+            ),
+            "runtime_legacy": float(
+                _numeric_column(legacy, "ndo", "runtime legacy scores").mean()
+            ),
+            "merizo": float(
+                _numeric_column(merizo, "ndo", "Merizo scores").mean()
+            ),
+            "chainsaw": float(
+                _numeric_column(chainsaw, "ndo", "Chainsaw scores").mean()
+            ),
+            "chainsaw_denominator": len(chainsaw_ids),
+        },
+        "full_population_mean_ndo": {
+            "runtime_legacy": float(
+                _numeric_column(
+                    legacy_full, "ndo", "full runtime legacy scores"
+                ).mean()
+            ),
+            "merizo": float(
+                _numeric_column(merizo_full, "ndo", "full Merizo scores").mean()
+            ),
+            "chainsaw": float(
+                _numeric_column(
+                    chainsaw_full, "ndo", "frozen-success Chainsaw scores"
+                ).mean()
+            ),
+            "chainsaw_denominator": len(expected_ids),
+        },
         "selector_counts": coverage["selector_counts"],
         "fallback_count": coverage["fallback_count"],
         "excluded_candidate_count": coverage["excluded_candidate_count"],
         "resource_order_sha256": coverage["resource_order_sha256"],
         "source_sha256s": dict(sorted(coverage["evidence_sha256s"].items())),
     }
+    runtime_payload = load_canonical_json(paths["runtime_manifest"])
+    diagnostics["default_promotion_compatible"] = bool(
+        coverage["factorized_structural_coverage"] == 1.0
+        and runtime_payload.get("selector_cache_contract") == CACHE_CONTRACT
+        and CACHE_CONTRACT.get("default_promotion_compatible") is True
+    )
     denominators = {
         **accuracy["denominators"],
         **resources["denominators"],
@@ -2113,13 +2384,172 @@ def _validate_acceptance_payload(payload: Mapping[str, object]) -> None:
         or payload["all_gates_pass"] is not expected_pass
     ):
         raise InvalidEvidence("acceptance aggregate booleans are inconsistent")
-    if not isinstance(payload["diagnostics"], dict):
+    diagnostics = payload["diagnostics"]
+    expected_diagnostic_keys = {
+        "accuracy",
+        "resources",
+        "structural_coverage",
+        "conditional_mean_ndo",
+        "full_population_mean_ndo",
+        "selector_counts",
+        "fallback_count",
+        "excluded_candidate_count",
+        "resource_order_sha256",
+        "source_sha256s",
+        "default_promotion_compatible",
+    }
+    if not isinstance(diagnostics, dict) or set(diagnostics) != expected_diagnostic_keys:
         raise InvalidEvidence("acceptance denominator/diagnostic sections are invalid")
+    if not isinstance(diagnostics["accuracy"], dict) or not isinstance(
+        diagnostics["resources"], dict
+    ):
+        raise InvalidEvidence("acceptance metric diagnostics are invalid")
+    structural = diagnostics["structural_coverage"]
+    if not isinstance(structural, dict) or set(structural) != {
+        "full_denominator",
+        "factorized_eligible_count",
+        "structural_abstention_count",
+        "factorized_structural_coverage",
+        "ineligibility_reason_counts",
+    }:
+        raise InvalidEvidence("acceptance structural-coverage diagnostics are invalid")
+    full_count = _ordinary_int(
+        structural["full_denominator"], "acceptance full denominator", 1
+    )
+    eligible_count = _ordinary_int(
+        structural["factorized_eligible_count"],
+        "acceptance eligible count",
+        1,
+    )
+    abstention_count = _ordinary_int(
+        structural["structural_abstention_count"],
+        "acceptance abstention count",
+    )
+    structural_fraction = _finite_float(
+        structural["factorized_structural_coverage"],
+        "acceptance structural coverage",
+    )
+    reasons = structural["ineligibility_reason_counts"]
+    if not isinstance(reasons, dict) or any(
+        not isinstance(reason, str)
+        or not reason
+        or type(count) is not int
+        or count <= 0
+        for reason, count in reasons.items()
+    ):
+        raise InvalidEvidence("acceptance ineligibility reasons are invalid")
+    if (
+        eligible_count + abstention_count != full_count
+        or eligible_count != denominators["overall"]
+        or eligible_count != denominators["resources"]
+        or structural_fraction != eligible_count / full_count
+        or sum(reasons.values()) != abstention_count
+    ):
+        raise InvalidEvidence("acceptance structural-coverage accounting mismatch")
+    conditional = diagnostics["conditional_mean_ndo"]
+    if not isinstance(conditional, dict) or set(conditional) != {
+        "factorized",
+        "runtime_legacy",
+        "merizo",
+        "chainsaw",
+        "chainsaw_denominator",
+    }:
+        raise InvalidEvidence("acceptance conditional means are invalid")
+    full_means = diagnostics["full_population_mean_ndo"]
+    if not isinstance(full_means, dict) or set(full_means) != {
+        "runtime_legacy",
+        "merizo",
+        "chainsaw",
+        "chainsaw_denominator",
+    }:
+        raise InvalidEvidence("acceptance full-population means are invalid")
+    for description, record, names in (
+        (
+            "conditional",
+            conditional,
+            ("factorized", "runtime_legacy", "merizo", "chainsaw"),
+        ),
+        (
+            "full-population",
+            full_means,
+            ("runtime_legacy", "merizo", "chainsaw"),
+        ),
+    ):
+        for name in names:
+            value = _finite_float(record[name], f"acceptance {description} {name}")
+            if not 0.0 <= value <= 1.0:
+                raise InvalidEvidence(f"acceptance {description} {name} is outside [0,1]")
+    if (
+        conditional["factorized"] != gates["overall_ndo"]["value"]
+        or _ordinary_int(
+            conditional["chainsaw_denominator"],
+            "acceptance conditional Chainsaw denominator",
+            1,
+        )
+        != denominators["chainsaw"]
+        or _ordinary_int(
+            full_means["chainsaw_denominator"],
+            "acceptance full Chainsaw denominator",
+            1,
+        )
+        < denominators["chainsaw"]
+    ):
+        raise InvalidEvidence("acceptance mean diagnostics disagree with gates")
+    expected_selector_counts = {
+        "legacy": {"legacy": full_count, "factorized": 0},
+        "factorized": {"legacy": 0, "factorized": full_count},
+        "resource": {
+            "legacy": eligible_count,
+            "factorized": eligible_count,
+        },
+    }
+    if diagnostics["selector_counts"] != expected_selector_counts:
+        raise InvalidEvidence("acceptance selector-count diagnostics are invalid")
+    if (
+        diagnostics["fallback_count"] != abstention_count
+        or type(diagnostics["excluded_candidate_count"]) is not int
+        or diagnostics["excluded_candidate_count"] < 0
+    ):
+        raise InvalidEvidence("acceptance selector diagnostics are inconsistent")
+    _hash_value(
+        diagnostics["resource_order_sha256"],
+        "acceptance resource-order hash",
+    )
+    if diagnostics["source_sha256s"] != evidence:
+        raise InvalidEvidence("acceptance diagnostic source hashes mismatch")
+    promotion_compatible = diagnostics["default_promotion_compatible"]
+    if type(promotion_compatible) is not bool or (
+        structural_fraction < 1.0 and promotion_compatible
+    ):
+        raise InvalidEvidence("acceptance promotion compatibility is invalid")
 
 
 def _render_acceptance_markdown(results: Mapping[str, object]) -> bytes:
+    diagnostics = results.get("diagnostics", {})
+    coverage = (
+        diagnostics.get("structural_coverage", {})
+        if isinstance(diagnostics, Mapping)
+        else {}
+    )
+    if not isinstance(coverage, Mapping):
+        coverage = {}
+    eligible = coverage.get("factorized_eligible_count", "unknown")
+    full = coverage.get("full_denominator", "unknown")
+    abstentions = coverage.get("structural_abstention_count", "unknown")
+    fraction = coverage.get("factorized_structural_coverage")
+    fraction_text = (
+        f"{_finite_float(fraction, 'structural coverage'):.6%}"
+        if fraction is not None
+        else "unknown"
+    )
     lines = [
         "# Factorized structural ranker acceptance",
+        "",
+        f"Structural coverage: {eligible}/{full} ({fraction_text}); "
+        f"abstentions: {abstentions}.",
+        "",
+        "All performance gates below are conditional on structurally eligible chains. "
+        "Legacy fallbacks for abstained chains are not factorized scores.",
         "",
         "| Gate | Value | Rule | n | Result |",
         "|---|---:|:---:|---:|:---:|",
@@ -2221,6 +2651,7 @@ def _add_evidence_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--model-manifest", type=Path, required=True)
     parser.add_argument("--runtime-manifest", type=Path, required=True)
+    parser.add_argument("--eligibility-manifest", type=Path, required=True)
     parser.add_argument("--standalone-baseline", type=Path, required=True)
 
 
@@ -2323,6 +2754,7 @@ def _verify_commit_binding(args: argparse.Namespace) -> None:
         "chainsaw_expected_success_ids",
         "model_manifest",
         "runtime_manifest",
+        "eligibility_manifest",
         "standalone_baseline",
     }
     excluded = {
@@ -2376,6 +2808,8 @@ def _promotion_command(args: argparse.Namespace) -> int:
     reasons: list[str] = []
     if observed["all_gates_pass"] is not True:
         reasons.append("performance_gates_failed")
+    if coverage["factorized_structural_coverage"] < 1.0:
+        reasons.append("structural_coverage_incomplete")
     if runtime["selector_cache_contract"]["default_promotion_compatible"] is not True:
         reasons.append("cache_context_not_promotable")
     if reasons:

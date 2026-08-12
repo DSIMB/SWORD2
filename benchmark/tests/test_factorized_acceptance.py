@@ -58,6 +58,87 @@ def _write_score_rows(path: Path, rows: list[dict[str, object]]) -> None:
         writer.writerows(rows)
 
 
+def _rewrite_dict_rows(path: Path, rows: list[dict[str, object]]) -> None:
+    with path.open(newline="") as handle:
+        header = list(next(csv.reader(handle)))
+    with path.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=header)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _refresh_manifest_file_hashes(
+    paths: dict[str, Path], short_role: str
+) -> dict[str, object]:
+    manifest_path = paths[f"{short_role}_manifest"]
+    manifest = json.loads(manifest_path.read_bytes())
+    root = manifest_path.parent
+    runs_path = paths[f"{short_role}_runs"]
+    failures_path = paths[f"{short_role}_failures"]
+    manifest["runs_sha256"] = sha256_file(runs_path)
+    manifest["failures_sha256"] = sha256_file(failures_path)
+    if short_role != "resource":
+        scores_path = paths[f"{short_role}_scores"]
+        manifest["scores_sha256"] = sha256_file(scores_path)
+    raw_hashes = {
+        path.relative_to(root).as_posix(): sha256_file(path)
+        for path in sorted((root / "raw").rglob("*"))
+        if path.is_file()
+    }
+    manifest["raw_evidence_sha256s"] = raw_hashes
+    manifest["raw_evidence_tree_sha256"] = _mapping_hash(raw_hashes)
+    manifest_path.write_bytes(canonical_json_bytes(manifest))
+    return manifest
+
+
+def _rewrite_factorized_status(
+    paths: dict[str, Path],
+    entry_id: str,
+    *,
+    success: bool,
+    error_code: str = "structural_quality_abstention",
+    exclusions: int = 0,
+) -> None:
+    runs_path = paths["factorized_runs"]
+    rows = list(csv.DictReader(runs_path.open(newline="")))
+    row = next(item for item in rows if item["entry_id"] == entry_id)
+    status = {
+        "error_code": None if success else error_code,
+        "excluded_candidate_count": exclusions,
+        "fallback": not success,
+        "requested_selector": "factorized",
+        "schema_version": 1,
+        "selector_used": "factorized" if success else "legacy",
+    }
+    status_path = (
+        paths["factorized_manifest"].parent
+        / "raw"
+        / "sword"
+        / entry_id
+        / "factorized"
+        / "selector_status.json"
+    )
+    status_path.write_bytes(canonical_json_bytes(status))
+    row.update(
+        {
+            "selector_status_sha256": sha256_file(status_path),
+            "requested_selector": "factorized",
+            "selector_used": "factorized" if success else "legacy",
+            "fallback": str(not success),
+            "error_code": "" if success else error_code,
+            "selector_warning_code": "" if success else "factorized_fallback",
+            "excluded_candidate_count": str(exclusions),
+        }
+    )
+    _rewrite_dict_rows(runs_path, rows)
+    manifest = _refresh_manifest_file_hashes(paths, "factorized")
+    manifest["fallback_count"] = sum(row["fallback"] == "True" for row in rows)
+    manifest["excluded_candidate_count"] = sum(
+        int(row["excluded_candidate_count"]) for row in rows
+    )
+    paths["factorized_manifest"].write_bytes(canonical_json_bytes(manifest))
+
+
 def _mapping_hash(mapping: dict[str, str]) -> str:
     digest = hashlib.sha256()
     for name, value in sorted(mapping.items()):
@@ -72,16 +153,19 @@ def _mapping_hash(mapping: dict[str, str]) -> str:
 
 def _synthetic_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
     tmp_path.mkdir(parents=True, exist_ok=True)
-    ids = ["a", "b"]
+    ids = ["a", "b", "c"]
+    eligible_ids = ["a", "c"]
+    ineligible_ids = ["b"]
     metadata = tmp_path / "CATH-test.csv"
     metadata.write_text(
         "1aaa,a,A,2,x,100,1-50:1.1.1.1|51-100:2.2.2.2\n"
         "2bbb,b,B,2,x,100,1-20_80-100:1.1.1.1|21-79:2.2.2.2\n"
+        "3ccc,c,C,2,x,100,1-20_80-100:1.1.1.1|21-79:2.2.2.2\n"
     )
     chainsaw_ids = tmp_path / "chainsaw.txt"
-    chainsaw_ids.write_text("a\n")
+    chainsaw_ids.write_text("a\nb\n")
     standalone = tmp_path / "standalone.csv"
-    standalone.write_text("chain_id,ndo\na,0.85\nb,0.85\n")
+    standalone.write_text("chain_id,ndo\na,0.85\nb,0.85\nc,0.85\n")
     model = tmp_path / "model.json"
     model.write_bytes(canonical_json_bytes({"model": "test"}))
     runtime = tmp_path / "runtime.json"
@@ -95,6 +179,82 @@ def _synthetic_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict
     )
     model_hash = sha256_file(model)
     runtime_hash = sha256_file(runtime)
+    structures = {entry_id: (entry_id * 64)[:64] for entry_id in ids}
+    quality_records = {
+        "a": {
+            "candidate_residue_count": 1,
+            "chain_id": "A",
+            "complete_backbone_residue_count": 1,
+            "eligible": True,
+            "incomplete_residues": [],
+            "policy": "strict_complete_backbone_v1",
+            "reason_code": None,
+            "schema_version": 1,
+            "structural_coverage": 1.0,
+        },
+        "b": {
+            "candidate_residue_count": 1,
+            "chain_id": "B",
+            "complete_backbone_residue_count": 0,
+            "eligible": False,
+            "incomplete_residues": [
+                {
+                    "author_residue_number": 1,
+                    "chain_id": "B",
+                    "missing_atoms": ["O"],
+                }
+            ],
+            "policy": "strict_complete_backbone_v1",
+            "reason_code": None,
+            "schema_version": 1,
+            "structural_coverage": 0.0,
+        },
+        "c": {
+            "candidate_residue_count": 1,
+            "chain_id": "C",
+            "complete_backbone_residue_count": 1,
+            "eligible": True,
+            "incomplete_residues": [],
+            "policy": "strict_complete_backbone_v1",
+            "reason_code": None,
+            "schema_version": 1,
+            "structural_coverage": 1.0,
+        },
+    }
+    quality_hashes = {
+        entry_id: hashlib.sha256(canonical_json_bytes(record)).hexdigest()
+        for entry_id, record in quality_records.items()
+    }
+    eligibility = tmp_path / "eligibility.json"
+    eligibility.write_bytes(
+        canonical_json_bytes(
+            {
+                "binary_sha256": "b" * 64,
+                "dataset": "cath663",
+                "dataset_id_count": len(ids),
+                "dataset_id_set_sha256": canonical_id_set_hash(ids),
+                "dataset_ids": ids,
+                "dataset_sha256": sha256_file(metadata),
+                "eligible_count": len(eligible_ids),
+                "eligible_id_set_sha256": canonical_id_set_hash(eligible_ids),
+                "eligible_ids": eligible_ids,
+                "ineligibility_reason_counts": {"incomplete_backbone": 1},
+                "ineligible_count": len(ineligible_ids),
+                "ineligible_id_set_sha256": canonical_id_set_hash(ineligible_ids),
+                "ineligible_ids": ineligible_ids,
+                "policy": "strict_complete_backbone_v1",
+                "quality_record_sha256s": quality_hashes,
+                "quality_record_tree_sha256": _mapping_hash(quality_hashes),
+                "quality_records": quality_records,
+                "runtime_manifest_sha256": runtime_hash,
+                "runtime_source_git_commit": "1" * 40,
+                "schema_version": 1,
+                "structure_sha256s": structures,
+                "structure_tree_sha256": _mapping_hash(structures),
+            }
+        )
+    )
+    eligibility_hash = sha256_file(eligibility)
     frozen_runtime = {
         "model_manifest_sha256": model_hash,
         "model_artifact_sha256s": {
@@ -107,7 +267,7 @@ def _synthetic_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict
         "cargo_lock_sha256": "e" * 64,
         "selector_cache_contract": acceptance_module.CACHE_CONTRACT,
     }
-    monkeypatch.setattr(acceptance_module, "LOCKED_POPULATION_SIZE", 2)
+    monkeypatch.setattr(acceptance_module, "LOCKED_POPULATION_SIZE", 3)
     monkeypatch.setattr(
         acceptance_module,
         "verify_top_level_manifest",
@@ -122,10 +282,10 @@ def _synthetic_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict
     metadata_by_id = {
         "a": ("1aaa", "A"),
         "b": ("2bbb", "B"),
+        "c": ("3ccc", "C"),
     }
-    structures = {entry_id: (entry_id * 64)[:64] for entry_id in ids}
     common = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "complete",
         "created_at": "2026-01-01T00:00:00+00:00",
         "completed_at": "2026-01-01T00:01:00+00:00",
@@ -133,7 +293,7 @@ def _synthetic_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict
         "platform": "test-platform",
         "dataset": "cath663",
         "dataset_sha256": sha256_file(metadata),
-        "dataset_id_count": 2,
+        "dataset_id_count": len(ids),
         "dataset_ids": ids,
         "dataset_id_set_sha256": canonical_id_set_hash(ids),
         "structure_sha256s": structures,
@@ -152,6 +312,16 @@ def _synthetic_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict
         "gnu_time_version": "GNU time 1.9",
         "model_manifest_sha256": model_hash,
         "runtime_manifest_sha256": runtime_hash,
+        "eligibility_manifest_sha256": eligibility_hash,
+        "eligibility_policy": "strict_complete_backbone_v1",
+        "factorized_eligible_count": len(eligible_ids),
+        "factorized_eligible_id_set_sha256": canonical_id_set_hash(
+            eligible_ids
+        ),
+        "structural_abstention_count": len(ineligible_ids),
+        "structural_abstention_id_set_sha256": canonical_id_set_hash(
+            ineligible_ids
+        ),
         "binary_sha256": "b" * 64,
         "runtime_source_git_commit": "1" * 40,
         "runtime_input_tree_sha256": "c" * 64,
@@ -172,16 +342,22 @@ def _synthetic_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict
         role: str,
         pair_order: str = "",
         pair_position: int | str = "",
+        *,
+        abstain: bool = False,
     ) -> LockedRunRow:
         process = f"raw/sword/{entry_id}/{selector}"
         status = canonical_json_bytes(
             {
-                "error_code": None,
-                "excluded_candidate_count": 0 if selector == "legacy" else 1,
-                "fallback": False,
+                "error_code": (
+                    "structural_quality_abstention" if abstain else None
+                ),
+                "excluded_candidate_count": (
+                    0 if selector == "legacy" or abstain else 1
+                ),
+                "fallback": abstain,
                 "requested_selector": selector,
                 "schema_version": 1,
-                "selector_used": selector,
+                "selector_used": "legacy" if abstain else selector,
             }
         )
         summary_role, summary_hash = add_raw(
@@ -220,11 +396,13 @@ def _synthetic_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict
             stderr_sha256=stderr_hash,
             selector_status_sha256=status_hash,
             requested_selector=selector,
-            selector_used=selector,
-            fallback=False,
-            error_code="",
-            selector_warning_code="",
-            excluded_candidate_count=0 if selector == "legacy" else 1,
+            selector_used="legacy" if abstain else selector,
+            fallback=abstain,
+            error_code=("structural_quality_abstention" if abstain else ""),
+            selector_warning_code=("factorized_fallback" if abstain else ""),
+            excluded_candidate_count=(
+                0 if selector == "legacy" or abstain else 1
+            ),
             binary_sha256="b" * 64,
             model_manifest_sha256=model_hash,
             runtime_manifest_sha256=runtime_hash,
@@ -279,6 +457,7 @@ def _synthetic_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict
     result: dict[str, Path] = {
         "dataset_metadata": metadata,
         "chainsaw_expected_success_ids": chainsaw_ids,
+        "eligibility_manifest": eligibility,
         "model_manifest": model,
         "runtime_manifest": runtime,
         "standalone_baseline": standalone,
@@ -294,7 +473,7 @@ def _synthetic_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict
         failures: list[FailureRow] = []
         order = None
         if short == "resource":
-            assignments = counterbalanced_pair_orders(ids)
+            assignments = counterbalanced_pair_orders(eligible_ids)
             assignment_rows = [[entry_id, first] for entry_id, first in assignments.items()]
             for entry_id, first in assignments.items():
                 second = "factorized" if first == "legacy" else "legacy"
@@ -313,13 +492,25 @@ def _synthetic_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict
             }
         else:
             selector = "legacy" if short == "legacy" else "factorized"
-            runs.extend(sword_row(root, entry_id, selector, role) for entry_id in ids)
+            runs.extend(
+                sword_row(
+                    root,
+                    entry_id,
+                    selector,
+                    role,
+                    abstain=(short == "factorized" and entry_id in ineligible_ids),
+                )
+                for entry_id in ids
+            )
             if short == "legacy":
                 runs.extend(competitor_row(root, entry_id, "merizo") for entry_id in ids)
-                runs.append(competitor_row(root, "a", "chainsaw"))
+                runs.extend(
+                    competitor_row(root, entry_id, "chainsaw")
+                    for entry_id in ("a", "b")
+                )
                 failures.append(
                     FailureRow(
-                        dataset="cath663", entry_id="b", pdb_id="2bbb", chain_id="B",
+                        dataset="cath663", entry_id="c", pdb_id="3ccc", chain_id="C",
                         tool="chainsaw", stage="expected_failure",
                         message="chainsaw_expected_failure", returncode=0,
                         command="[]", stderr=None,
@@ -332,7 +523,7 @@ def _synthetic_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict
         scores_path = root / "scores.csv"
         score_rows: list[dict[str, object]] = []
         if short != "resource":
-            selector_tool_rows = ids
+            selector_tool_rows = eligible_ids if short == "factorized" else ids
             for entry_id in selector_tool_rows:
                 pdb_id, chain_id = metadata_by_id[entry_id]
                 score_rows.append(
@@ -343,7 +534,10 @@ def _synthetic_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict
                      "boundary_f1_10": 0.7}
                 )
             if short == "legacy":
-                for tool, tool_ids, ndo in (("merizo", ids, 0.2), ("chainsaw", ["a"], 0.2)):
+                for tool, tool_ids, ndo in (
+                    ("merizo", ids, 0.2),
+                    ("chainsaw", ["a", "b"], 0.2),
+                ):
                     for entry_id in tool_ids:
                         pdb_id, chain_id = metadata_by_id[entry_id]
                         score_rows.append(
@@ -362,13 +556,20 @@ def _synthetic_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict
             if path.is_file()
         }
         success = (
-            {"sword2-rust:factorized": set(ids), "sword2-rust:legacy": set(ids)}
+            {
+                "sword2-rust:factorized": set(eligible_ids),
+                "sword2-rust:legacy": set(eligible_ids),
+            }
             if short == "resource"
-            else {"sword2-rust": set(ids)}
+            else {
+                "sword2-rust": (
+                    set(eligible_ids) if short == "factorized" else set(ids)
+                )
+            }
         )
         if short == "legacy":
-            success.update({"merizo": set(ids), "chainsaw": {"a"}})
-        failure_sets = {"chainsaw": {"b"}} if short == "legacy" else {}
+            success.update({"merizo": set(ids), "chainsaw": {"a", "b"}})
+        failure_sets = {"chainsaw": {"c"}} if short == "legacy" else {}
         artifacts = {}
         if short == "legacy":
             artifacts = {
@@ -399,7 +600,9 @@ def _synthetic_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict
                 ),
                 "--no-download", "--strict",
                 "--locked-factorized-manifest", "<runtime_manifest>",
+                "--locked-eligibility-manifest", "<eligibility_manifest>",
                 "--locked-role", role,
+                "--locked-jobs", "1" if short == "resource" else "32",
                 *(
                     [
                         "--chainsaw-expected-success-ids", "<chainsaw_expected_success_ids>",
@@ -424,11 +627,12 @@ def _synthetic_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict
             "raw_evidence_tree_sha256": _mapping_hash(raw_hashes),
             "tools": ["sword2-rust", "merizo", "chainsaw"] if short == "legacy" else ["sword2-rust"],
             "sword2_extra_args": ["--use-factorized-ranker"] if short == "factorized" else [],
+            "locked_jobs": 1 if short == "resource" else 32,
             "external_artifacts": artifacts,
             "expected_chainsaw": (
-                {"file_sha256": sha256_file(chainsaw_ids), "success_count": 1,
-                 "success_id_set_sha256": canonical_id_set_hash(["a"]), "failure_count": 1,
-                 "failure_id_set_sha256": canonical_id_set_hash(["b"])}
+                {"file_sha256": sha256_file(chainsaw_ids), "success_count": 2,
+                 "success_id_set_sha256": canonical_id_set_hash(["a", "b"]), "failure_count": 1,
+                 "failure_id_set_sha256": canonical_id_set_hash(["c"])}
                 if short == "legacy" else None
             ),
             "order_design": order,
@@ -438,7 +642,7 @@ def _synthetic_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict
             "failure_id_counts": {name: len(values) for name, values in sorted(failure_sets.items())},
             "failure_id_set_sha256s": {name: canonical_id_set_hash(values) for name, values in sorted(failure_sets.items())},
             "selector_counts": selector_counts,
-            "fallback_count": 0,
+            "fallback_count": 1 if short == "factorized" else 0,
             "excluded_candidate_count": sum(
                 int(row.excluded_candidate_count)
                 for row in runs
@@ -593,7 +797,7 @@ def test_acceptance_reports_are_canonical_deterministic_and_absent_only(tmp_path
         for name, (value, threshold, comparison, denominator_role, method) in rules.items()
     }
     results = {
-        "schema_version": 1,
+        "schema_version": acceptance_module.ACCEPTANCE_SCHEMA_VERSION,
         "gate_order": list(GATE_ORDER),
         "bootstrap": BOOTSTRAP,
         "model_manifest_sha256": "a" * 64,
@@ -602,7 +806,40 @@ def test_acceptance_reports_are_canonical_deterministic_and_absent_only(tmp_path
         "evidence_sha256s": evidence,
         "denominators": denominators,
         "gates": gates,
-        "diagnostics": {},
+        "diagnostics": {
+            "accuracy": {},
+            "resources": {},
+            "structural_coverage": {
+                "full_denominator": 4,
+                "factorized_eligible_count": 4,
+                "structural_abstention_count": 0,
+                "factorized_structural_coverage": 1.0,
+                "ineligibility_reason_counts": {},
+            },
+            "conditional_mean_ndo": {
+                "factorized": 0.9,
+                "runtime_legacy": 0.8,
+                "merizo": 0.7,
+                "chainsaw": 0.7,
+                "chainsaw_denominator": 2,
+            },
+            "full_population_mean_ndo": {
+                "runtime_legacy": 0.8,
+                "merizo": 0.7,
+                "chainsaw": 0.7,
+                "chainsaw_denominator": 2,
+            },
+            "selector_counts": {
+                "legacy": {"legacy": 4, "factorized": 0},
+                "factorized": {"legacy": 0, "factorized": 4},
+                "resource": {"legacy": 4, "factorized": 4},
+            },
+            "fallback_count": 0,
+            "excluded_candidate_count": 0,
+            "resource_order_sha256": "d" * 64,
+            "source_sha256s": evidence,
+            "default_promotion_compatible": False,
+        },
         "all_gates_measured": True,
         "all_gates_pass": True,
     }
@@ -626,7 +863,12 @@ def test_synthetic_coverage_precedes_metrics_and_evaluation_is_deterministic(
     assert main(["coverage", *_evidence_cli_args(paths), "--coverage-out", str(coverage)]) == 0
     coverage_payload = json.loads(coverage.read_bytes())
     assert coverage_payload["valid"] is True
-    assert coverage_payload["dataset_id_count"] == 2
+    assert coverage_payload["dataset_id_count"] == 3
+    assert coverage_payload["factorized_eligible_count"] == 2
+    assert coverage_payload["structural_abstention_count"] == 1
+    assert coverage_payload["factorized_structural_coverage"] == 2 / 3
+    assert coverage_payload["resource_pair_count"] == 2
+    assert coverage_payload["fallback_count"] == 1
     assert not ({"ndo", "boundary_f1_10", "runtime_median_ratio"} & set(coverage_payload))
 
     first_json = tmp_path / "first.json"
@@ -653,6 +895,17 @@ def test_synthetic_coverage_precedes_metrics_and_evaluation_is_deterministic(
         "discontinuous": 1,
         "resources": 2,
     }
+    assert payload["diagnostics"]["structural_coverage"] == {
+        "full_denominator": 3,
+        "factorized_eligible_count": 2,
+        "structural_abstention_count": 1,
+        "factorized_structural_coverage": 2 / 3,
+        "ineligibility_reason_counts": {"incomplete_backbone": 1},
+    }
+    assert payload["diagnostics"]["default_promotion_compatible"] is False
+    markdown = first_markdown.read_text()
+    assert "Structural coverage: 2/3 (66.666667%); abstentions: 1." in markdown
+    assert "Legacy fallbacks for abstained chains are not factorized scores." in markdown
 
     second_json = tmp_path / "second.json"
     second_markdown = tmp_path / "second.md"
@@ -697,6 +950,136 @@ def test_coverage_rejects_duplicate_rank_one_and_tampered_raw_evidence(
                 *_evidence_cli_args(paths),
                 "--coverage-out",
                 str(tmp_path / "tampered.json"),
+            ]
+        )
+
+
+@pytest.mark.parametrize("mutation", ["score_abstention", "missing_eligible"])
+def test_coverage_rejects_factorized_score_cohort_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+):
+    paths = _synthetic_evidence(tmp_path, monkeypatch)
+    scores_path = paths["factorized_scores"]
+    rows = list(csv.DictReader(scores_path.open(newline="")))
+    if mutation == "score_abstention":
+        leaked = dict(rows[0])
+        leaked.update({"entry_id": "b", "pdb_id": "2bbb", "chain_id": "B"})
+        rows.append(leaked)
+    else:
+        rows = [row for row in rows if row["entry_id"] != "a"]
+    _write_score_rows(scores_path, rows)
+    manifest = _refresh_manifest_file_hashes(paths, "factorized")
+    manifest["row_counts"]["scores"] = len(rows)
+    paths["factorized_manifest"].write_bytes(canonical_json_bytes(manifest))
+
+    with pytest.raises(acceptance_module.InvalidEvidence):
+        main(
+            [
+                "coverage",
+                *_evidence_cli_args(paths),
+                "--coverage-out",
+                str(tmp_path / "invalid.json"),
+            ]
+        )
+
+
+@pytest.mark.parametrize(
+    ("entry_id", "success", "error_code", "exclusions"),
+    [
+        ("b", True, "", 0),
+        ("a", False, "structural_quality_abstention", 0),
+        ("b", False, "feature_missing_context", 0),
+        ("b", False, "structural_quality_abstention", 1),
+    ],
+)
+def test_coverage_rejects_status_disagreement_with_frozen_eligibility(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entry_id: str,
+    success: bool,
+    error_code: str,
+    exclusions: int,
+):
+    paths = _synthetic_evidence(tmp_path, monkeypatch)
+    _rewrite_factorized_status(
+        paths,
+        entry_id,
+        success=success,
+        error_code=error_code,
+        exclusions=exclusions,
+    )
+
+    with pytest.raises(acceptance_module.InvalidEvidence):
+        main(
+            [
+                "coverage",
+                *_evidence_cli_args(paths),
+                "--coverage-out",
+                str(tmp_path / "invalid.json"),
+            ]
+        )
+
+
+def test_coverage_rejects_missing_eligible_resource_pair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    paths = _synthetic_evidence(tmp_path, monkeypatch)
+    runs_path = paths["resource_runs"]
+    rows = [
+        row
+        for row in csv.DictReader(runs_path.open(newline=""))
+        if row["entry_id"] != "c"
+    ]
+    _rewrite_dict_rows(runs_path, rows)
+    manifest = _refresh_manifest_file_hashes(paths, "resource")
+    manifest["row_counts"]["runs"] = len(rows)
+    manifest["selector_counts"] = {
+        "legacy": sum(row["selector_variant"] == "legacy" for row in rows),
+        "factorized": sum(
+            row["selector_variant"] == "factorized" for row in rows
+        ),
+    }
+    paths["resource_manifest"].write_bytes(canonical_json_bytes(manifest))
+
+    with pytest.raises(acceptance_module.InvalidEvidence, match="resource"):
+        main(
+            [
+                "coverage",
+                *_evidence_cli_args(paths),
+                "--coverage-out",
+                str(tmp_path / "invalid.json"),
+            ]
+        )
+
+
+@pytest.mark.parametrize("mutation", ["dataset_hash", "dataset_order", "policy"])
+def test_coverage_rejects_tampered_eligibility_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+):
+    paths = _synthetic_evidence(tmp_path, monkeypatch)
+    eligibility_path = paths["eligibility_manifest"]
+    eligibility = json.loads(eligibility_path.read_bytes())
+    if mutation == "dataset_hash":
+        eligibility["dataset_sha256"] = "f" * 64
+    elif mutation == "dataset_order":
+        eligibility["dataset_ids"] = ["c", "b", "a"]
+        eligibility["eligible_ids"] = ["c", "a"]
+    else:
+        eligibility["policy"] = "permissive_backbone"
+    eligibility_path.write_bytes(canonical_json_bytes(eligibility))
+
+    with pytest.raises(acceptance_module.InvalidEvidence, match="eligibility"):
+        main(
+            [
+                "coverage",
+                *_evidence_cli_args(paths),
+                "--coverage-out",
+                str(tmp_path / "invalid.json"),
             ]
         )
 
@@ -781,7 +1164,10 @@ def test_promotion_rederives_committed_bytes_and_keeps_nonpromotable_cache_opt_i
         ]
     )
     assert exit_code == 1
-    assert capsys.readouterr().out == "KEEP_OPT_IN cache_context_not_promotable\n"
+    assert capsys.readouterr().out == (
+        "KEEP_OPT_IN structural_coverage_incomplete "
+        "cache_context_not_promotable\n"
+    )
 
     payload = json.loads(acceptance.read_bytes())
     payload["all_gates_pass"] = False
