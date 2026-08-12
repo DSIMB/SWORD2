@@ -269,6 +269,7 @@ def _validate_semantic_command(
     executable: str,
     path_roles: Mapping[str, str],
     allow_seed: bool,
+    allow_jobs: bool = False,
     allowed_flags: frozenset[str] = frozenset(),
     description: str,
 ) -> tuple[str, ...]:
@@ -307,6 +308,20 @@ def _validate_semantic_command(
                 index += 2
             if observed != "37":
                 raise ValueError(f"{description} seed is not 37")
+            seen.add(option)
+        elif allow_jobs and option == "--jobs":
+            if option in seen:
+                raise ValueError(f"{description} repeats --jobs")
+            if separator:
+                observed = inline
+                index += 1
+            else:
+                if index + 1 >= len(tokens):
+                    raise ValueError(f"{description} --jobs has no value")
+                observed = tokens[index + 1]
+                index += 2
+            if observed not in ("1", "2", "3", "4", "5", "6", "7", "8"):
+                raise ValueError(f"{description} jobs is not in 1..=8")
             seen.add(option)
         elif option in allowed_flags:
             if separator or option in seen:
@@ -369,6 +384,7 @@ def validate_export_manifest(manifest: Mapping[str, object]) -> None:
         executable="benchmark.train_factorized_ranker",
         path_roles=_TRAINING_PATH_ROLES,
         allow_seed=True,
+        allow_jobs=True,
         allowed_flags=frozenset({"--resume"}),
         description="manifest training command",
     )

@@ -214,6 +214,8 @@ def export_inputs(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
         "<COUNT_MODEL_OUT>",
         "--candidate-model-out",
         "<CANDIDATE_MODEL_OUT>",
+        "--jobs",
+        "8",
         "--resume",
     )
     versions = {
@@ -614,6 +616,30 @@ def test_complete_export_is_byte_identical_and_manifest_bound(
     assert verify_top_level_manifest(
         model_dir / "factorized_ranker_v1_manifest.json"
     ) == manifest
+
+
+def test_export_manifest_rejects_invalid_parallel_training_jobs(
+    tmp_path: Path, export_inputs: dict[str, Path]
+) -> None:
+    manifest = _export(export_inputs, tmp_path / "valid").manifest
+    command = list(manifest["training_command"])
+    jobs_index = command.index("--jobs")
+    invalid_jobs = (
+        ["--jobs"],
+        ["--jobs", "0"],
+        ["--jobs", "9"],
+        ["--jobs", "eight"],
+        ["--jobs="],
+    )
+    for replacement in invalid_jobs:
+        changed = dict(manifest)
+        changed["training_command"] = [
+            *command[:jobs_index],
+            *replacement,
+            *command[jobs_index + 2 :],
+        ]
+        with pytest.raises(ValueError, match="jobs"):
+            validate_export_manifest(changed)
 
 
 def test_input_failure_leaves_all_existing_outputs_untouched(
