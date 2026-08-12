@@ -204,6 +204,19 @@ def _stable_file_hash_and_size(path: Path) -> tuple[str, int]:
     return digest.hexdigest(), byte_count
 
 
+def _stable_symlink_hash_and_size(path: Path) -> tuple[str, int]:
+    before = path.lstat()
+    if not stat.S_ISLNK(before.st_mode):
+        raise ValueError(f"input is not a symlink: {path}")
+    target = os.fsencode(os.readlink(path))
+    after = path.lstat()
+    identity_before = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+    identity_after = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+    if identity_before != identity_after:
+        raise ValueError(f"input changed while hashing: {path}")
+    return hashlib.sha256(b"symlink\0" + target).hexdigest(), len(target)
+
+
 def sha256_file(path: Path) -> str:
     return _stable_file_hash_and_size(path)[0]
 
@@ -304,7 +317,17 @@ def hash_file_or_tree(path: Path) -> dict[str, object]:
         child_info = child.lstat()
         relative = _canonical_relative_path(child.relative_to(root).as_posix())
         if stat.S_ISLNK(child_info.st_mode):
-            raise ValueError(f"artifact tree contains a symlink: {relative}")
+            digest, size = _stable_symlink_hash_and_size(child)
+            mapping[relative] = digest
+            byte_count += size
+            snapshot[relative] = (
+                child_info.st_mode,
+                child_info.st_dev,
+                child_info.st_ino,
+                child_info.st_size,
+                child_info.st_mtime_ns,
+            )
+            continue
         if stat.S_ISDIR(child_info.st_mode):
             continue
         if not stat.S_ISREG(child_info.st_mode):

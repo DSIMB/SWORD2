@@ -15,6 +15,7 @@ from benchmark.factorized_ranker.runtime_freeze import (
     canonical_id_set_hash,
     canonical_json_bytes,
     hash_directory_tree,
+    hash_file_or_tree,
     write_runtime_freeze,
 )
 
@@ -110,6 +111,20 @@ def test_canonical_runtime_helpers_are_root_independent_and_strict(tmp_path: Pat
     (left / "link").symlink_to(left / "a.txt")
     with pytest.raises(ValueError, match="symlink"):
         hash_directory_tree(left)
+
+
+def test_opaque_artifact_tree_hashes_symlink_target_without_following(tmp_path: Path):
+    root = tmp_path / "artifact"
+    root.mkdir()
+    (root / "payload.txt").write_bytes(b"payload\n")
+    (root / "relative-link").symlink_to("payload.txt")
+
+    assert hash_file_or_tree(root) == {
+        "kind": "tree",
+        "byte_count": 19,
+        "file_count": 2,
+        "sha256": "f9e30f8564dee7116cb1e8e4c0b439ce80738670caa7aca2065dac0936d14971",
+    }
 
 
 def test_runtime_manifest_write_is_canonical_absent_only_and_cache_is_frozen(tmp_path: Path):
