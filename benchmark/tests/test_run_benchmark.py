@@ -428,3 +428,34 @@ def test_locked_merizo_split_is_absent_only_and_exact(tmp_path: Path):
             "input\tresult\n/tmp/other.pdb\t1-10\n",
             fresh,
         )
+
+
+def test_locked_merizo_split_accepts_exact_repeated_batch_headers(tmp_path: Path):
+    inputs = [
+        (tmp_path / "a.pdb", tmp_path / "out/a.tsv", "A"),
+        (tmp_path / "b.pdb", tmp_path / "out/b.tsv", "A"),
+    ]
+    stdout = (
+        "input\tresult\tndom\n"
+        "/tmp/a.pdb\t1-10\t1\n"
+        "input\tresult\tndom\n"
+        "/tmp/b.pdb\t1-20\t1\n"
+    )
+
+    _split_locked_merizo_stdout(stdout, inputs)
+
+    assert inputs[0][1].read_text() == (
+        "input\tresult\tndom\n/tmp/a.pdb\t1-10\t1\n"
+    )
+    assert inputs[1][1].read_text() == (
+        "input\tresult\tndom\n/tmp/b.pdb\t1-20\t1\n"
+    )
+
+    altered = [(tmp_path / "a.pdb", tmp_path / "altered/a.tsv", "A")]
+    with pytest.raises(ValueError, match="unknown input"):
+        _split_locked_merizo_stdout(
+            "input\tresult\tndom\n"
+            "/tmp/a.pdb\t1-10\t1\n"
+            "input\tndom\tresult\n",
+            altered,
+        )

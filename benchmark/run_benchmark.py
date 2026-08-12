@@ -1788,7 +1788,12 @@ def _split_locked_merizo_stdout(
     if not lines or not lines[0] or any(not line for line in lines):
         raise LockedBenchmarkError("locked Merizo stdout is empty or noncanonical")
     try:
-        reader = csv.DictReader(lines, delimiter="\t")
+        header = lines[0]
+        # Merizo prints the complete TSV header before each result in a batch.
+        # Accept only byte-identical repetitions; any altered header remains a
+        # data row and fails the ordinary schema/identity checks below.
+        normalized_lines = [header, *(line for line in lines[1:] if line != header)]
+        reader = csv.DictReader(normalized_lines, delimiter="\t")
         fieldnames = reader.fieldnames
         if (
             not fieldnames
